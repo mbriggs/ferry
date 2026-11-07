@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,11 +32,11 @@ func TestRefusesToDropCommitsOnACleanReceiver(t *testing.T) {
 func TestRerunConvergesAfterTheSourceChanged(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.write(w.kant, ".claude/projects", "not a directory, so installing the session fails")
+	unblock := w.blockStaging()
 	if out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch"); err == nil {
 		t.Fatalf("first run should fail:\n%s", out)
 	}
-	os.Remove(filepath.Join(w.kant, ".claude/projects"))
+	unblock()
 	// The laptop still owns the task, so work continues there.
 	w.write(wt, "more.txt", "kept working on the laptop\n")
 	want, _ := fingerprint(wt)

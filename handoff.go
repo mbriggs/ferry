@@ -114,12 +114,6 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- session -----------------------------------------------------------
-	// An interrupted run may have left the transcript parked on its way out.
-	if rec != nil && rec.State == stateHandingOff && rec.From == si.Name {
-		if err := src.Unpark(t.Key); err != nil {
-			return err
-		}
-	}
 	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
 	switch {
 	case opts.SessionID != "":
@@ -138,14 +132,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(sess.ID), rel, t.WtRel)
 		}
 		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
-		live, err := src.Liveness(*sess)
-		for i := 0; err == nil && live.Settling && i < 20; i++ {
-			if i == 0 {
-				step("agent", "%s; waiting for it to settle", live.Detail)
-			}
-			time.Sleep(500 * time.Millisecond)
-			live, err = src.Liveness(*sess)
-		}
+		live, err := settle(src, *sess)
 		if err != nil {
 			return err
 		}
@@ -156,6 +143,17 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			step("agent", "%s: stopping the idle agent in rex", si.Name)
 			if err := src.StopAgent(StopReq{Session: *sess, RexSession: rec.RexSession, Name: t.Name}); err != nil {
 				return err
+			}
+			// The agent writes its last lines on the way out; the record keeps
+			// the session as it is once that stops, since a rerun compares
+			// against it.
+			if _, err := settle(src, *sess); err != nil {
+				return err
+			}
+			if sess, err = src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID}); err != nil {
+				return err
+			} else if sess == nil {
+				return fmt.Errorf("%s: the session disappeared after stopping the agent", si.Name)
 			}
 		}
 		if live, err := dst.Liveness(*sess); err != nil {
@@ -322,48 +320,21 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- session -----------------------------------------------------------
-	// The source copy is parked before the receiver gets one, so at no point
-	// can both machines resume it. Until the commit point, a failure puts it
-	// back and parks whatever the receiver installed.
+	// The session is staged on the receiver, with paths rewritten, but nothing
+	// live moves until after the commit point. A failure before then leaves
+	// the source exactly as it was.
 	var installed *Session
-	parked := false
-	undo := func(cause error) error {
-		if !parked {
-			return cause
-		}
-		if installed != nil {
-			if err := dst.Park(ParkReq{Session: *installed, Task: t.Key, As: "aborted-" + time.Now().Format("20060102-150405")}); err != nil {
-				step("park", "%s: couldn't park the copy installed there: %v", di.Name, err)
-			}
-		}
-		if err := src.Unpark(t.Key); err != nil {
-			return fmt.Errorf("%w; putting the transcript back on %s also failed: %v", cause, si.Name, err)
-		}
-		step("park", "%s: transcript put back", si.Name)
-		return cause
-	}
 	if sess != nil {
-		if live, err := src.Liveness(*sess); err != nil {
-			return err
-		} else if live.Live && !live.Settling {
-			return fmt.Errorf("%s started again; exit it, then run this again", live.Detail)
-		}
-		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, As: "outgoing"}); err != nil {
-			return err
-		}
-		parked = true
-		step("park", "%s: transcript parked while it travels", si.Name)
 		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-		outgoing := filepath.Join(".local", "state", "ferry", "parked", t.Key+"-outgoing")
-		if err := transfer(src, ExportReq{Paths: sess.Files, Prefer: outgoing}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
-			return undo(err)
+		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
+			return err
 		}
-		s, err := dst.InstallSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
+		s, err := dst.StageSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
 		if err != nil {
-			return undo(err)
+			return err
 		}
 		installed = &s
-		step("session", "%s installed on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
+		step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
 	}
 
 	// --- commit ------------------------------------------------------------
@@ -389,23 +360,59 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
-		// The write may have landed even though the reply didn't.
-		if cur, gerr := hub.RecordGet(t.Key); gerr != nil || cur == nil || cur.Generation != rec.Generation || cur.Owner != di.Name {
-			return undo(err)
-		}
+		return err
 	}
 	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
 
 	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
 }
 
-// finish runs the steps after the commit point: park the source copy, run
-// restore, and start the agent. Each is safe to repeat.
+// settle waits up to ten seconds for a session's transcript to stop changing.
+func settle(m Machine, s Session) (Liveness, error) {
+	live, err := m.Liveness(s)
+	for i := 0; err == nil && live.Settling && i < 20; i++ {
+		if i == 0 {
+			step("agent", "%s; waiting for it to settle", live.Detail)
+		}
+		time.Sleep(500 * time.Millisecond)
+		live, err = m.Liveness(s)
+	}
+	return live, err
+}
+
+// finish runs the steps after the commit point: park the source copy, move
+// the staged session into place, run restore, and start the agent. Each is
+// safe to repeat. The source is parked before the receiver's copy goes live,
+// so at no point can both machines resume it.
 func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts) error {
 	if sess != nil {
-		if err := src.ArchivePark(ParkReq{Session: *sess, Task: t.Key, As: fmt.Sprintf("g%d", rec.Generation)}); err != nil {
+		// On a rerun, the source copy is still live if parking never ran. If
+		// someone resumed it since the commit, the staged copy is stale.
+		cur, err := src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID})
+		if err != nil {
 			return err
 		}
+		if cur != nil {
+			if live, err := src.Liveness(*cur); err != nil {
+				return err
+			} else if live.Live && !live.Settling {
+				return fmt.Errorf("%s: %s; exit it, then run this again", si.Name, live.Detail)
+			}
+			if cur.Size != sess.Size {
+				return fmt.Errorf("%s: session %s changed after it was handed off (%s, was %s); %s owns the task now, so its copy wins. Move the newer one aside on %s to continue",
+					si.Name, short(sess.ID), humanSize(cur.Size), humanSize(sess.Size), di.Name, si.Name)
+			}
+		}
+		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, As: fmt.Sprintf("g%d", rec.Generation)}); err != nil {
+			return err
+		}
+		step("park", "%s: transcript moved to ~/.local/state/ferry/parked/", si.Name)
+	}
+	if installed != nil {
+		if err := dst.PlaceSession(PlaceReq{Session: *installed, Task: t.Key}); err != nil {
+			return err
+		}
+		step("session", "%s: %s is live", di.Name, short(installed.ID))
 	}
 	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, rec.Changes)
 	if err != nil {

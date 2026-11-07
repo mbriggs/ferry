@@ -390,16 +390,22 @@ type InstallReq struct {
 	Task     string  `json:"task"`
 }
 
-// InstallSession moves staged session files into the agent's live
-// directories, rewriting the source home to this one. Claude's project
-// directory is renamed for the new cwd. File-history backups are file
-// contents, so they are copied untouched. This is the handoff's commit point
-// for the receiving side.
-func (l *Local) InstallSession(q InstallReq) (Session, error) {
+// StageSession checks and prepares session files staged from the other
+// machine without touching anything live: every file must belong to the
+// session, the source home is rewritten to this one, and Claude's project
+// directory is renamed for the new cwd. The result sits in
+// ~/.local/state/ferry/in/<task>/ready until PlaceSession moves it into
+// place. File-history backups are file contents, so they are copied untouched.
+func (l *Local) StageSession(q InstallReq) (Session, error) {
 	if err := checkSessionID(q.Session.ID); err != nil {
 		return Session{}, err
 	}
+	ready, err := l.readyDir(q.Task)
+	if err != nil {
+		return Session{}, err
+	}
 	stage := l.abs(q.StageRel)
+	defer os.RemoveAll(stage)
 	rel, err := filepath.Rel(q.OldHome, q.Session.Cwd)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return Session{}, fmt.Errorf("session cwd %s is outside %s", q.Session.Cwd, q.OldHome)
@@ -414,8 +420,9 @@ func (l *Local) InstallSession(q InstallReq) (Session, error) {
 		}
 		return r
 	}
-	type move struct{ from, to string }
-	var moves []move
+	if err := os.RemoveAll(ready); err != nil {
+		return Session{}, err
+	}
 	err = filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -424,63 +431,91 @@ func (l *Local) InstallSession(q InstallReq) (Session, error) {
 		if !d.Type().IsRegular() || !sessionPathOK(q.Session.Agent, q.Session.ID, oldProj, r) {
 			return fmt.Errorf("refusing %s: not part of %s session %s", r, q.Session.Agent, q.Session.ID)
 		}
-		dest := mapRel(r)
-		if strings.HasSuffix(p, ".jsonl") || strings.HasSuffix(p, ".json") {
-			if !strings.HasPrefix(r, filepath.Join(".claude", "file-history")) {
-				data, err := os.ReadFile(p)
-				if err != nil {
-					return err
-				}
-				rewrite := rewriteHomeLines
-				if strings.HasSuffix(p, ".json") {
-					rewrite = func(b []byte, o, n string) ([]byte, int, error) { return rewriteHome(b, o, n) }
-				}
-				got, _, err := rewrite(data, q.OldHome, l.Home)
-				if err != nil {
-					return fmt.Errorf("%s: %w", r, err)
-				}
-				if err := os.WriteFile(p, got, 0o600); err != nil {
-					return err
-				}
+		if (strings.HasSuffix(p, ".jsonl") || strings.HasSuffix(p, ".json")) && !strings.HasPrefix(r, filepath.Join(".claude", "file-history")) {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			rewrite := rewriteHomeLines
+			if strings.HasSuffix(p, ".json") {
+				rewrite = func(b []byte, o, n string) ([]byte, int, error) { return rewriteHome(b, o, n) }
+			}
+			got, _, err := rewrite(data, q.OldHome, l.Home)
+			if err != nil {
+				return fmt.Errorf("%s: %w", r, err)
+			}
+			if err := os.WriteFile(p, got, 0o600); err != nil {
+				return err
 			}
 		}
-		moves = append(moves, move{p, l.abs(dest)})
-		return nil
+		return moveFile(p, filepath.Join(ready, mapRel(r)))
 	})
 	if err != nil {
-		os.RemoveAll(stage)
+		os.RemoveAll(ready)
 		return Session{}, err
-	}
-	parked := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))
-	for _, m := range moves {
-		if exists(m.to) {
-			r, _ := filepath.Rel(l.Home, m.to)
-			if err := moveFile(m.to, filepath.Join(parked, r)); err != nil {
-				return Session{}, err
-			}
-		}
-		if err := moveFile(m.from, m.to); err != nil {
-			return Session{}, err
-		}
 	}
 	out.Files = nil
 	for _, f := range q.Session.Files {
 		out.Files = append(out.Files, mapRel(f))
 	}
-	os.RemoveAll(stage)
 	return out, nil
+}
+
+type PlaceReq struct {
+	Session Session `json:"session"` // as StageSession returned it
+	Task    string  `json:"task"`
+}
+
+// PlaceSession moves a staged session into the agent's live directories,
+// parking any copy already there. Once it's done there is nothing staged, so
+// running it again does nothing.
+func (l *Local) PlaceSession(q PlaceReq) error {
+	if err := checkSessionID(q.Session.ID); err != nil {
+		return err
+	}
+	ready, err := l.readyDir(q.Task)
+	if err != nil || !isDir(ready) {
+		return err
+	}
+	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
+	replaced := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))
+	err = filepath.WalkDir(ready, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		r, _ := filepath.Rel(ready, p)
+		if !d.Type().IsRegular() || !sessionPathOK(q.Session.Agent, q.Session.ID, proj, r) {
+			return fmt.Errorf("refusing %s: not part of %s session %s", r, q.Session.Agent, q.Session.ID)
+		}
+		if exists(l.abs(r)) {
+			if err := moveFile(l.abs(r), filepath.Join(replaced, r)); err != nil {
+				return err
+			}
+		}
+		return moveFile(p, l.abs(r))
+	})
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(ready)
+}
+
+func (l *Local) readyDir(task string) (string, error) {
+	if !taskPattern.MatchString(task) {
+		return "", fmt.Errorf("bad task key %q", task)
+	}
+	return l.stateDir("in", task, "ready"), nil
 }
 
 type ParkReq struct {
 	Session Session `json:"session"`
 	Task    string  `json:"task"`
-	// As names the parked copy: "outgoing" while a handoff is sending it,
-	// or "aborted-<time>" for a receiver's copy from a handoff that failed.
+	// As names the parked copy: "g<generation>" for a handed-off session.
 	As string `json:"as"`
 }
 
 var (
-	parkName    = regexp.MustCompile(`^(outgoing|aborted-[0-9-]+|extras-[0-9-]+|g[0-9]+)$`)
+	parkName    = regexp.MustCompile(`^(extras-[0-9-]+|g[0-9]+)$`)
 	taskPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 )
 
@@ -520,46 +555,6 @@ func (l *Local) Park(q ParkReq) error {
 		}
 	}
 	return nil
-}
-
-// Unpark puts a task's outgoing session back where the agent finds it, after
-// a handoff that parked it failed before the receiver took ownership.
-func (l *Local) Unpark(task string) error {
-	dir, err := l.parkDir(task, "outgoing")
-	if err != nil || !isDir(dir) {
-		return err
-	}
-	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, _ := filepath.Rel(dir, p)
-		if exists(l.abs(rel)) {
-			return fmt.Errorf("can't put back %s: something new is there; the parked copy is in %s", rel, dir)
-		}
-		return moveFile(p, l.abs(rel))
-	})
-	if err != nil {
-		return err
-	}
-	return os.RemoveAll(dir)
-}
-
-// ArchivePark files the outgoing copy under the generation that handed it
-// off, once the receiver owns the task.
-func (l *Local) ArchivePark(q ParkReq) error {
-	dir, err := l.parkDir(q.Task, "outgoing")
-	if err != nil {
-		return err
-	}
-	dest, err := l.parkDir(q.Task, q.As)
-	if err != nil || !isDir(dir) {
-		return err
-	}
-	if exists(dest) {
-		return fmt.Errorf("%s already exists", dest)
-	}
-	return os.Rename(dir, dest)
 }
 
 func moveFile(from, to string) error {

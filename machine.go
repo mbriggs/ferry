@@ -29,11 +29,10 @@ type Machine interface {
 	ListExtras(wtRel string) ([]FileEntry, error)
 	Export(req ExportReq, w io.Writer) error
 	Import(req ImportReq, r io.Reader) error
-	InstallSession(InstallReq) (Session, error)
+	StageSession(InstallReq) (Session, error)
+	PlaceSession(PlaceReq) error
 	InstallExtras(InstallExtrasReq) (InstallExtrasResult, error)
 	Park(ParkReq) error
-	Unpark(task string) error
-	ArchivePark(ParkReq) error
 	RecordGet(task string) (*Record, error)
 	RecordPut(RecordPutReq) error
 	RecordList() ([]Record, error)
@@ -164,18 +163,17 @@ func (r *Remote) Import(q ImportReq, rd io.Reader) error {
 	var v struct{}
 	return r.call("import", q, &v, rd, nil)
 }
-func (r *Remote) InstallSession(q InstallReq) (Session, error) {
-	return rpc[Session](r, "install-session", q)
+func (r *Remote) StageSession(q InstallReq) (Session, error) {
+	return rpc[Session](r, "stage-session", q)
+}
+func (r *Remote) PlaceSession(q PlaceReq) error {
+	_, err := rpc[struct{}](r, "place-session", q)
+	return err
 }
 func (r *Remote) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 	return rpc[InstallExtrasResult](r, "install-extras", q)
 }
-func (r *Remote) Park(q ParkReq) error     { _, err := rpc[struct{}](r, "park", q); return err }
-func (r *Remote) Unpark(task string) error { _, err := rpc[struct{}](r, "unpark", task); return err }
-func (r *Remote) ArchivePark(q ParkReq) error {
-	_, err := rpc[struct{}](r, "archive-park", q)
-	return err
-}
+func (r *Remote) Park(q ParkReq) error                   { _, err := rpc[struct{}](r, "park", q); return err }
 func (r *Remote) RecordGet(task string) (*Record, error) { return rpc[*Record](r, "record-get", task) }
 func (r *Remote) RecordPut(q RecordPutReq) error {
 	_, err := rpc[struct{}](r, "record-put", q)
@@ -307,12 +305,18 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return none, l.Import(q, os.Stdin)
-	case "install-session":
+	case "stage-session":
 		q, err := decode[InstallReq](raw)
 		if err != nil {
 			return nil, err
 		}
-		return l.InstallSession(q)
+		return l.StageSession(q)
+	case "place-session":
+		q, err := decode[PlaceReq](raw)
+		if err != nil {
+			return nil, err
+		}
+		return none, l.PlaceSession(q)
 	case "install-extras":
 		q, err := decode[InstallExtrasReq](raw)
 		if err != nil {
@@ -325,18 +329,6 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return none, l.Park(q)
-	case "unpark":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.Unpark(q)
-	case "archive-park":
-		q, err := decode[ParkReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.ArchivePark(q)
 	case "record-get":
 		q, err := decode[string](raw)
 		if err != nil {

