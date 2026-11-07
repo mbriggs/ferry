@@ -277,22 +277,53 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if err != nil {
 		return err
 	}
-	if len(extras) > 0 {
-		var names []string
-		var paths []string
+	// Extras di sent last time that si no longer has were deleted here.
+	incoming := map[string]bool{}
+	for _, e := range extras {
+		incoming[e.Path] = true
+	}
+	var gone []FileEntry
+	for _, e := range rec.Extras[di.Name] {
+		if !incoming[e.Path] {
+			gone = append(gone, e)
+		}
+	}
+	sentExtras := false
+	if len(extras) > 0 || len(gone) > 0 {
+		var names, paths, goneNames []string
 		for _, e := range extras {
 			names = append(names, fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size)))
 			paths = append(paths, e.Path)
 		}
-		step("extras", "%s", strings.Join(names, ", "))
-		if opts.Yes || confirm("send these ignored files to "+di.Name+"?") {
+		for _, e := range gone {
+			goneNames = append(goneNames, e.Path)
+		}
+		prompt := "send these ignored files to " + di.Name + "?"
+		if len(names) > 0 {
+			step("extras", "%s", strings.Join(names, ", "))
+		}
+		if len(gone) > 0 {
+			step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, strings.Join(goneNames, ", "))
+			prompt = "send these ignored files to " + di.Name + " and remove the deleted ones there?"
+		}
+		if opts.Yes || confirm(prompt) {
 			stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "extras")
-			if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: stage, Clean: true, Private: true}); err != nil {
+			if len(paths) > 0 {
+				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: stage, Clean: true, Private: true}); err != nil {
+					return err
+				}
+			}
+			res, err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage, Task: t.Key, Remove: gone})
+			if err != nil {
 				return err
 			}
-			if err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage}); err != nil {
-				return err
+			if len(res.Removed) > 0 {
+				step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, strings.Join(res.Removed, ", "))
 			}
+			if len(res.Kept) > 0 {
+				step("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
+			}
+			sentExtras = true
 		} else {
 			step("extras", "skipped")
 		}
@@ -356,6 +387,14 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		rec.Changes = changeSummary(dst.GitURL(t.RepoRel), fpField(rec.LastSent[di.Name], "head"), snap.Base, t.Key)
 	}
 	delete(rec.LastSent, di.Name)
+	if rec.Extras == nil {
+		rec.Extras = map[string][]FileEntry{}
+	}
+	delete(rec.Extras, di.Name)
+	delete(rec.Extras, si.Name)
+	if sentExtras && len(extras) > 0 {
+		rec.Extras[si.Name] = extras
+	}
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		// The write may have landed even though the reply didn't.

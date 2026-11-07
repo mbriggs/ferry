@@ -30,7 +30,7 @@ type Machine interface {
 	Export(req ExportReq, w io.Writer) error
 	Import(req ImportReq, r io.Reader) error
 	InstallSession(InstallReq) (Session, error)
-	InstallExtras(InstallExtrasReq) error
+	InstallExtras(InstallExtrasReq) (InstallExtrasResult, error)
 	Park(ParkReq) error
 	Unpark(task string) error
 	ArchivePark(ParkReq) error
@@ -169,9 +169,8 @@ func (r *Remote) Import(q ImportReq, rd io.Reader) error {
 func (r *Remote) InstallSession(q InstallReq) (Session, error) {
 	return rpc[Session](r, "install-session", q)
 }
-func (r *Remote) InstallExtras(q InstallExtrasReq) error {
-	_, err := rpc[struct{}](r, "install-extras", q)
-	return err
+func (r *Remote) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
+	return rpc[InstallExtrasResult](r, "install-extras", q)
 }
 func (r *Remote) Park(q ParkReq) error     { _, err := rpc[struct{}](r, "park", q); return err }
 func (r *Remote) Unpark(task string) error { _, err := rpc[struct{}](r, "unpark", task); return err }
@@ -323,7 +322,7 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return none, l.InstallExtras(q)
+		return l.InstallExtras(q)
 	case "park":
 		q, err := decode[ParkReq](raw)
 		if err != nil {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/tar"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -9,11 +11,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type FileEntry struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
+	SHA  string `json:"sha,omitempty"`
+}
+
+func fileSHA(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // defaultInclude is used when a worktree has no .ferry/include.
@@ -44,9 +61,12 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 		if seen[rel] {
 			return
 		}
-		if st, err := os.Lstat(filepath.Join(root, rel)); err == nil && st.Mode().IsRegular() {
-			seen[rel] = true
-			entries = append(entries, FileEntry{Path: rel, Size: st.Size()})
+		p := filepath.Join(root, rel)
+		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() {
+			if sum, err := fileSHA(p); err == nil {
+				seen[rel] = true
+				entries = append(entries, FileEntry{Path: rel, Size: st.Size(), SHA: sum})
+			}
 		}
 	}
 	for _, rel := range strings.Split(out, "\x00") {
@@ -235,6 +255,15 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 type InstallExtrasReq struct {
 	WtRel    string `json:"wt_rel"`
 	StageRel string `json:"stage_rel"`
+	Task     string `json:"task"`
+	// Remove lists extras this machine sent last time that the other side no
+	// longer has. Each is parked if it's still exactly what was sent.
+	Remove []FileEntry `json:"remove,omitempty"`
+}
+
+type InstallExtrasResult struct {
+	Removed []string `json:"removed,omitempty"`
+	Kept    []string `json:"kept,omitempty"` // changed here since they were sent
 }
 
 // InstallExtras moves staged extras into the worktree. The worktree's tracked
@@ -242,10 +271,40 @@ type InstallExtrasReq struct {
 // component may be a symlink (a tracked symlink could otherwise redirect a
 // write anywhere in this home), nothing goes under .git, and files are
 // written through a fresh, randomly named temp file and renamed into place.
-func (l *Local) InstallExtras(q InstallExtrasReq) error {
+//
+// Removals never delete: a removed extra moves to
+// ~/.local/state/ferry/parked/<task>-extras-<time>/.
+func (l *Local) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
+	var res InstallExtrasResult
 	root, stage := l.abs(q.WtRel), l.abs(q.StageRel)
 	defer os.RemoveAll(stage)
-	return filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
+	if len(q.Remove) > 0 {
+		dir, err := l.parkDir(q.Task, "extras-"+time.Now().Format("20060102-150405"))
+		if err != nil {
+			return res, err
+		}
+		for _, e := range q.Remove {
+			if err := safeDest(root, e.Path); err != nil {
+				return res, err
+			}
+			p := filepath.Join(root, e.Path)
+			if !exists(p) {
+				continue
+			}
+			if sum, err := fileSHA(p); err != nil || sum != e.SHA {
+				res.Kept = append(res.Kept, e.Path)
+				continue
+			}
+			if err := moveFile(p, filepath.Join(dir, e.Path)); err != nil {
+				return res, err
+			}
+			res.Removed = append(res.Removed, e.Path)
+		}
+	}
+	if !isDir(stage) {
+		return res, nil
+	}
+	return res, filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}

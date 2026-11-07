@@ -50,6 +50,9 @@ type Record struct {
 	// source copy may be parked and a search would find a different session.
 	Source    *Session `json:"source,omitempty"`
 	Installed *Session `json:"installed,omitempty"`
+	// Extras is what each machine sent last time it handed the task off, so
+	// an extra deleted on the other side can be removed when the task returns.
+	Extras map[string][]FileEntry `json:"extras,omitempty"`
 	// Changes summarizes what the sending machine changed, shown before a
 	// hook from it runs on the laptop.
 	Changes string `json:"changes,omitempty"`

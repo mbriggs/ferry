@@ -480,7 +480,7 @@ type ParkReq struct {
 }
 
 var (
-	parkName    = regexp.MustCompile(`^(outgoing|aborted-[0-9-]+|g[0-9]+)$`)
+	parkName    = regexp.MustCompile(`^(outgoing|aborted-[0-9-]+|extras-[0-9-]+|g[0-9]+)$`)
 	taskPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 )
 
