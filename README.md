@@ -36,7 +36,7 @@ Use a scratch repo:
 2. Run `claude`, tell it a codeword, then `/exit`.
 3. Run `ferry to kant`. It should finish with `launch  kant: rex session "ferry-trial" running claude --resume ...`.
 4. Attach to that Rex session on kant and ask for the codeword.
-5. Run `ferry from kant ferry-trial` on the laptop, then run the `resume:` command it prints.
+5. Run `ferry from kant ferry-trial` on the laptop. When it finishes, the session resumes in the same terminal.
 
 ## Tests
 

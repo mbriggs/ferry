@@ -12,7 +12,7 @@ import (
 
 const usage = `usage:
   ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]
-  ferry from HOST NAME [--yes]
+  ferry from HOST NAME [--yes] [--no-launch]
   ferry ls HOST
   ferry setup [--dry-run]
   ferry version
@@ -85,7 +85,7 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.StringVar(&o.Agent, "agent", "", "claude or codex (default: the newest session for this worktree)")
 	fs.StringVar(&o.SessionID, "session", "", "session id to move")
 	fs.BoolVar(&o.Yes, "yes", false, "send listed ignored files without asking (never approves hooks)")
-	fs.BoolVar(&o.NoLaunch, "no-launch", false, "print the resume command instead of starting the agent in rex")
+	fs.BoolVar(&o.NoLaunch, "no-launch", false, "print the resume command instead of starting the agent (in rex for to, in this terminal for from)")
 	fs.BoolVar(&o.Force, "force", false, "take the task even if the record names another owner")
 	fs.BoolVar(&o.ForceVersion, "force-version", false, "resume even if the receiving agent is older")
 	return fs

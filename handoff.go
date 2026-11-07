@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -440,34 +442,11 @@ func settle(m Machine, s Session) (Liveness, error) {
 	return live, err
 }
 
-// finish runs the steps after the commit point: park the source copy, move
-// the staged session into place, run restore, and start the agent. Each is
-// safe to repeat. The source is parked before the receiver's copy goes live,
-// so at no point can both machines resume it.
+// finish runs the steps after the commit point: move the staged session into
+// place, run restore, and start the agent. Each is safe to repeat. The
+// sending machine keeps its copy of the session, so either side can resume
+// it; a copy the receiver already had is parked before it's replaced.
 func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts) error {
-	if sess != nil {
-		// On a rerun, the source copy is still live if parking never ran. If
-		// someone resumed it since the commit, the staged copy is stale.
-		cur, err := src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID})
-		if err != nil {
-			return err
-		}
-		if cur != nil {
-			if live, err := src.Liveness(*cur); err != nil {
-				return err
-			} else if live.Live && !live.Settling {
-				return fmt.Errorf("%s: %s; exit it, then run this again", si.Name, live.Detail)
-			}
-			if cur.Size != sess.Size {
-				return fmt.Errorf("%s: session %s changed after it was handed off (%s, was %s); %s owns the task now, so its copy wins. Move the newer one aside on %s to continue",
-					si.Name, short(sess.ID), humanSize(cur.Size), humanSize(sess.Size), di.Name, si.Name)
-			}
-		}
-		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, As: fmt.Sprintf("g%d", rec.Generation)}); err != nil {
-			return err
-		}
-		step("park", "%s: transcript moved to ~/.local/state/ferry/parked/", si.Name)
-	}
 	if installed != nil {
 		if err := dst.PlaceSession(PlaceReq{Session: *installed, Task: t.Key}); err != nil {
 			return err
@@ -487,6 +466,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 	}
 	clock.lap("restore")
 	rexSession := ""
+	var here []string // the agent to run in this terminal once the record is written
 	switch {
 	case installed == nil:
 		step("done", "code is on %s at ~/%s", di.Name, t.WtRel)
@@ -494,6 +474,11 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		note := resumeNote(si, di, t, *installed, summary)
 		argv := resumeArgv(*installed, note)
 		cwdRel, _ := filepath.Rel(di.Home, installed.Cwd)
+		if dst.IsLocal() && !opts.NoLaunch && interactive() {
+			here = argv
+			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv[:len(argv)-1]))
+			break
+		}
 		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
 			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv))
 			break
@@ -523,16 +508,35 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		return err
 	}
+	if here != nil {
+		clock.report()
+		return execHere(installed.Cwd, here)
+	}
 	return nil
+}
+
+// execHere replaces ferry with the agent, in the worktree, in this terminal.
+// It returns only if the exec fails. ferry's files, the task lock among them,
+// are close-on-exec, so the lock is released as the agent starts.
+func execHere(dir string, argv []string) error {
+	path, err := exec.LookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("the task is here, but %s isn't on PATH; run the resume command above", argv[0])
+	}
+	if err := os.Chdir(dir); err != nil {
+		return err
+	}
+	return fmt.Errorf("starting %s: %w; run the resume command above", argv[0], syscall.Exec(path, argv, os.Environ()))
 }
 
 // stopwatch times each step of a handoff, leaving out time spent at
 // prompts, and prints one line at the end, even when the handoff fails.
 type stopwatch struct {
-	last   time.Time
-	start  time.Time
-	waited time.Duration
-	laps   []string
+	last     time.Time
+	start    time.Time
+	waited   time.Duration
+	laps     []string
+	reported bool
 }
 
 // clock is the running handoff's stopwatch. A process runs one handoff.
@@ -560,9 +564,10 @@ func (s *stopwatch) pause() func() {
 }
 
 func (s *stopwatch) report() {
-	if len(s.laps) == 0 {
+	if len(s.laps) == 0 || s.reported {
 		return
 	}
+	s.reported = true
 	total := time.Since(s.start) - s.waited
 	line := strings.Join(s.laps, ", ") + "; total " + roundDuration(total)
 	if s.waited > time.Second {

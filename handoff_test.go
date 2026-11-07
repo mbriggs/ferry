@@ -227,8 +227,8 @@ func TestRoundTrip(t *testing.T) {
 	if fh := w.read(w.kant, ".claude/file-history/"+sessionID+"/abc@v1"); fh != "backup of "+wt+"\n" {
 		t.Fatalf("file history must be copied untouched, got %q", fh)
 	}
-	if exists(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")) {
-		t.Fatal("laptop transcript should be parked")
+	if !exists(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")) {
+		t.Fatal("the laptop should keep its transcript")
 	}
 	if r := w.record(task); r.Owner != "kant" || r.State != stateOwned || r.Attempt != "" {
 		t.Fatalf("record after to: %+v", r)
@@ -262,8 +262,8 @@ func TestRoundTrip(t *testing.T) {
 	if got := w.read(w.laptop, "src/app-wt/fix-auth/.ferry/state/db.dump"); got != "dump-from-kant\n" {
 		t.Fatalf("state from kant's dehydrate: %q", got)
 	}
-	if exists(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl")) {
-		t.Fatal("kant transcript should be parked")
+	if !exists(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl")) {
+		t.Fatal("kant should keep its transcript")
 	}
 	if r := w.record(task); r.Owner != "laptop" || r.State != stateOwned || r.Attempt != "" {
 		t.Fatalf("record after from: %+v", r)
@@ -357,7 +357,7 @@ func TestCodexSession(t *testing.T) {
 	if !strings.Contains(out, `codex --no-daemon -c 'model="gpt-test"' resume `+id) {
 		t.Fatalf("expected a codex resume with the recorded model:\n%s", out)
 	}
-	if exists(filepath.Join(w.laptop, rel)) {
-		t.Fatal("laptop rollout should be parked")
+	if !exists(filepath.Join(w.laptop, rel)) {
+		t.Fatal("the laptop should keep its rollout")
 	}
 }

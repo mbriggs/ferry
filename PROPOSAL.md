@@ -4,7 +4,7 @@
 
 You start most work on the laptop: you poke at it with local resources, work out the details with the agent, and then hand it to kant so it can keep going after you close the lid. `ferry to kant` does that handoff. `ferry from kant` brings a task back when you want it local again.
 
-`ferry` is a small Go binary installed on both machines. A task is one git worktree under `~/src` plus one Claude Code or Codex session. `ferry` moves the code as git objects and the transcript as a JSONL file with its home-directory paths rewritten, then resumes the full session on the other side. It keeps one owner per task in a record on kant and fences the old copy so it can't be resumed by accident. Environment state like databases, dev servers, and installed dependencies moves through two per-project scripts, `dehydrate` and `restore`, which only run after you approve them. Rex starts, watches, and stops the agents. SSH over the tailnet carries the bytes.
+`ferry` is a small Go binary installed on both machines. A task is one git worktree under `~/src` plus one Claude Code or Codex session. `ferry` moves the code as git objects and the transcript as a JSONL file with its home-directory paths rewritten, then resumes the full session on the other side. It keeps one owner per task in a record on kant. Both machines keep a resumable copy of the session; the newest one is wherever the task last moved. Environment state like databases, dev servers, and installed dependencies moves through two per-project scripts, `dehydrate` and `restore`, which only run after you approve them. Rex starts, watches, and stops the agents. SSH over the tailnet carries the bytes.
 
 This shape came out of ten competing drafts, then went through a four-judge review that rejected the first version on security, unverified assumptions, and cost. Prototypes in `test/` then checked the assumptions on kant (see "What the prototypes showed"). This version folds in both.
 
@@ -24,7 +24,7 @@ All `ferry` commands run on the laptop and connect to kant. kant never connects 
 
 ```
 ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]   hand the task in $PWD to HOST
-ferry from HOST NAME [--yes]                                                bring task NAME back here
+ferry from HOST NAME [--yes] [--no-launch]                                  bring task NAME back here
 ferry ls HOST                                                               tasks, owner, generation
 ferry setup                                                                 add ferry's Claude Code permission rules
 ```
@@ -49,7 +49,6 @@ extras     .env.local, .ferry/state/db.dump (approved)
 apply      kant: src/app-wt/fix-auth matches the snapshot
 session    7c1e9a02 staged on kant, 2 files, 1.9 MB
 commit     kant owns fix-auth (generation 2)
-park       laptop: transcript moved to ~/.local/state/ferry/parked/
 session    kant: 7c1e9a02 is live
 restore    kant: .ferry/restore (approved, sha 81aa…): deps installed, db loaded
 launch     kant: rex session "fix-auth" running claude --resume 7c1e9a02
@@ -66,9 +65,10 @@ snapshot   kant: base 81aa3c2 (3 new commits)
 git        fetched refs/ferry/fix-auth/*
 apply      local worktree matches the snapshot it sent in generation 2, applying
 commit     laptop owns fix-auth (generation 4)
-resume:    cd ~/src/app-wt/fix-auth && claude --resume 7c1e9a02 "<resume note>"
+resume     cd ~/src/app-wt/fix-auth && claude --resume 7c1e9a02
 ```
 
+Run from a terminal, `ferry from` then turns into the resumed agent, in the worktree, in the same terminal (or Rex pane). With `--no-launch`, or when its output isn't a terminal, it prints the command instead.
 If the agent on kant is mid-turn, `ferry from` refuses and tells you to wait.
 
 ## Repos kant doesn't have
@@ -142,7 +142,7 @@ On kant, `ferry from` stops an idle agent in its Rex pane with `/exit`, retrying
 
 **Resuming.** `ferry` resumes with a first prompt that says what moved: the old and new working directories, that uncommitted changes came along, the `restore` summary, and that nothing else from the other machine is running here. Codex resumes with `-c model=<recorded model>`, because otherwise it silently switches to the configured default.
 
-**Trust.** A resumed agent in a folder the receiver has never trusted stops at the trust prompt, and Claude's default answer there is "No, exit". `ferry` carries trust over only if you trusted the folder on the sending machine, and it does it the way you would: after launching in Rex, it answers the prompt in the pane (Down then Enter for Claude, Enter for Codex). If neither machine trusts the folder, `ferry` doesn't launch, and prints the resume command instead. An agent at the trust prompt hasn't registered, so the liveness checks can't see it: a `ferry from` would park the transcript under it, and a rerun would start a second one. For the same reason, `ferry` waits until the launched agent registers, and kills its Rex session if that takes over a minute. Codex ignores trust passed with `-c`, and editing `~/.claude.json` or the stowed `config.toml` behind a running agent's back is riskier than answering the question it asks.
+**Trust.** A resumed agent in a folder the receiver has never trusted stops at the trust prompt, and Claude's default answer there is "No, exit". `ferry` carries trust over only if you trusted the folder on the sending machine, and it does it the way you would: after launching in Rex, it answers the prompt in the pane (Down then Enter for Claude, Enter for Codex). If neither machine trusts the folder, `ferry` doesn't launch, and prints the resume command instead. An agent at the trust prompt hasn't registered, so the liveness checks can't see it: a `ferry from` would copy the transcript out from under it, and a rerun would start a second one. For the same reason, `ferry` waits until the launched agent registers, and kills its Rex session if that takes over a minute. Codex ignores trust passed with `-c`, and editing `~/.claude.json` or the stowed `config.toml` behind a running agent's back is riskier than answering the question it asks.
 
 **Versions.** If the receiver's agent is older than the sender's, `ferry` refuses unless you pass `--force-version`.
 
@@ -150,7 +150,7 @@ On kant, `ferry from` stops an idle agent in its Rex pane with `/exit`, retrying
 
 kant holds one record per task at `~/.local/state/ferry/tasks/<task>.json`: `{owner, generation, state, agent, session, fingerprint}`. Every handoff goes through kant, so the record is reachable whenever a handoff can happen. Each write is a compare-and-swap on `generation` under `flock`, and every transition bumps the generation. A handoff also holds a `flock` on the task on the laptop, which drives every handoff, so a second `ferry` on the same task is refused instead of interleaving with the first. The kernel releases it when `ferry` exits, however it exits. A call that `ferry` made on kant can outlive it, so on kant each `ferry remote` call holds a lock on the task too, and a rerun's calls wait for a dead run's call to finish.
 
-Fencing doesn't depend on anyone reading the record. Nothing live moves before the commit point: the session waits on the receiver in a staging directory, already checked and rewritten. After the commit, the source moves its transcript into `~/.local/state/ferry/parked/`, and only then does the receiver's copy move into place, so at no point can both machines resume it. A failure before the commit leaves the source untouched. A rerun after the commit first checks that nobody resumed the source copy in the meantime, and refuses if its transcript changed. A habitual `claude --resume` on the old machine then fails with "no session" instead of quietly forking the conversation. This also matters because every Claude resume re-links the session to its Remote Control cloud session, so a duplicate would fight over that link.
+Nothing live moves before the commit point: the session waits on the receiver in a staging directory, already checked and rewritten. A failure before the commit leaves both machines as they were. After the commit, the staged copy moves into place; if the receiver already had a copy of that session, from an earlier trip, the old one goes to `~/.local/state/ferry/parked/` first, so turns you added there by hand aren't lost. The sending machine keeps its copy and can still resume it. That's deliberate: the point is to move everything over, not to guard against resuming the old one. Resuming both does fork the conversation, and since every Claude resume re-links the session to its Remote Control cloud session, the two copies would take that link from each other.
 
 The record never expires on its own. A closed laptop is the normal case, and automatic takeover is how two machines end up running the same session.
 
@@ -162,7 +162,7 @@ The record never expires on its own. A closed laptop is the normal case, and aut
 4. Apply and verify the tree, then send extras.
 5. Send the session files to a staging directory on the receiver, check them, and rewrite their paths.
 6. Record the receiver as owner. This is the commit point.
-7. Park the source transcript, move the staged session into place, run `restore` on the receiver if approved, and launch the agent.
+7. Move the staged session into place, run `restore` on the receiver if approved, and launch the agent: in a new Rex session on kant for `to`, in the current terminal for `from`.
 
 A failure before step 6 leaves the source as owner, untouched. A failure after step 6 leaves the receiver as owner. Either way, rerunning the same command picks up where it stopped.
 
