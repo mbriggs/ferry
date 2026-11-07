@@ -52,7 +52,7 @@ func TestApplyRecognizesItsOwnPartialApply(t *testing.T) {
 	wt := w.laptopTask()
 	laptop := &Local{Home: w.laptop}
 	kant := &Local{Home: w.kant}
-	task := "src-app-wt-fix-auth"
+	task := taskKey("src/app-wt/fix-auth")
 	snap, err := laptop.Snapshot(SnapshotReq{WtRel: "src/app-wt/fix-auth", Task: task})
 	if err != nil {
 		t.Fatal(err)

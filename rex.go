@@ -107,7 +107,7 @@ func (l *Local) StopAgent(q StopReq) error {
 		run("", nil, "rex", "send-key", "-s", q.RexSession, "-b", block, "enter")
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
-			if live, err := l.Liveness(q.Session); err == nil && !live.Live {
+			if live, err := l.Liveness(q.Session); err == nil && (!live.Live || live.Settling) {
 				return waitExit(pid)
 			}
 			time.Sleep(300 * time.Millisecond)

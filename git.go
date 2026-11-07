@@ -133,6 +133,9 @@ func (l *Local) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	if err != nil {
 		return SnapshotResult{}, fmt.Errorf("%s is on a detached HEAD; check out a branch first", q.WtRel)
 	}
+	if staged, _ := git(dir, "ls-files", "--cached", "--", stateDirRel); staged != "" {
+		return SnapshotResult{}, fmt.Errorf("%s is in the git index; it travels outside git. Run `git rm -r --cached %s` first", stateDirRel, stateDirRel)
+	}
 	idxTree, err := git(dir, "write-tree")
 	if err != nil {
 		return SnapshotResult{}, fmt.Errorf("index can't be snapshotted (unresolved conflicts?): %w", err)
@@ -189,7 +192,14 @@ func worktreeTree(dir string) (string, error) {
 	} else {
 		os.Remove(tmp.Name())
 	}
-	if _, err := gitIndex(dir, tmp.Name(), "add", "-A"); err != nil {
+	// Keep .ferry/state out of the add itself, so its files never become
+	// blobs. An ignored directory is already skipped (and git rejects a
+	// pathspec naming one), so the exclude is only needed when it isn't.
+	add := []string{"add", "-A"}
+	if _, err := git(dir, "check-ignore", "-q", stateDirRel+"/"); err != nil {
+		add = append(add, "--", ".", ":(exclude)"+stateDirRel)
+	}
+	if _, err := gitIndex(dir, tmp.Name(), add...); err != nil {
 		return "", err
 	}
 	if _, err := gitIndex(dir, tmp.Name(), "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", stateDirRel); err != nil {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests run the real binary between two fake homes. The "kant" side is
@@ -170,6 +171,9 @@ func (w *world) laptopTask() string {
 	w.write(w.laptop, ".claude/projects/"+slug+"/"+sessionID+".jsonl", b.String())
 	w.write(w.laptop, ".claude/projects/"+slug+"/"+sessionID+"/subagents/agent-1.jsonl", `{"cwd":"`+wt+`"}`+"\n")
 	w.write(w.laptop, ".claude/file-history/"+sessionID+"/abc@v1", "backup of "+wt+"\n")
+	// An idle session: ferry waits for a transcript written seconds ago.
+	old := time.Now().Add(-time.Minute)
+	os.Chtimes(filepath.Join(w.laptop, ".claude/projects", slug, sessionID+".jsonl"), old, old)
 	w.approve(w.laptop, dehydrateScript)
 	w.approve(w.kant, restoreScript)
 	return wt
@@ -178,7 +182,7 @@ func (w *world) laptopTask() string {
 func TestRoundTrip(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	task := "src-app-wt-fix-auth"
+	task := taskKey("src/app-wt/fix-auth")
 	before, err := fingerprint(wt)
 	if err != nil {
 		t.Fatal(err)

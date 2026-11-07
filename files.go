@@ -54,15 +54,14 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 			continue
 		}
 		if strings.HasSuffix(rel, "/") {
-			dir := strings.TrimSuffix(rel, "/")
-			if dir == stateDirRel || strings.HasPrefix(dir, stateDirRel+"/") || strings.HasPrefix(stateDirRel, dir+"/") {
-				walkFiles(filepath.Join(root, dir), func(p string) {
-					r, _ := filepath.Rel(root, p)
-					if r == stateDirRel || strings.HasPrefix(r, stateDirRel+string(filepath.Separator)) || matchAny(patterns, r) {
-						add(r)
-					}
-				})
-			}
+			// git collapsed an ignored directory; look inside it for files
+			// the include patterns ask for, skipping dependency and build trees.
+			walkIgnored(filepath.Join(root, strings.TrimSuffix(rel, "/")), func(p string) {
+				r, _ := filepath.Rel(root, p)
+				if strings.HasPrefix(r, stateDirRel+string(filepath.Separator)) || matchAny(patterns, r) {
+					add(r)
+				}
+			})
 			continue
 		}
 		if strings.HasPrefix(rel, stateDirRel+"/") || matchAny(patterns, rel) {
@@ -88,6 +87,30 @@ func matchAny(patterns []string, rel string) bool {
 		}
 	}
 	return false
+}
+
+// heavyDirs are never searched for extras: they're rebuilt, not moved.
+var heavyDirs = map[string]bool{
+	"node_modules": true, "_build": true, "deps": true, "target": true, ".venv": true, "venv": true,
+	"vendor": true, "dist": true, "build": true, ".next": true, ".cache": true, "tmp": true, "log": true, ".git": true,
+}
+
+func walkIgnored(dir string, fn func(string)) {
+	if heavyDirs[filepath.Base(dir)] {
+		return
+	}
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && p != dir && heavyDirs[d.Name()] {
+			return filepath.SkipDir
+		}
+		if d.Type().IsRegular() {
+			fn(p)
+		}
+		return nil
+	})
 }
 
 func walkFiles(dir string, fn func(string)) {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type handoffOpts struct {
@@ -127,8 +128,18 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	if sess != nil {
+		if rel := mustRel(si.Home, sess.Cwd); rel != t.WtRel && !strings.HasPrefix(rel, t.WtRel+"/") {
+			return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(sess.ID), rel, t.WtRel)
+		}
 		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
 		live, err := src.Liveness(*sess)
+		for i := 0; err == nil && live.Settling && i < 20; i++ {
+			if i == 0 {
+				step("agent", "%s; waiting for it to settle", live.Detail)
+			}
+			time.Sleep(500 * time.Millisecond)
+			live, err = src.Liveness(*sess)
+		}
 		if err != nil {
 			return err
 		}
@@ -143,7 +154,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 		if live, err := dst.Liveness(*sess); err != nil {
 			return err
-		} else if live.Live {
+		} else if live.Live && !live.Settling {
 			return fmt.Errorf("%s: %s already has this session loaded", di.Name, live.Detail)
 		}
 		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
@@ -163,6 +174,9 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if rec == nil {
 		rec = &Record{Task: t.Key, Name: t.Name, WtRel: t.WtRel, RepoRel: t.RepoRel, Owner: si.Name, State: stateOwned}
 		step("owner", "new task")
+	}
+	if rec.WtRel != t.WtRel || rec.RepoRel != t.RepoRel {
+		return fmt.Errorf("task record %s is for ~/%s, not ~/%s", t.Key, rec.WtRel, t.WtRel)
 	}
 	resuming := rec.State == stateHandingOff && rec.From == si.Name && rec.To == di.Name
 	switch {
@@ -337,7 +351,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		// A rerun may find the agent already started by the run it is finishing.
 		if live, err := dst.Liveness(*installed); err != nil {
 			return err
-		} else if live.Live {
+		} else if live.Live && !live.Settling {
 			step("launch", "%s: %s is already running (%s); not starting another", di.Name, short(installed.ID), live.Detail)
 			rexSession = rec.RexSession
 			break

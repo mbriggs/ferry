@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,7 +144,11 @@ func (l *Local) RecordList() ([]Record, error) {
 }
 
 // taskKey turns a worktree path relative to home into a name usable in file
-// names and git refs: "src/app-wt/fix-auth" becomes "src-app-wt-fix-auth".
+// names and git refs, such as "src-app-wt-fix-auth-3f9a1c". The readable part
+// collapses punctuation, so a hash of the exact path keeps "foo.bar" and
+// "foo-bar" apart.
 func taskKey(wtRel string) string {
-	return strings.Trim(nonAlnum.ReplaceAllString(filepath.ToSlash(wtRel), "-"), "-")
+	rel := filepath.ToSlash(wtRel)
+	sum := sha256.Sum256([]byte(rel))
+	return strings.Trim(nonAlnum.ReplaceAllString(rel, "-"), "-") + "-" + hex.EncodeToString(sum[:3])
 }

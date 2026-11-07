@@ -307,10 +307,14 @@ func (l *Local) codexTrusted(cwd string) bool {
 // --- liveness ------------------------------------------------------------
 
 type Liveness struct {
-	Live   bool   `json:"live"`
-	Busy   bool   `json:"busy"`
-	PID    int    `json:"pid"`
-	Detail string `json:"detail"`
+	Live bool `json:"live"`
+	// Settling means no process holds the session, but its transcript was
+	// written moments ago: Claude removes its registry entry before it has
+	// finished writing, so the agent may still be exiting.
+	Settling bool   `json:"settling,omitempty"`
+	Busy     bool   `json:"busy"`
+	PID      int    `json:"pid"`
+	Detail   string `json:"detail"`
 }
 
 // Liveness reports whether an agent process has the session loaded. Claude
@@ -335,6 +339,9 @@ func (l *Local) Liveness(s Session) (Liveness, error) {
 				continue
 			}
 			return Liveness{Live: true, Busy: e.Status == "busy", PID: e.PID, Detail: "claude pid " + fmt.Sprint(e.PID) + " is " + e.Status}, nil
+		}
+		if len(s.Files) > 0 && time.Since(l.mtime(s.Files[0])) < 2*time.Second {
+			return Liveness{Live: true, Settling: true, Detail: "the transcript was written in the last 2 seconds"}, nil
 		}
 	case agentCodex:
 		lock := filepath.Join(l.Home, ".codex", "thread-writer-locks", s.ID+".lock")

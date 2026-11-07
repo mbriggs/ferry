@@ -87,7 +87,7 @@ func TestLandingRerunLaunchesOnce(t *testing.T) {
 	if n := countLines(log, "new "); n != 1 {
 		t.Fatalf("launched %d agents, want 1", n)
 	}
-	if r := w.record("src-app-wt-fix-auth"); r.State != stateOwned || r.RexSession != "session:fake-1" {
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateOwned || r.RexSession != "session:fake-1" {
 		t.Fatalf("record after launch: state %s, rex session %q", r.State, r.RexSession)
 	}
 	if out, err := w.ferry(wt, "to", "kant", "--yes"); err == nil {

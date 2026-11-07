@@ -57,9 +57,9 @@ func TestFromRefusesATamperedRecord(t *testing.T) {
 	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
 
 	// Something on kant rewrites the task record to point at a config dir.
-	recPath := filepath.Join(w.kant, ".local/state/ferry/tasks/src-app-wt-fix-auth.json")
+	recPath := filepath.Join(w.kant, ".local/state/ferry/tasks/"+taskKey("src/app-wt/fix-auth")+".json")
 	var rec map[string]any
-	json.Unmarshal([]byte(w.read(w.kant, ".local/state/ferry/tasks/src-app-wt-fix-auth.json")), &rec)
+	json.Unmarshal([]byte(w.read(w.kant, ".local/state/ferry/tasks/"+taskKey("src/app-wt/fix-auth")+".json")), &rec)
 	rec["session"] = "../../../.config/fish"
 	data, _ := json.Marshal(rec)
 	os.WriteFile(recPath, data, 0o600)
