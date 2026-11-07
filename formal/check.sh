@@ -23,9 +23,9 @@ cd "$here"
 
 TLC_TOOL='http:tla2tools[url=https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar,checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88]@1.7.4'
 PROMISES="TypeOK NoFork NoLostTurns OwnerCanResume OneAgent AgentHasTranscript SizeCheckFair"
-REACH="happy:ReachRoundTrip happy:ReachLaunch happy:ReachStopAgent faults:ReachRerunFinish faults:ReachSizeRefusal overlap:ReachDstLiveRefusal overlap:ReachDeadCall"
+REACH="happy:ReachRoundTrip happy:ReachLaunch happy:ReachStopAgent faults:ReachRerunFinish faults:ReachSizeRefusal overlap:ReachDeadCall"
 ALLDEAD="put stop import stage park place launch"
-MAXGEN=${MAXGEN:-6}
+MAXGEN=${MAXGEN:-12}
 MAXV=${MAXV:-3}
 
 if [ -n "${TLA2TOOLS:-}" ]; then
@@ -50,23 +50,20 @@ mkdir -p out
 status=0
 
 # check MODE NAME OUT [SWITCH...]: run TLC, print VIOLATED, PASS or ERROR.
-# A switch is InstantRegister, SourceAtCommit, or -KIND to drop a dead call.
+# A switch is -KIND, which drops one kind of dead call.
 check() {
   mode=$1 inv=$2 base=out/$3; shift 3
   faults=TRUE; dead=""
   [ "$mode" = happy ] && faults=FALSE
   [ "$mode" = overlap ] && dead=$ALLDEAD
-  ir=FALSE; sc=FALSE
   for s in "$@"; do
     case $s in
-      InstantRegister) ir=TRUE ;;
-      SourceAtCommit) sc=TRUE ;;
       -*) dead=$(echo " $dead " | sed "s/ ${s#-} / /; s/^ *//; s/ *$//") ;;
     esac
   done
   set_=$(echo "$dead" | awk '{for(i=1;i<=NF;i++) printf "%s\"%s\"", (i>1?", ":""), $i}')
-  printf 'SPECIFICATION Spec\nCONSTANTS\n  MaxGen = %s\n  MaxV = %s\n  Faults = %s\n  DeadKinds = {%s}\n  InstantRegister = %s\n  SourceAtCommit = %s\nCONSTRAINT Bounds\nINVARIANT %s\n' \
-    "$MAXGEN" "$MAXV" "$faults" "$set_" "$ir" "$sc" "$inv" > "$base.cfg"
+  printf 'SPECIFICATION Spec\nCONSTANTS\n  MaxGen = %s\n  MaxV = %s\n  Faults = %s\n  DeadKinds = {%s}\nCONSTRAINT Bounds\nINVARIANT %s\n' \
+    "$MAXGEN" "$MAXV" "$faults" "$set_" "$inv" > "$base.cfg"
   rm -rf "$base.states"
   "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -deadlock \
     -config "$base.cfg" -metadir "$base.states" Handoff.tla > "$base.out" 2>&1 || true
@@ -89,7 +86,7 @@ for mode in happy faults overlap; do
       else echo "FAIL   $mode $inv: violated (out/$mode-$inv.out)"; echo "       $(trace "out/$mode-$inv.out")"; status=1; fi
       continue
     fi
-    switches=$(echo "$line" | cut -d' ' -f3-)
+    switches=$(echo "$line" | awk '{$1=$2=""; print}' | sed 's/^ *//')
     if [ "$got" = PASS ]; then
       echo "FIXED? $mode $inv: holds, but known-findings lists it"; status=1; continue
     fi

@@ -12,10 +12,12 @@
 \*
 \* The laptop drives every run, under a flock that the kernel drops the
 \* moment ferry dies (Ctrl-C, or the laptop crashing; a suspended laptop keeps
-\* its ferry and its flock). So a rerun can start at once, while a call the
-\* dead run made on kant is still running there: `ferry remote` finishes its
-\* work and only then fails to write its reply. Pending holds that one call,
-\* and Deliver applies it at any later point.
+\* its ferry and its flock). A call the dead run made on kant can still be
+\* running there: `ferry remote` finishes its work and only then fails to
+\* write its reply. Pending holds that one call. It holds the task's lock on
+\* kant (lockRemoteCall in record.go), and a rerun's first kant call waits
+\* for it, so Deliver applies it before the next run starts. You resuming
+\* the session can still come first.
 \*
 \* Any run can stop between two steps. Any call to kant can fail, or do its
 \* work and lose its reply. Calls on the laptop fail only before doing their
@@ -34,11 +36,7 @@ EXTENDS Naturals
 \* Faults = FALSE removes every crash and failed call: the happy path.
 \* DeadKinds: which calls a dead run can leave running on kant. {} turns
 \* that off; DeadCalls is everything the flock allows.
-\* The last two are switches for pinning findings (formal/known-findings).
-\* FALSE is what the code does. TRUE removes one cause:
-\*   InstantRegister: an agent shows up to Liveness the moment Launch returns.
-\*   SourceAtCommit: the commit write records the session this run staged.
-CONSTANTS MaxGen, MaxV, Faults, DeadKinds, InstantRegister, SourceAtCommit
+CONSTANTS MaxGen, MaxV, Faults, DeadKinds
 
 DeadCalls == {"put", "stop", "import", "stage", "park", "place", "launch"}
 
@@ -51,7 +49,6 @@ VARIABLES
     copy,      \* copy[m]: version of the live transcript on m, 0 if none
     stageTmp,  \* stageTmp[m]: version in in/<task>/session (transfer target)
     ready,     \* ready[m]: version in in/<task>/ready (StageSession output)
-    starting,  \* starting[m]: agents rex started that haven't registered yet
     running,   \* running[m]: agents in ~/.claude/sessions, which Liveness sees
     latest,    \* the newest version ever written
     rec,       \* the task record on kant
@@ -61,9 +58,9 @@ VARIABLES
     instV,     \* handoff()/finish(): installed, as the staged version (0 = nil)
     pending    \* a call the dead run left running on kant, or none
 
-vars == <<copy, stageTmp, ready, starting, running, latest, rec, pc, src, dst, runRec, sessV, instV, pending>>
+vars == <<copy, stageTmp, ready, running, latest, rec, pc, src, dst, runRec, sessV, instV, pending>>
 runVars == <<pc, src, dst, runRec, sessV, instV>>
-world == <<copy, stageTmp, ready, starting, running, latest>>
+world == <<copy, stageTmp, ready, running, latest>>
 
 NoRec == [owner |-> None, state |-> None, from |-> None, to |-> None, gen |-> 0, srcV |-> 0, instV |-> 0]
 NoPending == [kind |-> None, m |-> None, gen |-> 0, new |-> NoRec, v |-> 0]
@@ -72,7 +69,6 @@ Init ==
     /\ copy = [m \in Machines |-> IF m = "laptop" THEN 1 ELSE 0]
     /\ stageTmp = [m \in Machines |-> 0]
     /\ ready = [m \in Machines |-> 0]
-    /\ starting = [m \in Machines |-> 0]
     /\ running = [m \in Machines |-> 0]
     /\ latest = 1
     \* gen 0 stands for "no record yet"; handoff() then builds one owned by
@@ -105,13 +101,12 @@ PlaceEff(m) == IF ready[m] > 0
                  THEN /\ copy' = [copy EXCEPT ![m] = ready[m]]
                       /\ ready' = [ready EXCEPT ![m] = 0]
                  ELSE UNCHANGED <<copy, ready>>
-\* Launch: `rex new` starts the agent with --resume and returns. The agent
-\* writes its registry file some time later (Register). Without a
-\* transcript it exits.
+\* Launch: `rex new` starts the agent with --resume, and Launch returns once
+\* Liveness sees it. An agent that doesn't register in time is killed, and
+\* Launch fails. Without a transcript it exits.
 LaunchEff(m) ==
-    IF copy[m] = 0 THEN UNCHANGED <<starting, running>>
-    ELSE IF InstantRegister THEN running' = [running EXCEPT ![m] = @ + 1] /\ UNCHANGED starting
-    ELSE starting' = [starting EXCEPT ![m] = @ + 1] /\ UNCHANGED running
+    IF copy[m] = 0 THEN UNCHANGED running
+    ELSE running' = [running EXCEPT ![m] = @ + 1]
 \* StopAgent sends /exit to the one recorded rex session and waits until no
 \* registered process holds the session. A second one keeps it held.
 StopOK(m) == running[m] = 1
@@ -130,6 +125,7 @@ Put(o, new, p) ==
 \* main.go: l.lockTask (one run at a time), then handoff(): hub.RecordGet.
 Start(s) ==
     /\ pc = "idle"
+    /\ pending = NoPending                       \* lockRemoteCall on kant
     /\ s = "kant" => rec.gen > 0                 \* cmdFrom: findTask needs a record
     /\ \/ /\ Faults /\ Stop                      \* RecordGet fails
        \/ LET rerun == rec.state = "landing" /\ rec.owner = Other(s) /\ rec.from = s IN
@@ -160,7 +156,7 @@ StopAgentStep ==
                 /\ IF o = "ok" /\ StopOK(src)
                      THEN pc' = "dstLive" /\ sessV' = copy[src] /\ UNCHANGED <<src, dst, runRec, instV>>
                      ELSE Stop
-    /\ UNCHANGED <<copy, stageTmp, ready, starting, latest, rec, pending>>
+    /\ UNCHANGED <<copy, stageTmp, ready, latest, rec, pending>>
 
 \* dst.Liveness: "already has this session loaded".
 DstLive ==
@@ -189,13 +185,17 @@ Work ==
        \/ Faults /\ Stop
     /\ UNCHANGED <<world, rec, pending>>
 
-\* transfer(src Export, dst Import, Clean) into in/<task>/session.
+\* src.FindSession again, so sess is what is sent, then transfer(src Export,
+\* dst Import, Clean) into in/<task>/session.
 Transfer ==
     /\ pc = "transfer"
-    /\ \/ /\ stageTmp' = [stageTmp EXCEPT ![dst] = copy[src]]
-          /\ Goto("stage")
+    /\ \/ /\ copy[src] > 0                      \* "disappeared before it was sent"
+          /\ stageTmp' = [stageTmp EXCEPT ![dst] = copy[src]]
+          /\ pc' = "stage" /\ sessV' = copy[src]
+          /\ UNCHANGED <<src, dst, runRec, instV>>
+       \/ copy[src] = 0 /\ Stop /\ UNCHANGED stageTmp
        \/ Faults /\ Stop /\ UNCHANGED stageTmp
-    /\ UNCHANGED <<copy, ready, starting, running, latest, rec, pending>>
+    /\ UNCHANGED <<copy, ready, running, latest, rec, pending>>
 
 \* dst.StageSession. installed is set only on success. If the stage
 \* directory is gone (a dead run's StageSession moved it out and removed
@@ -207,13 +207,11 @@ Stage ==
          /\ IF Applied(o) THEN StageEff(dst) ELSE UNCHANGED <<ready, stageTmp>>
          /\ IF o = "ok" THEN pc' = "commit" /\ instV' = stageTmp[dst] /\ UNCHANGED <<src, dst, runRec, sessV>>
             ELSE Stop
-    /\ UNCHANGED <<copy, starting, running, latest, rec, pending>>
+    /\ UNCHANGED <<copy, running, latest, rec, pending>>
 
-\* The commit keeps runRec's Source: on a resumed claim that is the session
-\* found by the run that claimed, not the one this run staged.
+\* The commit records Source as the session this run sent.
 CommitRec == [runRec EXCEPT !.state = "landing", !.owner = dst, !.gen = runRec.gen + 1,
-                            !.instV = instV,
-                            !.srcV = IF SourceAtCommit THEN sessV ELSE runRec.srcV]
+                            !.srcV = sessV, !.instV = instV]
 
 \* --- commit ---: the landing RecordPut. On error: return err.
 Commit ==
@@ -221,7 +219,11 @@ Commit ==
     /\ \E o \in Outcomes("kant"): Put(o, CommitRec, "finishCheck")
     /\ UNCHANGED <<world, pending>>
 
-\* finish(): src.FindSession and src.Liveness, then the size check.
+\* finish(): src.FindSession and src.Liveness, then the size check, which
+\* compares cur.Size with sess.Size (handoff.go). On a rerun, sess is
+\* rec.Source, from the commit.
+SizeRefuses == copy[src] > 0 /\ running[src] = 0 /\ copy[src] # sessV
+
 FinishCheck ==
     /\ pc = "finishCheck"
     /\ IF sessV = 0 THEN Goto("finishPlace")
@@ -237,7 +239,7 @@ FinishPark ==
     /\ \E o \in Outcomes(src):
          /\ IF Applied(o) THEN ParkEff(src) ELSE UNCHANGED copy
          /\ After(o, "finishPlace")
-    /\ UNCHANGED <<stageTmp, ready, starting, running, latest, rec, pending>>
+    /\ UNCHANGED <<stageTmp, ready, running, latest, rec, pending>>
 
 \* finish(): dst.PlaceSession, if this handoff staged a session.
 FinishPlace ==
@@ -246,7 +248,7 @@ FinishPlace ==
        ELSE \E o \in Outcomes(dst):
               /\ IF Applied(o) THEN PlaceEff(dst) ELSE UNCHANGED <<copy, ready>>
               /\ After(o, "finishRestore")
-    /\ UNCHANGED <<stageTmp, starting, running, latest, rec, pending>>
+    /\ UNCHANGED <<stageTmp, running, latest, rec, pending>>
 
 \* finish(): the restore hook. Failing returns err; the record stays landing.
 \* Launch happens only on kant, and only if a session was staged.
@@ -268,7 +270,7 @@ FinishLive ==
 FinishLaunch ==
     /\ pc = "finishLaunch"
     /\ \E o \in Outcomes(dst):
-         /\ IF Applied(o) THEN LaunchEff(dst) ELSE UNCHANGED <<starting, running>>
+         /\ IF Applied(o) THEN LaunchEff(dst) ELSE UNCHANGED running
          /\ Goto("finishPut")
     /\ UNCHANGED <<copy, stageTmp, ready, latest, rec, pending>>
 
@@ -317,41 +319,34 @@ CrashInFlight ==
 \* The call left running on kant finishes, against the state it finds then.
 Deliver ==
     /\ pending # NoPending
-    /\ CASE pending.kind = "put"    -> PutEff(pending.gen, pending.new) /\ UNCHANGED <<copy, stageTmp, ready, starting, running>>
+    /\ CASE pending.kind = "put"    -> PutEff(pending.gen, pending.new) /\ UNCHANGED <<copy, stageTmp, ready, running>>
          [] pending.kind = "import" -> stageTmp' = [stageTmp EXCEPT ![pending.m] = pending.v]
-                                       /\ UNCHANGED <<copy, ready, starting, running, rec>>
-         [] pending.kind = "stage"  -> StageEff(pending.m) /\ UNCHANGED <<copy, starting, running, rec>>
-         [] pending.kind = "park"   -> ParkEff(pending.m) /\ UNCHANGED <<stageTmp, ready, starting, running, rec>>
-         [] pending.kind = "place"  -> PlaceEff(pending.m) /\ UNCHANGED <<stageTmp, starting, running, rec>>
+                                       /\ UNCHANGED <<copy, ready, running, rec>>
+         [] pending.kind = "stage"  -> StageEff(pending.m) /\ UNCHANGED <<copy, running, rec>>
+         [] pending.kind = "park"   -> ParkEff(pending.m) /\ UNCHANGED <<stageTmp, ready, running, rec>>
+         [] pending.kind = "place"  -> PlaceEff(pending.m) /\ UNCHANGED <<stageTmp, running, rec>>
          [] pending.kind = "launch" -> LaunchEff(pending.m) /\ UNCHANGED <<copy, stageTmp, ready, rec>>
-         [] pending.kind = "stop"   -> StopEff(pending.m) /\ UNCHANGED <<copy, stageTmp, ready, starting, rec>>
+         [] pending.kind = "stop"   -> StopEff(pending.m) /\ UNCHANGED <<copy, stageTmp, ready, rec>>
     /\ pending' = NoPending
     /\ UNCHANGED <<latest, runVars>>
 
-\* A started agent writes its ~/.claude/sessions/<pid>.json.
-Register(m) ==
-    /\ starting[m] > 0
-    /\ starting' = [starting EXCEPT ![m] = @ - 1]
-    /\ running' = [running EXCEPT ![m] = @ + 1]
-    /\ UNCHANGED <<copy, stageTmp, ready, latest, rec, runVars, pending>>
-
 \* Between runs, you resume the session wherever it is live, add turns, exit.
 Resume(m) ==
-    /\ pc = "idle" /\ copy[m] > 0 /\ running[m] + starting[m] = 0 /\ latest < MaxV
+    /\ pc = "idle" /\ copy[m] > 0 /\ running[m] = 0 /\ latest < MaxV
     /\ copy' = [copy EXCEPT ![m] = latest + 1]
     /\ latest' = latest + 1
-    /\ UNCHANGED <<stageTmp, ready, starting, running, rec, runVars, pending>>
+    /\ UNCHANGED <<stageTmp, ready, running, rec, runVars, pending>>
 
 \* An agent ferry launched takes a turn, or you exit it.
 AgentTurn(m) ==
     /\ running[m] > 0 /\ copy[m] > 0 /\ latest < MaxV
     /\ copy' = [copy EXCEPT ![m] = latest + 1]
     /\ latest' = latest + 1
-    /\ UNCHANGED <<stageTmp, ready, starting, running, rec, runVars, pending>>
+    /\ UNCHANGED <<stageTmp, ready, running, rec, runVars, pending>>
 AgentExit(m) ==
     /\ pc = "idle" /\ running[m] > 0
     /\ running' = [running EXCEPT ![m] = @ - 1]
-    /\ UNCHANGED <<copy, stageTmp, ready, starting, latest, rec, runVars, pending>>
+    /\ UNCHANGED <<copy, stageTmp, ready, latest, rec, runVars, pending>>
 
 Next ==
     \/ \E s \in Machines : Start(s)
@@ -359,17 +354,19 @@ Next ==
     \/ FinishCheck \/ FinishPark \/ FinishPlace \/ FinishRestore \/ FinishLive
     \/ FinishLaunch \/ FinishPut
     \/ Crash \/ CrashInFlight \/ Deliver
-    \/ \E m \in Machines : Register(m) \/ Resume(m) \/ AgentTurn(m) \/ AgentExit(m)
+    \/ \E m \in Machines : Resume(m) \/ AgentTurn(m) \/ AgentExit(m)
 
 Spec == Init /\ [][Next]_vars
 
-Bounds == rec.gen <= MaxGen
+\* Two agents on one machine already break OneAgent, so states past that
+\* aren't explored.
+Bounds == /\ rec.gen <= MaxGen
+          /\ \A m \in Machines : running[m] <= 2
 
 TypeOK ==
     /\ copy \in [Machines -> 0..MaxV]
     /\ ready \in [Machines -> 0..MaxV]
     /\ running \in [Machines -> 0..3]
-    /\ starting \in [Machines -> 0..3]
     /\ rec.state \in {"owned", "handing-off", "landing"}
 
 \* ---- the promises -----------------------------------------------------
@@ -390,18 +387,17 @@ OwnerCanResume == (pc = "idle" /\ rec.state = "owned") => copy[rec.owner] > 0
 
 \* One agent process per session on a machine. Two would write the same
 \* transcript at once.
-OneAgent == \A m \in Machines : running[m] + starting[m] <= 1
+OneAgent == \A m \in Machines : running[m] <= 1
 
 \* An agent never runs on a machine whose transcript ferry moved away; it
 \* would write its next turn to a fresh file where the old one was.
-AgentHasTranscript == \A m \in Machines : running[m] + starting[m] > 0 => copy[m] > 0
+AgentHasTranscript == \A m \in Machines : running[m] > 0 => copy[m] > 0
 
 \* finish()'s size check refuses only when the source has turns that the
 \* staged copy lacks. A refusal when they match tells the user to move a
 \* copy aside for nothing.
 SizeCheckFair ==
-    ~(pc = "finishCheck" /\ sessV > 0 /\ copy[src] > 0 /\ running[src] = 0
-      /\ copy[src] # sessV /\ copy[src] = instV)
+    ~(pc = "finishCheck" /\ sessV > 0 /\ SizeRefuses /\ copy[src] = instV)
 
 \* ---- reachability: each must be violated, or the model is vacuous --------
 
@@ -409,8 +405,7 @@ ReachRoundTrip == ~(rec.gen >= 6 /\ rec.owner = "laptop" /\ rec.state = "owned")
 ReachLaunch == ~(running["kant"] > 0)
 ReachStopAgent == ~(pc = "stopAgent" /\ src = "kant" /\ runRec.gen > 0)
 ReachRerunFinish == ~(pc = "finishCheck" /\ sessV > 0 /\ copy[src] = 0)
-ReachSizeRefusal == ~(pc = "finishCheck" /\ sessV > 0 /\ copy[src] > 0 /\ running[src] = 0 /\ copy[src] # sessV)
-ReachDstLiveRefusal == ~(pc = "dstLive" /\ sessV > 0 /\ running[dst] > 0)
+ReachSizeRefusal == ~(pc = "finishCheck" /\ sessV > 0 /\ SizeRefuses)
 ReachDeadCall == pending = NoPending
 
 =============================================================================

@@ -61,3 +61,22 @@ func TestTaskLockIsExclusiveUntilReleased(t *testing.T) {
 		t.Fatal("accepted a path as a task key")
 	}
 }
+
+// A call left running on kant by a ferry that died holds the task's lock
+// there, and the rerun's calls wait for it instead of interleaving with it.
+func TestRemoteCallsWaitForAnEarlierCallOnTheTask(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	kant := &Local{Home: w.kant}
+	release, err := kant.lockRemoteCall(taskKey("src/app-wt/fix-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const held = 1500 * time.Millisecond
+	time.AfterFunc(held, release)
+	start := time.Now()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if d := time.Since(start); d < held {
+		t.Fatalf("the handoff finished in %v, before the earlier call released the lock", d)
+	}
+}

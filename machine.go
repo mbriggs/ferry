@@ -79,7 +79,11 @@ var sshOptions = []string{
 // command prefix: ssh for real hosts, or this binary with a different HOME
 // for tests ("exec:/path/to/home").
 type Remote struct {
-	Label  string
+	Label string
+	// Task, when set, makes each call hold the task's lock on the far side
+	// (lockRemoteCall), so a call left running by a ferry that died finishes
+	// before a rerun's calls start.
+	Task   string
 	prefix []string
 	env    []string
 	gitURL func(rel string) string
@@ -124,6 +128,9 @@ func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.W
 		return err
 	}
 	argv := append(append([]string{}, r.prefix...), "remote", op, base64.StdEncoding.EncodeToString(arg))
+	if r.Task != "" {
+		argv = append(argv, r.Task) // a ferry too old to know it ignores it
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = append(os.Environ(), r.env...)
 	cmd.Stdin = stdin
@@ -233,6 +240,14 @@ func serveRemote(args []string) int {
 		return 1
 	}
 	l := &Local{Home: home}
+	if len(args) > 2 {
+		release, err := l.lockRemoteCall(args[2])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ferry-error: "+oneLine(err.Error()))
+			return 1
+		}
+		defer release()
+	}
 	resp, err := dispatch(l, op, raw)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ferry-error: "+oneLine(err.Error()))

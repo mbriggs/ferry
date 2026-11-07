@@ -13,18 +13,32 @@ type LaunchReq struct {
 	CwdRel      string   `json:"cwd_rel"`
 	Argv        []string `json:"argv"`
 	Agent       string   `json:"agent"`
+	Session     Session  `json:"session"` // as placed here, to see when the agent has it loaded
 	AcceptTrust bool     `json:"accept_trust"`
 }
+
+// launchTimeout is how long Launch waits for the agent to load the session.
+var launchTimeout = 60 * time.Second
 
 // Launch starts the agent in a new Rex session on this machine and returns
 // the session id. When AcceptTrust is set (the folder was trusted on the
 // sending machine), it answers the agent's folder-trust prompt, which would
 // otherwise leave an unattended agent waiting. Claude's prompt defaults to
 // "No, exit", so it needs Down before Enter; Codex defaults to trusting.
+//
+// Launch returns only once Liveness can see the agent. Until the agent
+// registers (Claude writes ~/.claude/sessions/<pid>.json, Codex takes its
+// thread lock), nothing else in ferry knows it is running: a `ferry from`
+// would park the transcript under it, and a rerun would start a second one.
+// So an agent that doesn't register within launchTimeout has its Rex session
+// killed, and Launch fails.
 func (l *Local) Launch(q LaunchReq) (string, error) {
 	cwd := l.abs(q.CwdRel)
-	if q.AcceptTrust && ((q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))) {
-		q.AcceptTrust = false // already trusted here; there's no prompt to answer
+	trusted := (q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))
+	if trusted {
+		q.AcceptTrust = false // there's no prompt to answer
+	} else if !q.AcceptTrust {
+		return "", fmt.Errorf("%s isn't trusted here and wasn't on the sending machine; not starting an agent that would wait at the trust prompt", cwd)
 	}
 	args := append([]string{"new", q.Name, "-c", l.abs(q.CwdRel), "--window", q.Agent, "--json", "--"}, q.Argv...)
 	out, err := run(l.Home, nil, "rex", args...)
@@ -43,7 +57,21 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 	if q.AcceptTrust && len(created.InitialWindows) > 0 && len(created.InitialWindows[0].BlockIDs) > 0 {
 		answerTrust(created.SessionID, created.InitialWindows[0].BlockIDs[0], q.Agent)
 	}
-	return created.SessionID, nil
+	deadline := time.Now().Add(launchTimeout)
+	for {
+		live, err := l.Liveness(q.Session)
+		if err == nil && live.Live && !live.Settling {
+			return created.SessionID, nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if _, err := run("", nil, "rex", "kill", created.SessionID); err != nil {
+		return "", fmt.Errorf("the agent didn't load the session within %v, and killing rex session %s failed (%v); kill it by hand before resuming", launchTimeout, created.SessionID, err)
+	}
+	return "", fmt.Errorf("the agent didn't load the session within %v (waiting at a prompt?); killed its rex session", launchTimeout)
 }
 
 // answerTrust answers the folder-trust dialog if it appears before the agent

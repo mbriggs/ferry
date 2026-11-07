@@ -156,9 +156,37 @@ func taskKey(wtRel string) string {
 // lockTask keeps two ferry commands from handing off the same task at once.
 // The record's generation check only guards state changes; the steps between
 // them (apply, extras, the session) would otherwise interleave. Every handoff
-// is driven from this machine, so a local flock is enough, and the kernel
-// drops it the moment ferry exits, however it exits.
+// is driven from this machine, and the kernel drops the flock the moment
+// ferry exits, however it exits. A call this ferry made on the other machine
+// can still be running there after that; lockRemoteCall covers it.
 func (l *Local) lockTask(task string) (release func(), err error) {
+	release, err = l.flockTask(task, ".lock", 0)
+	if errors.Is(err, errLockHeld) {
+		return nil, errors.New("another ferry is handing off this task; wait for it to finish")
+	}
+	return release, err
+}
+
+// lockRemoteCall is held by `ferry remote` for the length of one call on a
+// task. If the ferry that made a call dies (Ctrl-C, or its machine
+// crashing), the call can keep running here; a rerun's calls wait for it
+// instead of interleaving with it.
+func (l *Local) lockRemoteCall(task string) (release func(), err error) {
+	release, err = l.flockTask(task, ".remote.lock", remoteLockWait)
+	if errors.Is(err, errLockHeld) {
+		return nil, fmt.Errorf("an earlier ferry's call on this task has run here for over %v; wait for it, or find it with `pgrep -af 'ferry remote'`", remoteLockWait)
+	}
+	return release, err
+}
+
+// remoteLockWait outlasts the longest call, a Launch waiting for its agent.
+const remoteLockWait = 3 * time.Minute
+
+var errLockHeld = errors.New("lock held")
+
+// flockTask takes an exclusive flock on locks/<task><suffix>, trying for up
+// to wait.
+func (l *Local) flockTask(task, suffix string, wait time.Duration) (release func(), err error) {
 	if !taskPattern.MatchString(task) {
 		return nil, fmt.Errorf("bad task key %q", task)
 	}
@@ -166,16 +194,24 @@ func (l *Local) lockTask(task string) (release func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, task+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, task+suffix), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errors.New("another ferry is handing off this task; wait for it to finish")
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() { f.Close() }, nil
 		}
-		return nil, err
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			f.Close()
+			return nil, errLockHeld
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	return func() { f.Close() }, nil
 }

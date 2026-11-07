@@ -124,3 +124,26 @@ func TestChangeSummaryIgnoresTheRecordOnKant(t *testing.T) {
 		t.Fatalf("summary should come from the laptop's own refs:\n%s", out)
 	}
 }
+
+// The dehydrate prompt lists what changed since the laptop last sent the
+// task. After a round trip that changed nothing, that's nothing, even with an
+// untracked file the laptop sent.
+func TestDehydrateSummaryAfterANoChangeRoundTrip(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.approve(w.kant, dehydrateScript)
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if !strings.Contains(out, "no files changed") || strings.Contains(out, "untracked.txt") {
+		t.Fatalf("expected the dehydrate prompt to say no files changed:\n%s", out)
+	}
+
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	os.Remove(filepath.Join(wt, "untracked.txt"))
+	out = w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if n := strings.Count(out, "untracked.txt"); n != 1 || !strings.Contains(out, "other files (1)") {
+		t.Fatalf("expected the deleted untracked.txt listed once, got %d:\n%s", n, out)
+	}
+}

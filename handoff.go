@@ -368,6 +368,16 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// the source exactly as it was.
 	var installed *Session
 	if sess != nil {
+		// Measure the session again just before sending it. finish() compares
+		// the source against this, so it must describe what was sent, not
+		// what was found before the steps above.
+		cur, err := src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID})
+		if err != nil {
+			return err
+		} else if cur == nil {
+			return fmt.Errorf("%s: session %s disappeared before it was sent", si.Name, short(sess.ID))
+		}
+		sess = cur
 		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
 		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
 			return err
@@ -389,7 +399,9 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 	rec.LastSent[si.Name] = snap.Fingerprint
 	rec.Attempt = ""
-	rec.Installed = installed
+	// A resumed claim kept the Source it recorded; a rerun of finish()
+	// compares against the copy this run sent.
+	rec.Source, rec.Installed = sess, installed
 	delete(rec.LastSent, di.Name)
 	if rec.Extras == nil {
 		rec.Extras = map[string][]FileEntry{}
@@ -494,7 +506,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 			rexSession = rec.RexSession
 			break
 		}
-		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, AcceptTrust: sess != nil && sess.Trusted})
+		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, Session: *installed, AcceptTrust: sess != nil && sess.Trusted})
 		if err != nil {
 			step("launch", "failed: %v", err)
 			step("resume", "on %s: cd ~/%s && %s", di.Name, cwdRel, shellJoin(argv))
@@ -754,14 +766,18 @@ func changeSummary(dir, task, to string) string {
 	if _, err := git(dir, "rev-parse", "--verify", "-q", from); err != nil {
 		return "ferry has no record here of what this machine last sent, so it can't list what changed"
 	}
-	var names string
-	if to != "" {
-		names, _ = git(dir, "diff", "--name-only", from, to)
-	} else {
-		tracked, _ := git(dir, "diff", "--name-only", from)
-		untracked, _ := git(dir, "ls-files", "--others", "--exclude-standard")
-		names = strings.Trim(tracked+"\n"+untracked, "\n")
+	// What was sent is a snapshot of the whole worktree, untracked files
+	// included, so it's compared with the same snapshot of the worktree now.
+	// `git diff` against the worktree sees only paths in the index, and
+	// would list a sent untracked file as deleted.
+	if to == "" {
+		tree, err := worktreeTree(dir)
+		if err != nil {
+			return "ferry couldn't snapshot the worktree to list what changed: " + err.Error()
+		}
+		to = tree
 	}
+	names, _ := git(dir, "diff", "--name-only", from, to)
 	if names == "" {
 		return "no files changed"
 	}

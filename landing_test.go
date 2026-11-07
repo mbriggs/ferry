@@ -13,7 +13,8 @@ import (
 // moved, and must never start a second agent on it.
 
 // fakeRex puts a rex on PATH that logs each call and pretends to launch.
-// screen is what `rex capture` prints.
+// screen is what `rex capture` prints. The launched "agent" registers the
+// way Claude does, as this test process, unless ~/../no-register exists.
 func (w *world) fakeRex(screen string) (log string) {
 	bin := filepath.Join(w.root, "bin")
 	log = filepath.Join(w.root, "rex.log")
@@ -21,7 +22,13 @@ func (w *world) fakeRex(screen string) (log string) {
 	w.write(w.root, "bin/rex", `#!/bin/sh
 echo "$*" >> "`+log+`"
 case "$1" in
-new) n=$(grep -c '^new ' "`+log+`"); echo "{\"session_id\":\"session:fake-$n\",\"initial_windows\":[{\"block_ids\":[\"block:fake-$n\"]}]}" ;;
+new) n=$(grep -c '^new ' "`+log+`")
+  id=$(echo "$*" | sed -n 's/.* --resume \([^ ]*\).*/\1/p')
+  if [ ! -e "`+filepath.Join(w.root, "no-register")+`" ] && [ -n "$id" ]; then
+    mkdir -p "$HOME/.claude/sessions"
+    echo "{\"pid\":`+fmt.Sprint(os.Getpid())+`,\"sessionId\":\"$id\",\"status\":\"idle\"}" > "$HOME/.claude/sessions/fake-$n.json"
+  fi
+  echo "{\"session_id\":\"session:fake-$n\",\"initial_windows\":[{\"block_ids\":[\"block:fake-$n\"]}]}" ;;
 capture) cat "`+filepath.Join(w.root, "rex-screen")+`" ;;
 ls) echo '{"sessions":[]}' ;;
 esac
@@ -75,6 +82,7 @@ func TestLandingRerunLaunchesOnce(t *testing.T) {
 	w := newWorld(t)
 	log := w.fakeRex("auto mode on")
 	wt := w.laptopTask()
+	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
 	w.failingRestore(wt)
 	if out, err := w.ferry(wt, "to", "kant", "--yes"); err == nil {
 		t.Fatalf("first run should fail in restore:\n%s", out)
@@ -146,5 +154,46 @@ func TestTrustIsNotAnsweredFromConversationText(t *testing.T) {
 	w.mustFerry(wt, "to", "kant", "--yes")
 	if n := countLines(log, "send-key"); n != 0 {
 		t.Fatalf("typed %d keys into a conversation", n)
+	}
+}
+
+// Launch returns only once the agent has registered, because until then
+// Liveness can't see it: a rerun would start a second agent, and a `ferry
+// from` would park the transcript under it.
+func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("Accessing workspace\n ❯ No, exit\n   Yes, I trust this folder\n")
+	w.write(w.root, "no-register", "")
+	t.Setenv("PATH", w.path)
+	t.Setenv("HOME", w.kant)
+	defer func(d time.Duration) { launchTimeout = d }(launchTimeout)
+	launchTimeout = time.Second
+
+	l := &Local{Home: w.kant}
+	s := Session{Agent: agentClaude, ID: sessionID}
+	_, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: true})
+	if err == nil || !strings.Contains(err.Error(), "didn't load the session") {
+		t.Fatalf("Launch = %v, want a timeout", err)
+	}
+	if n := countLines(log, "kill session:fake-1"); n != 1 {
+		t.Fatalf("killed the unregistered agent's rex session %d times, want 1\n%s", n, w.read(w.root, "rex.log"))
+	}
+
+	os.Remove(filepath.Join(w.root, "no-register"))
+	if id, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: true}); err != nil || id != "session:fake-2" {
+		t.Fatalf("Launch of an agent that registers = %q, %v", id, err)
+	}
+}
+
+func TestNoLaunchIntoAFolderNeitherMachineTrusts(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("auto mode on")
+	wt := w.laptopTask()
+	out := w.mustFerry(wt, "to", "kant", "--yes")
+	if n := countLines(log, "new "); n != 0 {
+		t.Fatalf("started an agent that would wait at the trust prompt:\n%s", out)
+	}
+	if !strings.Contains(out, "claude --resume") {
+		t.Fatalf("expected the resume command instead:\n%s", out)
 	}
 }
