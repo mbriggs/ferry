@@ -206,7 +206,15 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- dehydrate ---------------------------------------------------------
-	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, ""); err != nil {
+	// Once a task has been on kant, the laptop's worktree holds code kant
+	// wrote, and dehydrate may run it (bin/rails, docker compose).
+	askDehydrate, dehydrateChanges := false, ""
+	if src.IsLocal() {
+		if _, err := git(src.GitURL(t.WtRel), "rev-parse", "--verify", "-q", sentRef(t.Key)); err == nil {
+			askDehydrate, dehydrateChanges = true, changeSummary(src.GitURL(t.WtRel), t.Key, "")
+		}
+	}
+	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, askDehydrate, dehydrateChanges); err != nil {
 		return err
 	}
 
@@ -345,10 +353,6 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	rec.LastSent[si.Name] = snap.Fingerprint
 	rec.Attempt = ""
 	rec.Installed = installed
-	rec.Changes = ""
-	if dst.IsLocal() {
-		rec.Changes = changeSummary(dst.GitURL(t.RepoRel), fpField(rec.LastSent[di.Name], "head"), snap.Base, t.Key)
-	}
 	delete(rec.LastSent, di.Name)
 	if rec.Extras == nil {
 		rec.Extras = map[string][]FileEntry{}
@@ -363,6 +367,13 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return err
 	}
 	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+	if src.IsLocal() {
+		// What this machine sent, kept here where the other machine can't
+		// change it, for the change summary when the task comes back.
+		if _, err := git(src.GitURL(t.WtRel), "update-ref", sentRef(t.Key), taskRef(t.Key, "wip")); err != nil {
+			return err
+		}
+	}
 
 	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
 }
@@ -414,7 +425,11 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		}
 		step("session", "%s: %s is live", di.Name, short(installed.ID))
 	}
-	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, rec.Changes)
+	changes := ""
+	if dst.IsLocal() {
+		changes = changeSummary(dst.GitURL(t.WtRel), t.Key, taskRef(t.Key, "wip"))
+	}
+	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, dst.IsLocal(), changes)
 	if err != nil {
 		step("restore", "failed: %v", err)
 		step("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
@@ -471,11 +486,12 @@ func moveRefs(src, dst Machine, repoRel string, refspecs ...string) error {
 // Approval is remembered on m by content hash; --yes never approves a hook.
 //
 // Trust runs one way. kant is where agents run unattended, so code arriving
-// from it is less trusted than code arriving from the laptop: a hook that
-// runs on the laptop during `ferry from` asks every time, and shows what
-// kant changed, because restore's job is to run the repo's build tooling,
-// which a kant agent can edit without touching the hook itself.
-func runHook(m Machine, where string, q HookReq, changes string) (string, error) {
+// from it is less trusted than code arriving from the laptop. A hook on the
+// laptop that may run code kant wrote asks every time (everyRun), and shows
+// what changed since the laptop last sent the task, because hooks run the
+// repo's build tooling, which a kant agent can edit without touching the
+// hook itself. changes is computed on the laptop, never read from kant.
+func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) (string, error) {
 	info, err := m.HookInfo(q)
 	if err != nil || !info.Exists {
 		return "", err
@@ -484,15 +500,14 @@ func runHook(m Machine, where string, q HookReq, changes string) (string, error)
 		step(q.Name, "%s: .ferry/%s is over %d KB, too large to review; not running it", where, q.Name, maxHookSize>>10)
 		return "", nil
 	}
-	everyRun := m.IsLocal() && q.Direction == "from"
 	if !info.Approved || everyRun {
 		why := "isn't approved on " + where
 		if everyRun {
-			why = "came back from the other machine; ferry asks before every run here"
+			why = "may run code from the other machine; ferry asks before every run here"
 		}
 		fmt.Printf("%-10s .ferry/%s %s (sha %s):\n%s\n", q.Name, q.Name, why, info.SHA[:12], indent(forTerminal(info.Content)))
 		if changes != "" {
-			fmt.Printf("%-10s changed on the other machine since you sent it:\n%s\n", "", indent(forTerminal(changes)))
+			fmt.Printf("%-10s changed since this machine last sent the task:\n%s\n", "", indent(forTerminal(changes)))
 		}
 		prompt := fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)
 		if everyRun {
@@ -630,22 +645,24 @@ var setupFiles = []string{
 	"Makefile", "Justfile", "Procfile", "Rakefile", ".envrc", "Dockerfile",
 }
 
-// changeSummary describes what the other machine changed since this one last
-// sent the task: commits, then files, with setup and build files called out.
-func changeSummary(repo, lastHead, base, task string) string {
-	wip := taskRef(task, "wip")
-	from := lastHead
-	if from == "" {
-		if mb, err := git(repo, "merge-base", base, "HEAD"); err == nil {
-			from = mb
-		}
+// changeSummary lists the files that differ between what this machine last
+// sent (its own sentRef) and to, or the worktree when to is empty, with setup
+// and build files called out. It reads only this machine's refs.
+func changeSummary(dir, task, to string) string {
+	from := sentRef(task)
+	if _, err := git(dir, "rev-parse", "--verify", "-q", from); err != nil {
+		return "ferry has no record here of what this machine last sent, so it can't list what changed"
 	}
-	if from == "" {
-		return ""
+	var names string
+	if to != "" {
+		names, _ = git(dir, "diff", "--name-only", from, to)
+	} else {
+		tracked, _ := git(dir, "diff", "--name-only", from)
+		untracked, _ := git(dir, "ls-files", "--others", "--exclude-standard")
+		names = strings.Trim(tracked+"\n"+untracked, "\n")
 	}
-	names, err := git(repo, "diff", "--name-only", from, wip)
-	if err != nil || names == "" {
-		return ""
+	if names == "" {
+		return "no files changed"
 	}
 	var setup, other []string
 	for _, n := range strings.Split(names, "\n") {

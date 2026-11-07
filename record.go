@@ -52,11 +52,8 @@ type Record struct {
 	Installed *Session `json:"installed,omitempty"`
 	// Extras is what each machine sent last time it handed the task off, so
 	// an extra deleted on the other side can be removed when the task returns.
-	Extras map[string][]FileEntry `json:"extras,omitempty"`
-	// Changes summarizes what the sending machine changed, shown before a
-	// hook from it runs on the laptop.
-	Changes string `json:"changes,omitempty"`
-	Updated string `json:"updated"`
+	Extras  map[string][]FileEntry `json:"extras,omitempty"`
+	Updated string                 `json:"updated"`
 }
 
 type RecordPutReq struct {

@@ -34,6 +34,10 @@ func gitIndex(dir, index string, args ...string) (string, error) {
 
 func taskRef(task, name string) string { return "refs/ferry/" + task + "/" + name }
 
+// sentRef is the snapshot this machine last sent. It lives outside
+// refs/ferry/<task>/, so a handoff in the other direction never overwrites it.
+func sentRef(task string) string { return "refs/ferry-sent/" + task }
+
 type RepoState struct {
 	Exists bool     `json:"exists"`
 	Roots  []string `json:"roots"`

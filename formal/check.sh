@@ -4,9 +4,12 @@
 #   formal/check.sh              both modes, every invariant
 #   formal/check.sh NoFork       both modes, one invariant
 #
-# happy:  Faults = FALSE (no crash, no failed call). Every invariant must hold.
-# faults: Faults = TRUE. Every invariant must hold, or fail with exactly the
-#         shortest trace listed for it in formal/known-findings.
+# happy:   no crash, no failed call. Every invariant must hold.
+# faults:  crashes between steps, failed calls, lost replies. Every invariant
+#          must hold.
+# overlap: faults, plus a dead run's call on kant finishing after the rerun
+#          started. Every invariant must hold, or fail with exactly the
+#          shortest trace listed for it in formal/known-findings.
 # Exit 0 when all of that is true. Exit 1 on a new violation, a known finding
 # whose trace changed or that now holds, or a TLC error. Traces are written to
 # formal/out/<mode>-<invariant>.out.
@@ -15,8 +18,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 cd "$here"
 
 TLC_TOOL='http:tla2tools[url=https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar,checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88]@1.7.4'
-INVARIANTS="TypeOK NoFork NoLoss OwnerCanResume"
+INVARIANTS="TypeOK NoFork NoLostTurns OwnerCanResume OneAgent AgentHasTranscript"
 MAXGEN=${MAXGEN:-6}
+MAXV=${MAXV:-3}
 
 if [ -n "${TLA2TOOLS:-}" ]; then
   jar=$TLA2TOOLS
@@ -39,19 +43,21 @@ trace() {
 
 mkdir -p out
 status=0
-for mode in happy faults; do
-  faults=FALSE; [ $mode = faults ] && faults=TRUE
+for mode in happy faults overlap; do
+  faults=TRUE; overlap=FALSE
+  [ $mode = happy ] && faults=FALSE
+  [ $mode = overlap ] && overlap=TRUE
   for inv in ${1:-$INVARIANTS}; do
     base=out/$mode-$inv
-    printf 'SPECIFICATION Spec\nCONSTANTS MaxGen = %s\n          Faults = %s\nCONSTRAINT GenBound\nINVARIANT %s\n' \
-      "$MAXGEN" "$faults" "$inv" > "$base.cfg"
+    printf 'SPECIFICATION Spec\nCONSTANTS MaxGen = %s\n          MaxV = %s\n          Faults = %s\n          Overlap = %s\nCONSTRAINT Bounds\nINVARIANT %s\n' \
+      "$MAXGEN" "$MAXV" "$faults" "$overlap" "$inv" > "$base.cfg"
     rm -rf "$base.states"
     # One worker, so TLC reports the same shortest trace on every run.
     "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers 1 -deadlock \
       -config "$base.cfg" -metadir "$base.states" Handoff.tla > "$base.out" 2>&1 || true
     states=$(sed -n 's/.* \([0-9]*\) distinct states found.*/\1/p' "$base.out" | tail -1)
     want=""
-    [ $mode = faults ] && want=$(awk -v i="$inv" '$1 == i {print $2, $3}' known-findings)
+    [ $mode = overlap ] && want=$(awk -v i="$inv" '$1 == i {print $2, $3}' known-findings)
     if grep -q "Invariant $inv is violated" "$base.out"; then
       got=$(trace "$base.out")
       if [ -n "$want" ] && [ "$got" = "$want" ]; then
@@ -70,7 +76,7 @@ for mode in happy faults; do
       if [ -n "$want" ]; then
         echo "FIXED? $mode $inv: holds over $states states, but formal/known-findings lists it"; status=1
       else
-        echo "PASS   $mode $inv: holds over $states states (MaxGen = $MAXGEN)"
+        echo "PASS   $mode $inv: holds over $states states (MaxGen = $MAXGEN, MaxV = $MAXV)"
       fi
     else
       echo "ERROR  $mode $inv: TLC did not finish ($base.out)"; status=1
