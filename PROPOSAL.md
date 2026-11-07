@@ -46,10 +46,10 @@ repo       kant: src/app exists, same root commit
 snapshot   base 4be21f0, wip 9d03c55
 git        pushed refs/ferry/fix-auth/* to kant
 extras     .env.local, .ferry/state/db.dump (approved)
-session    7c1e9a02: 2 files, 1.9 MB
 apply      kant: src/app-wt/fix-auth matches the snapshot
+park       laptop: transcript parked while it travels
+session    7c1e9a02: 2 files, 1.9 MB
 commit     kant owns fix-auth (generation 2)
-park       local transcript moved to ~/.local/state/ferry/parked/
 restore    kant: .ferry/restore (approved, sha 81aa…): deps installed, db loaded
 launch     kant: rex session "fix-auth" running claude --resume 7c1e9a02
 ```
@@ -147,9 +147,9 @@ On kant, `ferry from` stops an idle agent in its Rex pane with `/exit`, retrying
 
 ## One owner at a time
 
-kant holds one record per task at `~/.local/state/ferry/tasks/<task>.json`: `{owner, generation, state, agent, session, fingerprint}`. Every handoff goes through kant, so the record is reachable whenever a handoff can happen. Each write is a compare-and-swap on `generation` under `flock`, and every transition bumps the generation.
+kant holds one record per task at `~/.local/state/ferry/tasks/<task>.json`: `{owner, generation, state, agent, session, fingerprint}`. Every handoff goes through kant, so the record is reachable whenever a handoff can happen. Each write is a compare-and-swap on `generation` under `flock`, and every transition bumps the generation. A handoff also holds a lease on the task for as long as it runs, renewed every 30 seconds, so a second `ferry` on the same task is refused instead of interleaving with the first. A lease left by a killed `ferry` expires after two minutes.
 
-Fencing doesn't depend on anyone reading the record. After a handoff commits, the source moves its transcript into `~/.local/state/ferry/parked/`. A habitual `claude --resume` on the old machine then fails with "no session" instead of quietly forking the conversation. This also matters because every Claude resume re-links the session to its Remote Control cloud session, so a duplicate would fight over that link.
+Fencing doesn't depend on anyone reading the record. Before the receiver gets a copy, the source moves its transcript into `~/.local/state/ferry/parked/`, so at no point can both machines resume it. If the handoff fails before the receiver owns the task, `ferry` puts the transcript back and parks whatever the receiver installed. If `ferry` dies outright, the next run of the same command puts it back first. A habitual `claude --resume` on the old machine then fails with "no session" instead of quietly forking the conversation. This also matters because every Claude resume re-links the session to its Remote Control cloud session, so a duplicate would fight over that link.
 
 The record never expires on its own. A closed laptop is the normal case, and automatic takeover is how two machines end up running the same session.
 
@@ -158,12 +158,12 @@ The record never expires on its own. A closed laptop is the normal case, and aut
 1. Preflight: task, agent stopped, versions. Record `handing-off` at generation g+1, or continue one this direction already started.
 2. Run `dehydrate` on the source, if approved.
 3. Create the repo on the receiver if missing. Snapshot, then push or fetch the refs.
-4. Send extras and session files into a staging directory on the receiver.
-5. Apply and verify the tree.
-6. Move the session into the live agent directories, and record `owned` at g+2. This is the commit point.
-7. Park the source transcript, run `restore` on the receiver if approved, and launch the agent.
+4. Apply and verify the tree, then send extras.
+5. Park the source transcript, send the session files to a staging directory on the receiver, and move them into the live agent directories.
+6. Record the receiver as owner. This is the commit point.
+7. Run `restore` on the receiver if approved, and launch the agent.
 
-A failure before step 6 leaves the source as owner with its transcript in place. A failure after step 6 leaves the receiver as owner. Either way, rerunning the same command picks up where it stopped.
+A failure before step 6 leaves the source as owner with its transcript back in place. A failure after step 6 leaves the receiver as owner. Either way, rerunning the same command picks up where it stopped.
 
 ## Where Rex fits
 

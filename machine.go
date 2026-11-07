@@ -32,6 +32,8 @@ type Machine interface {
 	InstallSession(InstallReq) (Session, error)
 	InstallExtras(InstallExtrasReq) error
 	Park(ParkReq) error
+	Unpark(task string) error
+	ArchivePark(ParkReq) error
 	RecordGet(task string) (*Record, error)
 	RecordPut(RecordPutReq) error
 	RecordList() ([]Record, error)
@@ -171,7 +173,12 @@ func (r *Remote) InstallExtras(q InstallExtrasReq) error {
 	_, err := rpc[struct{}](r, "install-extras", q)
 	return err
 }
-func (r *Remote) Park(q ParkReq) error                   { _, err := rpc[struct{}](r, "park", q); return err }
+func (r *Remote) Park(q ParkReq) error     { _, err := rpc[struct{}](r, "park", q); return err }
+func (r *Remote) Unpark(task string) error { _, err := rpc[struct{}](r, "unpark", task); return err }
+func (r *Remote) ArchivePark(q ParkReq) error {
+	_, err := rpc[struct{}](r, "archive-park", q)
+	return err
+}
 func (r *Remote) RecordGet(task string) (*Record, error) { return rpc[*Record](r, "record-get", task) }
 func (r *Remote) RecordPut(q RecordPutReq) error {
 	_, err := rpc[struct{}](r, "record-put", q)
@@ -323,6 +330,18 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return none, l.Park(q)
+	case "unpark":
+		q, err := decode[string](raw)
+		if err != nil {
+			return nil, err
+		}
+		return none, l.Unpark(q)
+	case "archive-park":
+		q, err := decode[ParkReq](raw)
+		if err != nil {
+			return nil, err
+		}
+		return none, l.ArchivePark(q)
 	case "record-get":
 		q, err := decode[string](raw)
 		if err != nil {

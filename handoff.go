@@ -122,6 +122,12 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- session -----------------------------------------------------------
+	// An interrupted run may have left the transcript parked on its way out.
+	if rec != nil && rec.State == stateHandingOff && rec.From == si.Name {
+		if err := src.Unpark(t.Key); err != nil {
+			return err
+		}
+	}
 	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
 	switch {
 	case opts.SessionID != "":
@@ -293,15 +299,45 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- session -----------------------------------------------------------
+	// The source copy is parked before the receiver gets one, so at no point
+	// can both machines resume it. Until the commit point, a failure puts it
+	// back and parks whatever the receiver installed.
 	var installed *Session
+	parked := false
+	undo := func(cause error) error {
+		if !parked {
+			return cause
+		}
+		if installed != nil {
+			if err := dst.Park(ParkReq{Session: *installed, Task: t.Key, As: "aborted-" + time.Now().Format("20060102-150405")}); err != nil {
+				step("park", "%s: couldn't park the copy installed there: %v", di.Name, err)
+			}
+		}
+		if err := src.Unpark(t.Key); err != nil {
+			return fmt.Errorf("%w; putting the transcript back on %s also failed: %v", cause, si.Name, err)
+		}
+		step("park", "%s: transcript put back", si.Name)
+		return cause
+	}
 	if sess != nil {
-		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
+		if live, err := src.Liveness(*sess); err != nil {
 			return err
+		} else if live.Live && !live.Settling {
+			return fmt.Errorf("%s started again; exit it, then run this again", live.Detail)
+		}
+		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, As: "outgoing"}); err != nil {
+			return err
+		}
+		parked = true
+		step("park", "%s: transcript parked while it travels", si.Name)
+		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
+		outgoing := filepath.Join(".local", "state", "ferry", "parked", t.Key+"-outgoing")
+		if err := transfer(src, ExportReq{Paths: sess.Files, Prefer: outgoing}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
+			return undo(err)
 		}
 		s, err := dst.InstallSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
 		if err != nil {
-			return err
+			return undo(err)
 		}
 		installed = &s
 		step("session", "%s installed on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
@@ -322,7 +358,10 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	delete(rec.LastSent, di.Name)
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
-		return err
+		// The write may have landed even though the reply didn't.
+		if cur, gerr := hub.RecordGet(t.Key); gerr != nil || cur == nil || cur.Generation != rec.Generation || cur.Owner != di.Name {
+			return undo(err)
+		}
 	}
 	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
 
@@ -369,10 +408,9 @@ func lockTask(hub Machine, key, here string) (release func(), err error) {
 // restore, and start the agent. Each is safe to repeat.
 func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts) error {
 	if sess != nil {
-		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, Gen: rec.Generation}); err != nil {
+		if err := src.ArchivePark(ParkReq{Session: *sess, Task: t.Key, As: fmt.Sprintf("g%d", rec.Generation)}); err != nil {
 			return err
 		}
-		step("park", "%s: transcript moved to ~/.local/state/ferry/parked/", si.Name)
 	}
 	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, rec.Changes)
 	if err != nil {

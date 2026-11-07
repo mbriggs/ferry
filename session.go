@@ -474,17 +474,36 @@ func (l *Local) InstallSession(q InstallReq) (Session, error) {
 type ParkReq struct {
 	Session Session `json:"session"`
 	Task    string  `json:"task"`
-	Gen     int     `json:"gen"`
+	// As names the parked copy: "outgoing" while a handoff is sending it,
+	// or "aborted-<time>" for a receiver's copy from a handoff that failed.
+	As string `json:"as"`
 }
 
-// Park moves a handed-off session out of the agent's search path, so a
-// habitual `claude --resume` or `codex resume` on this machine fails instead
-// of forking the conversation. File history stays; it is only read on rewind.
+var (
+	parkName    = regexp.MustCompile(`^(outgoing|aborted-[0-9-]+|g[0-9]+)$`)
+	taskPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+)
+
+// parkDir is where a task's parked session lives. Both names arrive over the
+// remote protocol, so they're checked before they become a path.
+func (l *Local) parkDir(task, as string) (string, error) {
+	if !taskPattern.MatchString(task) || !parkName.MatchString(as) {
+		return "", fmt.Errorf("bad park name %q %q", task, as)
+	}
+	return l.stateDir("parked", task+"-"+as), nil
+}
+
+// Park moves a session out of the agent's search path, so a habitual
+// `claude --resume` or `codex resume` on this machine fails instead of
+// forking the conversation. File history stays; it is only read on rewind.
 func (l *Local) Park(q ParkReq) error {
 	if err := checkSessionID(q.Session.ID); err != nil {
 		return err
 	}
-	dest := l.stateDir("parked", fmt.Sprintf("%s-g%d", q.Task, q.Gen))
+	dest, err := l.parkDir(q.Task, q.As)
+	if err != nil {
+		return err
+	}
 	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
 	for _, f := range q.Session.Files {
 		if !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f) && !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f+"/x") {
@@ -501,6 +520,46 @@ func (l *Local) Park(q ParkReq) error {
 		}
 	}
 	return nil
+}
+
+// Unpark puts a task's outgoing session back where the agent finds it, after
+// a handoff that parked it failed before the receiver took ownership.
+func (l *Local) Unpark(task string) error {
+	dir, err := l.parkDir(task, "outgoing")
+	if err != nil || !isDir(dir) {
+		return err
+	}
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if exists(l.abs(rel)) {
+			return fmt.Errorf("can't put back %s: something new is there; the parked copy is in %s", rel, dir)
+		}
+		return moveFile(p, l.abs(rel))
+	})
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+// ArchivePark files the outgoing copy under the generation that handed it
+// off, once the receiver owns the task.
+func (l *Local) ArchivePark(q ParkReq) error {
+	dir, err := l.parkDir(q.Task, "outgoing")
+	if err != nil {
+		return err
+	}
+	dest, err := l.parkDir(q.Task, q.As)
+	if err != nil || !isDir(dir) {
+		return err
+	}
+	if exists(dest) {
+		return fmt.Errorf("%s already exists", dest)
+	}
+	return os.Rename(dir, dest)
 }
 
 func moveFile(from, to string) error {

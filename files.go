@@ -125,6 +125,9 @@ func walkFiles(dir string, fn func(string)) {
 type ExportReq struct {
 	BaseRel string   `json:"base_rel"`
 	Paths   []string `json:"paths"`
+	// Prefer is a directory, relative to home, holding copies of some paths;
+	// a path found there is read from there. It points at a parked session.
+	Prefer string `json:"prefer,omitempty"`
 }
 
 // Export writes a tar of the given paths (files or whole directories),
@@ -133,6 +136,10 @@ func (l *Local) Export(q ExportReq, w io.Writer) error {
 	base := l.abs(q.BaseRel)
 	tw := tar.NewWriter(w)
 	for _, p := range q.Paths {
+		base := base
+		if q.Prefer != "" && exists(filepath.Join(l.abs(q.Prefer), p)) {
+			base = l.abs(q.Prefer)
+		}
 		err := filepath.WalkDir(filepath.Join(base, p), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
