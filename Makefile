@@ -1,11 +1,13 @@
 # Build ferry for this machine, install it where `ferry remote` is expected
 # (~/.local/bin/ferry), or cross-build for the other machine.
 BIN := $(HOME)/.local/bin
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 
 .PHONY: build install dist test
 
 build:
-	go build -o ferry .
+	$(GOBUILD) -o ferry .
 
 install: build
 	mkdir -p $(BIN)
@@ -13,9 +15,11 @@ install: build
 
 dist:
 	mkdir -p dist
-	GOOS=darwin GOARCH=arm64 go build -o dist/ferry-darwin-arm64 .
-	GOOS=darwin GOARCH=amd64 go build -o dist/ferry-darwin-amd64 .
-	GOOS=linux GOARCH=amd64 go build -o dist/ferry-linux-amd64 .
+	GOOS=darwin GOARCH=arm64 $(GOBUILD) -o dist/ferry-darwin-arm64 .
+	GOOS=darwin GOARCH=amd64 $(GOBUILD) -o dist/ferry-darwin-amd64 .
+	GOOS=linux GOARCH=amd64 $(GOBUILD) -o dist/ferry-linux-amd64 .
+	GOOS=linux GOARCH=arm64 $(GOBUILD) -o dist/ferry-linux-arm64 .
+	cd dist && shasum -a 256 ferry-* > SHA256SUMS
 
 test:
 	go test ./...

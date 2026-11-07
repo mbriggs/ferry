@@ -10,7 +10,8 @@ import (
 	"strings"
 )
 
-const version = "0.1.0"
+// version is set at build time with -ldflags "-X main.version=v1.2.3".
+var version = "dev"
 
 // Local is this machine, rooted at a home directory. Every path ferry touches
 // is relative to Home, so tests can run two Locals side by side.

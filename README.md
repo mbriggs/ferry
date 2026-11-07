@@ -16,7 +16,7 @@ ferry ls kant
    sudo tailscale set --ssh
    ```
 
-2. Install the binary on both machines at `~/.local/bin/ferry`, the path the laptop runs over SSH. On kant, run `make install`. For the Mac, run `make dist` on kant and copy `dist/ferry-darwin-arm64` to the Mac's `~/.local/bin/ferry`.
+2. Install the binary on both machines at `~/.local/bin/ferry`, the path the laptop runs over SSH. On kant, run `make install`. For the Mac, run `make dist` on kant and copy `dist/ferry-darwin-arm64` to the Mac's `~/.local/bin/ferry`. Once the repo is on GitHub, each release has the binaries attached, and `ferry version` prints the release tag.
 
 3. On the laptop, tell ferry how to reach kant. Your Mac username differs from kant's, so name the user:
 
@@ -41,3 +41,7 @@ Use a scratch repo:
 - `make test` runs a round trip between two fake homes. The remote side runs as a real `ferry remote` subprocess.
 - `test/e2e-local.sh` runs a real Claude session on kant through Rex, with a fake laptop home. Run `test/e2e-local.sh clean` afterwards.
 - `test/liveness.sh` rechecks the agent internals ferry depends on. Run it after upgrading Claude Code or Codex.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs gofmt, `go vet`, the test suite and `make dist` on every push to a branch other than main, on both Linux and macOS, since the laptop side runs on a Mac. A push to main (a merge) runs the same checks, then `release.yml` tags the next patch version and publishes a GitHub release with the four binaries and `SHA256SUMS`. The first release is v0.1.0. To bump the minor or major version, push a tag like `v0.2.0` by hand, and later releases count up from it.
