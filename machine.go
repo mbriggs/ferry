@@ -57,6 +57,23 @@ type Info struct {
 
 // --- remote transport ----------------------------------------------------
 
+const sshControlDir = ".local/state/ferry/ssh"
+
+// sshOptions apply to every ssh ferry starts, including git's. A handoff
+// makes a few dozen calls, so they share one connection (ControlMaster),
+// kept for a minute after the last one. Keepalives turn a dead link, such as
+// a closed lid on the other end, into an error within a minute instead of a
+// hang.
+var sshOptions = []string{
+	"-o", "BatchMode=yes",
+	"-o", "ConnectTimeout=10",
+	"-o", "ServerAliveInterval=15",
+	"-o", "ServerAliveCountMax=4",
+	"-o", "ControlMaster=auto",
+	"-o", "ControlPath=~/" + sshControlDir + "/%C",
+	"-o", "ControlPersist=60",
+}
+
 // Remote reaches another machine by running `ferry remote OP ARG` through a
 // command prefix: ssh for real hosts, or this binary with a different HOME
 // for tests ("exec:/path/to/home").
@@ -83,9 +100,12 @@ func NewRemote(label, target, ferryPath string) (*Remote, error) {
 	if ferryPath == "" {
 		ferryPath = "~/.local/bin/ferry"
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		os.MkdirAll(filepath.Join(home, sshControlDir), 0o700)
+	}
 	return &Remote{
 		Label:  label,
-		prefix: []string{"ssh", "-o", "BatchMode=yes", target, ferryPath},
+		prefix: append(append([]string{"ssh"}, sshOptions...), target, ferryPath),
 		gitURL: func(rel string) string { return target + ":" + rel },
 	}, nil
 }

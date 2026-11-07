@@ -474,12 +474,15 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 
 // moveRefs copies refs from src's repo to dst's using whichever side is local.
 func moveRefs(src, dst Machine, repoRel string, refspecs ...string) error {
-	if src.IsLocal() {
-		_, err := git(src.GitURL(repoRel), append([]string{"push", "-q", dst.GitURL(repoRel)}, refspecs...)...)
+	env := append([]string{"GIT_SSH_COMMAND=" + shellJoin(append([]string{"ssh"}, sshOptions...))}, gitEnv...)
+	git := func(dir string, args ...string) error {
+		_, err := run(dir, env, "git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
 		return err
 	}
-	_, err := git(dst.GitURL(repoRel), append([]string{"fetch", "-q", src.GitURL(repoRel)}, refspecs...)...)
-	return err
+	if src.IsLocal() {
+		return git(src.GitURL(repoRel), append([]string{"push", "-q", dst.GitURL(repoRel)}, refspecs...)...)
+	}
+	return git(dst.GitURL(repoRel), append([]string{"fetch", "-q", src.GitURL(repoRel)}, refspecs...)...)
 }
 
 // runHook runs a project hook on m after the user approves its contents.

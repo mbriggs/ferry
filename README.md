@@ -24,6 +24,8 @@ ferry ls kant
    mkdir -p ~/.config/ferry && echo "kant mbriggs@kant" > ~/.config/ferry/hosts
    ```
 
+   Every ssh ferry starts, git's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
+
 4. Check the connection with `ferry ls kant`. It should print `no tasks`.
 
 ## First real test
