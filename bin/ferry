@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# ferry: hand a coding task and its agent session between machines.
+# For now this only implements `ferry setup`. The rest is in PROPOSAL.md.
+set -euo pipefail
+
+# Claude Code permission rules that ferry's development and tests need.
+# Scoped to throwaway test slugs so no agent can rewrite real session history.
+CLAUDE_RULES=(
+  'Edit(~/.claude/projects/-tmp-ferry-test-*/**)'
+)
+
+usage() {
+  cat <<'EOF'
+usage: ferry setup [--dry-run]
+
+setup   add ferry's Claude Code permission rules to ~/.claude/settings.json
+EOF
+}
+
+setup() {
+  local dry_run=0
+  [[ "${1:-}" == "--dry-run" ]] && dry_run=1
+
+  command -v jq >/dev/null || { echo "ferry setup: jq is required" >&2; exit 1; }
+
+  local link="$HOME/.claude/settings.json"
+  mkdir -p "$HOME/.claude"
+  [[ -e "$link" ]] || echo '{}' > "$link"
+
+  # Write through symlinks (e.g. a stowed dotfiles repo) instead of replacing them.
+  local target
+  target=$(readlink -f "$link")
+
+  local rules_json
+  rules_json=$(printf '%s\n' "${CLAUDE_RULES[@]}" | jq -R . | jq -s .)
+
+  local updated
+  updated=$(jq --argjson rules "$rules_json" '
+    reduce $rules[] as $r (.;
+      if any((.permissions.allow // [])[]; . == $r) then .
+      else .permissions.allow = ((.permissions.allow // []) + [$r])
+      end)
+  ' "$target")
+
+  if [[ "$updated" == "$(jq . "$target")" ]]; then
+    echo "claude permissions: already set in $target"
+    return
+  fi
+
+  echo "claude permissions: adding to $target"
+  diff <(jq . "$target") <(printf '%s\n' "$updated") || true
+
+  if (( dry_run )); then
+    echo "dry run, nothing written"
+    return
+  fi
+
+  local backup="$target.bak.$(date +%Y%m%d%H%M%S)"
+  cp -p "$target" "$backup"
+  local tmp
+  tmp=$(mktemp "${target}.XXXXXX")
+  printf '%s\n' "$updated" > "$tmp"
+  chmod --reference="$target" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$target"
+  echo "backup at $backup"
+}
+
+case "${1:-}" in
+  setup) shift; setup "$@" ;;
+  -h|--help|"") usage ;;
+  *) echo "ferry: unknown command '$1'" >&2; usage >&2; exit 2 ;;
+esac
