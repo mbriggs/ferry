@@ -47,7 +47,7 @@ func (l *Local) Info() (Info, error) {
 		}
 		name, _, _ = strings.Cut(h, ".")
 	}
-	_, rexErr := exec.LookPath("rex")
+	_, rexErr := lookTool("rex")
 	return Info{
 		Name:   name,
 		Home:   l.Home,
@@ -61,7 +61,13 @@ func (l *Local) Info() (Info, error) {
 
 // toolVersion returns the first dotted version number a tool prints, or "".
 func toolVersion(name string, args ...string) string {
-	out, err := exec.Command(name, args...).Output()
+	path, err := lookTool(name)
+	if err != nil {
+		return ""
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Env = toolEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

@@ -220,6 +220,7 @@ func (r *Remote) Launch(q LaunchReq) (string, error)    { return rpc[string](r, 
 
 // serveRemote handles `ferry remote OP ARG` on the far side.
 func serveRemote(args []string) int {
+	useLoginPath = true
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "ferry-error: remote: missing operation")
 		return 2

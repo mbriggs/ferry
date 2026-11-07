@@ -166,7 +166,7 @@ func (l *Local) RunHook(q HookReq) (HookResult, error) {
 		cmd = exec.Command("/bin/sh", copy.Name())
 	}
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(toolEnv(),
 		"FERRY_DIRECTION="+q.Direction,
 		"FERRY_TASK="+q.Task,
 		"FERRY_ROOT="+root,
