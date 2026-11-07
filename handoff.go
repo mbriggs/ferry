@@ -188,7 +188,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	// --- dehydrate ---------------------------------------------------------
-	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, true); err != nil {
+	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, ""); err != nil {
 		return err
 	}
 
@@ -291,9 +291,13 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		rec.LastSent = map[string]string{}
 	}
 	rec.LastSent[si.Name] = snap.Fingerprint
-	delete(rec.LastSent, di.Name)
 	rec.Attempt = ""
 	rec.Installed = installed
+	rec.Changes = ""
+	if dst.IsLocal() {
+		rec.Changes = changeSummary(dst.GitURL(t.RepoRel), fpField(rec.LastSent[di.Name], "head"), snap.Base, t.Key)
+	}
+	delete(rec.LastSent, di.Name)
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		return err
@@ -312,7 +316,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		}
 		step("park", "%s: transcript moved to ~/.local/state/ferry/parked/", si.Name)
 	}
-	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, false)
+	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, rec.Changes)
 	if err != nil {
 		step("restore", "failed: %v", err)
 		step("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
@@ -367,14 +371,36 @@ func moveRefs(src, dst Machine, repoRel string, refspecs ...string) error {
 
 // runHook runs a project hook on m after the user approves its contents.
 // Approval is remembered on m by content hash; --yes never approves a hook.
-func runHook(m Machine, where string, q HookReq, required bool) (string, error) {
+//
+// Trust runs one way. kant is where agents run unattended, so code arriving
+// from it is less trusted than code arriving from the laptop: a hook that
+// runs on the laptop during `ferry from` asks every time, and shows what
+// kant changed, because restore's job is to run the repo's build tooling,
+// which a kant agent can edit without touching the hook itself.
+func runHook(m Machine, where string, q HookReq, changes string) (string, error) {
 	info, err := m.HookInfo(q)
 	if err != nil || !info.Exists {
 		return "", err
 	}
-	if !info.Approved {
-		fmt.Printf("%-10s %s: .ferry/%s isn't approved on %s (sha %s):\n%s\n", q.Name, where, q.Name, where, info.SHA[:12], indent(info.Content))
-		if !confirm(fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)) {
+	if info.TooLarge {
+		step(q.Name, "%s: .ferry/%s is over %d KB, too large to review; not running it", where, q.Name, maxHookSize>>10)
+		return "", nil
+	}
+	everyRun := m.IsLocal() && q.Direction == "from"
+	if !info.Approved || everyRun {
+		why := "isn't approved on " + where
+		if everyRun {
+			why = "came back from the other machine; ferry asks before every run here"
+		}
+		fmt.Printf("%-10s .ferry/%s %s (sha %s):\n%s\n", q.Name, q.Name, why, info.SHA[:12], indent(forTerminal(info.Content)))
+		if changes != "" {
+			fmt.Printf("%-10s changed on the other machine since you sent it:\n%s\n", "", indent(forTerminal(changes)))
+		}
+		prompt := fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)
+		if everyRun {
+			prompt = fmt.Sprintf("run this %s on %s now?", q.Name, where)
+		}
+		if !confirm(prompt) {
 			step(q.Name, "skipped")
 			return "", nil
 		}
@@ -495,4 +521,62 @@ func shellJoin(argv []string) string {
 		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
 	return strings.Join(parts, " ")
+}
+
+// setupFiles are files that build and setup tools execute or obey. A change to
+// one is called out before a hook from the other machine runs here.
+var setupFiles = []string{
+	"package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", ".npmrc",
+	"Gemfile", "Gemfile.lock", "mix.exs", "mix.lock", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
+	"pyproject.toml", "uv.lock", "poetry.lock", "setup.py", "mise.toml", ".mise.toml", ".tool-versions",
+	"Makefile", "Justfile", "Procfile", "Rakefile", ".envrc", "Dockerfile",
+}
+
+// changeSummary describes what the other machine changed since this one last
+// sent the task: commits, then files, with setup and build files called out.
+func changeSummary(repo, lastHead, base, task string) string {
+	wip := taskRef(task, "wip")
+	from := lastHead
+	if from == "" {
+		if mb, err := git(repo, "merge-base", base, "HEAD"); err == nil {
+			from = mb
+		}
+	}
+	if from == "" {
+		return ""
+	}
+	names, err := git(repo, "diff", "--name-only", from, wip)
+	if err != nil || names == "" {
+		return ""
+	}
+	var setup, other []string
+	for _, n := range strings.Split(names, "\n") {
+		base := filepath.Base(n)
+		risky := strings.HasPrefix(n, "bin/") || strings.HasPrefix(n, "script/") || strings.HasPrefix(n, "scripts/") || strings.HasPrefix(n, ".ferry/") || strings.HasPrefix(base, "docker-compose") || strings.HasPrefix(base, "compose.") || strings.HasPrefix(base, "requirements")
+		for _, s := range setupFiles {
+			if base == s {
+				risky = true
+			}
+		}
+		if risky {
+			setup = append(setup, n)
+		} else {
+			other = append(other, n)
+		}
+	}
+	var b strings.Builder
+	if len(setup) > 0 {
+		fmt.Fprintf(&b, "build and setup files: %s\n", strings.Join(setup, ", "))
+	}
+	if len(other) > 0 {
+		shown := other
+		if len(shown) > 15 {
+			shown = shown[:15]
+		}
+		fmt.Fprintf(&b, "other files (%d): %s", len(other), strings.Join(shown, ", "))
+		if len(other) > len(shown) {
+			b.WriteString(", ...")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

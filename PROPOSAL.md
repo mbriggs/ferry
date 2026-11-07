@@ -103,7 +103,13 @@ Each project can have two optional executables:
 - `.ferry/dehydrate` runs on the machine giving up the task, after the agent stops and before the snapshot. It writes state that git doesn't hold into `.ferry/state/` and stops anything holding the working tree.
 - `.ferry/restore` runs on the machine taking the task, after ownership moves and before the agent starts. It installs dependencies, loads what `dehydrate` saved, and starts services. On kant it can start long-running services in their own panes with the local `rex run`.
 
-Scripts never run without approval. The scripts come from the repo, and the repo is something an agent on the other machine can edit. Without approval, an agent on kant could plant code in `restore` that your laptop runs on the next `ferry from`. So `ferry` keeps approved script hashes in `~/.config/ferry/approved` on the machine that will run each script. A script whose hash isn't approved is shown in full on the laptop, and `ferry` asks before running it. `--yes` does not approve scripts. If you decline, the handoff continues without that step, and the resume note says the environment is cold.
+Scripts never run without approval, and trust runs one way. kant is where agents work unattended, so anything arriving from kant is treated as less trusted than anything arriving from the laptop.
+
+- On the machine that runs a hook, `ferry` keeps approved hashes in `~/.config/ferry/approved`. A hook whose hash isn't approved is shown in full on the laptop, and `ferry` asks before running it. Hooks over 64 KB can't be shown in full, so they never run. The display escapes control characters, so a script can't hide lines with carriage returns or terminal escapes. `ferry` runs a private copy of the exact bytes it hashed.
+- A hook that runs on the laptop during `ferry from` asks every time, even if it's approved. Approval by hash only covers the hook file. `restore` exists to run the repo's build tooling (`npm install`, `bin/setup`), and an agent on kant can change what that tooling runs without touching the hook. So before it runs, `ferry` shows what kant changed since you sent the task, and calls out build and setup files like `package.json`, lockfiles, `Makefile` and `bin/`.
+- `--yes` never counts as approval. If you decline, or there's no terminal to ask on, the handoff continues without that step, and the resume note says the environment is cold.
+
+This is the guarantee: nothing from kant runs on the laptop without you saying yes on that run. ferry doesn't sandbox anything. Once you say yes, kant's changes run with your permissions, just as they would if you pulled the branch and ran `npm install` yourself.
 
 `ferry` passes both scripts `FERRY_DIRECTION` (`to` or `from`), `FERRY_TASK`, `FERRY_ROOT` and `FERRY_STATE`. The contract has three rules:
 

@@ -48,7 +48,10 @@ type Record struct {
 	// source copy may be parked and a search would find a different session.
 	Source    *Session `json:"source,omitempty"`
 	Installed *Session `json:"installed,omitempty"`
-	Updated   string   `json:"updated"`
+	// Changes summarizes what the sending machine changed, shown before a
+	// hook from it runs on the laptop.
+	Changes string `json:"changes,omitempty"`
+	Updated string `json:"updated"`
 }
 
 type RecordPutReq struct {

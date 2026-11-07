@@ -30,7 +30,12 @@ type HookInfo struct {
 	SHA      string `json:"sha"`
 	Content  string `json:"content"`
 	Approved bool   `json:"approved"`
+	// TooLarge hooks can't be shown in full, so they can't be approved.
+	TooLarge bool `json:"too_large,omitempty"`
 }
+
+// maxHookSize is the largest hook ferry will show for approval.
+const maxHookSize = 64 << 10
 
 type HookResult struct {
 	OK      bool   `json:"ok"`
@@ -61,13 +66,34 @@ func (l *Local) HookInfo(q HookReq) (HookInfo, error) {
 	if err != nil {
 		return HookInfo{}, err
 	}
-	sum := sha256.Sum256(data)
-	sha := hex.EncodeToString(sum[:])
-	content := string(data)
-	if len(content) > 64<<10 {
-		content = content[:64<<10] + "\n[truncated]"
+	sha := hashHook(data)
+	if len(data) > maxHookSize {
+		return HookInfo{Exists: true, Path: p, SHA: sha, TooLarge: true, Approved: l.approved(sha)}, nil
 	}
-	return HookInfo{Exists: true, Path: p, SHA: sha, Content: content, Approved: l.approved(sha)}, nil
+	return HookInfo{Exists: true, Path: p, SHA: sha, Content: string(data), Approved: l.approved(sha)}, nil
+}
+
+func hashHook(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// forTerminal makes hook text safe to print for review: every control
+// character except newline and tab is shown escaped, so a script can't use
+// carriage returns or ANSI sequences to hide lines from the person approving.
+func forTerminal(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 || r == 0x202e:
+			fmt.Fprintf(&b, "\\x{%x}", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (l *Local) approved(sha string) bool {
@@ -102,19 +128,42 @@ func (l *Local) Approve(sha string) error {
 // RunHook runs an approved hook. The caller passes the sha it showed the user;
 // the hook runs only if the file still has that sha and it is approved here.
 func (l *Local) RunHook(q HookReq) (HookResult, error) {
-	info, err := l.HookInfo(q)
-	if err != nil || !info.Exists {
-		return HookResult{OK: true}, err
+	p := l.hookPath(q)
+	if p == "" {
+		return HookResult{OK: true}, nil
 	}
-	if info.SHA != q.SHA || !info.Approved {
+	// Hash and run the same bytes: copy them to a private file first, so the
+	// hook can't be swapped between the check and the exec.
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return HookResult{}, err
+	}
+	if hashHook(data) != q.SHA || !l.approved(q.SHA) || len(data) > maxHookSize {
 		return HookResult{}, fmt.Errorf("%s changed or isn't approved; not running it", q.Name)
 	}
+	if err := os.MkdirAll(l.stateDir("run"), 0o700); err != nil {
+		return HookResult{}, err
+	}
+	copy, err := os.CreateTemp(l.stateDir("run"), q.Name+"-*")
+	if err != nil {
+		return HookResult{}, err
+	}
+	defer os.Remove(copy.Name())
+	if _, err := copy.Write(data); err != nil {
+		copy.Close()
+		return HookResult{}, err
+	}
+	if err := copy.Chmod(0o700); err != nil {
+		copy.Close()
+		return HookResult{}, err
+	}
+	if err := copy.Close(); err != nil {
+		return HookResult{}, err
+	}
 	root := l.abs(q.WtRel)
-	// Run through sh when the file isn't executable, rather than chmod it:
-	// the exec bit is tracked, and ferry never changes the worktree.
-	cmd := exec.Command(info.Path)
-	if st, err := os.Stat(info.Path); err == nil && st.Mode().Perm()&0o111 == 0 {
-		cmd = exec.Command("/bin/sh", info.Path)
+	cmd := exec.Command(copy.Name())
+	if !bytes.HasPrefix(data, []byte("#!")) {
+		cmd = exec.Command("/bin/sh", copy.Name())
 	}
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
