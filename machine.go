@@ -31,6 +31,7 @@ type Machine interface {
 	Import(req ImportReq, r io.Reader) error
 	StageSession(InstallReq) (Session, error)
 	PlaceSession(PlaceReq) error
+	PlanExtras(PlanReq) (ExtrasPlan, error)
 	InstallExtras(InstallExtrasReq) (InstallExtrasResult, error)
 	Park(ParkReq) error
 	RecordGet(task string) (*Record, error)
@@ -190,6 +191,9 @@ func (r *Remote) PlaceSession(q PlaceReq) error {
 	_, err := rpc[struct{}](r, "place-session", q)
 	return err
 }
+func (r *Remote) PlanExtras(q PlanReq) (ExtrasPlan, error) {
+	return rpc[ExtrasPlan](r, "plan-extras", q)
+}
 func (r *Remote) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 	return rpc[InstallExtrasResult](r, "install-extras", q)
 }
@@ -337,6 +341,12 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return none, l.PlaceSession(q)
+	case "plan-extras":
+		q, err := decode[PlanReq](raw)
+		if err != nil {
+			return nil, err
+		}
+		return l.PlanExtras(q)
 	case "install-extras":
 		q, err := decode[InstallExtrasReq](raw)
 		if err != nil {

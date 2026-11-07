@@ -37,3 +37,17 @@ func TestExtrasDeletedOnKantAreRemovedOnReturn(t *testing.T) {
 		t.Fatal("the removed .env wasn't parked")
 	}
 }
+
+func TestUnchangedExtrasAreNotSentAgain(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.approve(w.kant, dehydrateScript)
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	if !strings.Contains(out, "already on laptop, not sent: .env") {
+		t.Fatalf("the unchanged .env was sent back:\n%s", out)
+	}
+	if w.read(wt, ".env") != "SECRET=1\n" {
+		t.Fatal(".env changed")
+	}
+}

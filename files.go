@@ -10,7 +10,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -145,14 +148,26 @@ func walkFiles(dir string, fn func(string)) {
 type ExportReq struct {
 	BaseRel string   `json:"base_rel"`
 	Paths   []string `json:"paths"`
+	// SHAs are the files' sha256 as listed before the transfer, by path
+	// relative to BaseRel. The receiver names partial files after them, so a
+	// later transfer of the same content can resume.
+	SHAs map[string]string `json:"shas,omitempty"`
+	// Offsets skip the first bytes of files the receiver already holds part of.
+	Offsets map[string]int64 `json:"offsets,omitempty"`
 }
 
 // sumsName is the last entry of every export: "sha256 path" per file, so the
 // receiver can check what it wrote against what was read here.
 const sumsName = ".ferry-sums"
 
+const (
+	paxSHA    = "FERRY.sha"
+	paxOffset = "FERRY.offset"
+)
+
 // Export writes a tar of the given paths (files or whole directories),
-// relative to BaseRel, to w, ending with a sumsName entry.
+// relative to BaseRel, to w, ending with a sumsName entry. A resumed file's
+// entry holds only the bytes after its offset; its sum covers the whole file.
 func (l *Local) Export(q ExportReq, w io.Writer) error {
 	base := l.abs(q.BaseRel)
 	tw := tar.NewWriter(w)
@@ -170,12 +185,20 @@ func (l *Local) Export(q ExportReq, w io.Writer) error {
 				return err
 			}
 			rel, _ := filepath.Rel(base, path)
-			if filepath.ToSlash(rel) == sumsName {
+			name := filepath.ToSlash(rel)
+			if name == sumsName {
 				return fmt.Errorf("can't send a file named %s", sumsName)
 			}
-			hdr := &tar.Header{Name: filepath.ToSlash(rel), Mode: int64(info.Mode().Perm()), Size: info.Size(), ModTime: info.ModTime(), Typeflag: tar.TypeReg}
-			if err := tw.WriteHeader(hdr); err != nil {
-				return err
+			off := q.Offsets[name]
+			if off < 0 || off > info.Size() {
+				off = 0
+			}
+			hdr := &tar.Header{Name: name, Mode: int64(info.Mode().Perm()), Size: info.Size() - off, ModTime: info.ModTime(), Typeflag: tar.TypeReg, Format: tar.FormatPAX, PAXRecords: map[string]string{}}
+			if sha := q.SHAs[name]; sha != "" {
+				hdr.PAXRecords[paxSHA] = sha
+			}
+			if off > 0 {
+				hdr.PAXRecords[paxOffset] = strconv.FormatInt(off, 10)
 			}
 			f, err := os.Open(path)
 			if err != nil {
@@ -183,10 +206,16 @@ func (l *Local) Export(q ExportReq, w io.Writer) error {
 			}
 			defer f.Close()
 			h := sha256.New()
+			if _, err := io.CopyN(h, f, off); err != nil {
+				return err
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
 			if _, err := io.Copy(io.MultiWriter(tw, h), f); err != nil {
 				return err
 			}
-			fmt.Fprintf(&sums, "%x %s\n", h.Sum(nil), hdr.Name)
+			fmt.Fprintf(&sums, "%x %s\n", h.Sum(nil), name)
 			return nil
 		})
 		if err != nil {
@@ -208,10 +237,23 @@ type ImportReq struct {
 	Private bool   `json:"private"` // write files 0600 (secrets)
 }
 
+var shaPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// partPath is where Import writes a file until the whole transfer checks out.
+// A file sent with its sha gets a name tied to that content, so a part left
+// by a failed transfer is only ever resumed with the same content.
+func partPath(dest, sha string) string {
+	if shaPattern.MatchString(sha) {
+		return dest + ".ferry-part-" + sha[:16]
+	}
+	return dest + ".ferry-part"
+}
+
 // Import extracts a tar from r under BaseRel. Entries that would land outside
-// BaseRel are rejected. Every file is hashed as it's written and synced to
-// disk, and the stream must end with sums matching what was written; a
-// stream cut short or altered fails here, before anything is installed.
+// BaseRel are rejected. Every file is written to a part file, hashed, and
+// synced, and the stream must end with sums matching what was written. Only
+// then do the parts take their real names, so a stream cut short or altered
+// fails here with nothing installed, and leaves parts a rerun can resume.
 func (l *Local) Import(q ImportReq, r io.Reader) error {
 	base := l.abs(q.BaseRel)
 	if q.Clean {
@@ -224,6 +266,7 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 	}
 	tr := tar.NewReader(r)
 	written := map[string]string{}
+	parts := map[string][2]string{} // name -> part, dest
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -235,13 +278,22 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 			continue
 		}
 		if hdr.Name == sumsName {
-			if err := checkSums(tr, written); err != nil {
+			bad, err := checkSums(tr, written)
+			if err != nil {
+				if p, ok := parts[bad]; ok {
+					os.Remove(p[0])
+				}
 				return err
 			}
 			if _, err := tr.Next(); !errors.Is(err, io.EOF) {
 				return errors.New("the transfer continued past its checksums")
 			}
-			_, err := io.Copy(io.Discard, r)
+			for _, p := range parts {
+				if err := os.Rename(p[0], p[1]); err != nil {
+					return err
+				}
+			}
+			_, err = io.Copy(io.Discard, r)
 			return err
 		}
 		name := filepath.FromSlash(hdr.Name)
@@ -256,12 +308,27 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 		if q.Private {
 			mode = 0o600
 		}
-		f, err := os.OpenFile(dest+".ferry-part", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-		if err != nil {
+		part := partPath(dest, hdr.PAXRecords[paxSHA])
+		off, _ := strconv.ParseInt(hdr.PAXRecords[paxOffset], 10, 64)
+		h := sha256.New()
+		var f *os.File
+		if off > 0 {
+			if f, err = os.OpenFile(part, os.O_RDWR, mode); err != nil {
+				return fmt.Errorf("can't resume %s: %w", hdr.Name, err)
+			}
+			if err := f.Truncate(off); err != nil {
+				f.Close()
+				return err
+			}
+			if n, err := io.CopyN(h, f, off); err != nil || n != off {
+				f.Close()
+				return fmt.Errorf("can't resume %s: the partial copy is short", hdr.Name)
+			}
+		} else if f, err = os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode); err != nil {
 			return err
 		}
-		h := sha256.New()
 		if _, err := io.Copy(io.MultiWriter(f, h), tr); err != nil {
+			f.Sync()
 			f.Close()
 			return err
 		}
@@ -273,19 +340,19 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 		if err := f.Close(); err != nil {
 			return err
 		}
-		if err := os.Chmod(dest+".ferry-part", mode); err != nil {
+		if err := os.Chmod(part, mode); err != nil {
 			return err
 		}
-		if err := os.Rename(dest+".ferry-part", dest); err != nil {
-			return err
-		}
+		parts[hdr.Name] = [2]string{part, dest}
 	}
 }
 
-func checkSums(r io.Reader, written map[string]string) error {
+// checkSums compares the sender's sums with what was written, and names the
+// file that differs, if one does.
+func checkSums(r io.Reader, written map[string]string) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, 64<<20))
 	if err != nil {
-		return err
+		return "", err
 	}
 	listed := 0
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
@@ -294,27 +361,68 @@ func checkSums(r io.Reader, written map[string]string) error {
 		}
 		sum, name, ok := strings.Cut(line, " ")
 		if !ok {
-			return fmt.Errorf("bad checksum line %q", line)
+			return "", fmt.Errorf("bad checksum line %q", line)
 		}
 		got, have := written[name]
 		switch {
 		case !have:
-			return fmt.Errorf("%s was sent but never arrived", name)
+			return name, fmt.Errorf("%s was sent but never arrived", name)
 		case got != sum:
-			return fmt.Errorf("%s arrived different from what was sent (sha256 %s, want %s)", name, got[:12], sum[:min(12, len(sum))])
+			return name, fmt.Errorf("%s arrived different from what was sent (sha256 %s, want %s)", name, got[:12], sum[:min(12, len(sum))])
 		}
 		listed++
 	}
 	if listed != len(written) {
-		return errors.New("the transfer carried files its checksums don't list")
+		return "", errors.New("the transfer carried files its checksums don't list")
 	}
-	return nil
+	return "", nil
+}
+
+type PlanReq struct {
+	WtRel    string      `json:"wt_rel"`
+	StageRel string      `json:"stage_rel"`
+	Files    []FileEntry `json:"files"`
+}
+
+type ExtrasPlan struct {
+	// Have lists files this side already has with the same content.
+	Have []string `json:"have,omitempty"`
+	// Partial is how much of each file an earlier, interrupted transfer
+	// left in staging.
+	Partial map[string]int64 `json:"partial,omitempty"`
+}
+
+// PlanExtras says which extras needn't be sent, and where interrupted
+// transfers can resume. A file counts as had only when size and sha256 match,
+// and the size check comes first, so large changed files aren't hashed.
+func (l *Local) PlanExtras(q PlanReq) (ExtrasPlan, error) {
+	root, stage := l.abs(q.WtRel), l.abs(q.StageRel)
+	plan := ExtrasPlan{Partial: map[string]int64{}}
+	for _, e := range q.Files {
+		if safeDest(root, e.Path) != nil || safeDest(stage, e.Path) != nil {
+			continue
+		}
+		p := filepath.Join(root, e.Path)
+		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() && st.Size() == e.Size {
+			if sum, err := fileSHA(p); err == nil && sum == e.SHA {
+				plan.Have = append(plan.Have, e.Path)
+				continue
+			}
+		}
+		if st, err := os.Lstat(partPath(filepath.Join(stage, e.Path), e.SHA)); err == nil && st.Mode().IsRegular() && st.Size() <= e.Size {
+			plan.Partial[filepath.ToSlash(e.Path)] = st.Size()
+		}
+	}
+	return plan, nil
 }
 
 type InstallExtrasReq struct {
 	WtRel    string `json:"wt_rel"`
 	StageRel string `json:"stage_rel"`
 	Task     string `json:"task"`
+	// Files lists the extras just staged. Only these are installed, so
+	// anything else in staging from an earlier attempt stays out.
+	Files []FileEntry `json:"files,omitempty"`
 	// Remove lists extras this machine sent last time that the other side no
 	// longer has. Each is parked if it's still exactly what was sent.
 	Remove []FileEntry `json:"remove,omitempty"`
@@ -328,8 +436,10 @@ type InstallExtrasResult struct {
 // InstallExtras moves staged extras into the worktree. The worktree's tracked
 // contents came from the other machine, so every path is checked here: no
 // component may be a symlink (a tracked symlink could otherwise redirect a
-// write anywhere in this home), nothing goes under .git, and files are
-// written through a fresh, randomly named temp file and renamed into place.
+// write anywhere in this home), and nothing goes under .git. Files are
+// renamed from staging, which is on the same filesystem as home, so a large
+// dump isn't copied again; across filesystems they're streamed into a fresh
+// temp file and renamed.
 //
 // Removals never delete: a removed extra moves to
 // ~/.local/state/ferry/parked/<task>-extras-<time>/.
@@ -360,46 +470,63 @@ func (l *Local) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 			res.Removed = append(res.Removed, e.Path)
 		}
 	}
-	if !isDir(stage) {
-		return res, nil
-	}
-	return res, filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+	for _, e := range q.Files {
+		if err := safeDest(root, e.Path); err != nil {
+			return res, err
 		}
-		rel, _ := filepath.Rel(stage, p)
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("refusing extra %s: not a regular file", rel)
+		if err := safeDest(stage, e.Path); err != nil {
+			return res, err
 		}
-		if err := safeDest(root, rel); err != nil {
-			return err
+		from, dest := filepath.Join(stage, e.Path), filepath.Join(root, e.Path)
+		if st, err := os.Lstat(from); err != nil || !st.Mode().IsRegular() {
+			return res, fmt.Errorf("extra %s wasn't staged", e.Path)
 		}
-		dest := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return err
+			return res, err
 		}
-		data, err := os.ReadFile(p)
+		if err := os.Chmod(from, 0o600); err != nil {
+			return res, err
+		}
+		err := os.Rename(from, dest)
+		if errors.Is(err, syscall.EXDEV) {
+			err = copyInto(from, dest)
+		}
 		if err != nil {
-			return err
+			return res, err
 		}
-		tmp, err := os.CreateTemp(filepath.Dir(dest), ".ferry-extra-*")
-		if err != nil {
-			return err
-		}
-		defer os.Remove(tmp.Name())
-		if _, err := tmp.Write(data); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err := tmp.Chmod(0o600); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err := tmp.Close(); err != nil {
-			return err
-		}
-		return os.Rename(tmp.Name(), dest)
-	})
+	}
+	return res, nil
+}
+
+// copyInto streams from into a new temp file beside dest and renames it over
+// dest.
+func copyInto(from, dest string) error {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".ferry-extra-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dest)
 }
 
 // safeDest checks that writing root/rel stays inside root: rel is relative and

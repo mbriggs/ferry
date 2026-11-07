@@ -99,7 +99,7 @@ func TestInstallExtrasRefusesSymlinks(t *testing.T) {
 			os.MkdirAll(stage, 0o755)
 			os.WriteFile(filepath.Join(stage, ".env"), []byte("payload\n"), 0o600)
 
-			_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras"})
+			_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras", Files: []FileEntry{{Path: "cfg/.env"}}})
 			if err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("want a symlink refusal, got %v", err)
 			}
@@ -117,7 +117,7 @@ func TestInstallExtrasRefusesGitDir(t *testing.T) {
 	stage := filepath.Join(home, ".local/state/ferry/in/t/extras/.git/hooks")
 	os.MkdirAll(stage, 0o755)
 	os.WriteFile(filepath.Join(stage, "post-checkout"), []byte("#!/bin/sh\nevil\n"), 0o700)
-	_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras"})
+	_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras", Files: []FileEntry{{Path: ".git/hooks/post-checkout"}}})
 	if err == nil || !strings.Contains(err.Error(), ".git") {
 		t.Fatalf("want a .git refusal, got %v", err)
 	}

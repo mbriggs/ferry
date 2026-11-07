@@ -288,30 +288,56 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 	sentExtras := false
 	if len(extras) > 0 || len(gone) > 0 {
-		var names, paths, goneNames []string
+		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "extras")
+		plan, err := dst.PlanExtras(PlanReq{WtRel: t.WtRel, StageRel: stage, Files: extras})
+		if err != nil {
+			return err
+		}
+		have := map[string]bool{}
+		for _, p := range plan.Have {
+			have[p] = true
+		}
+		var send []FileEntry
+		var names, paths, same, goneNames []string
+		shas := map[string]string{}
 		for _, e := range extras {
-			names = append(names, fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size)))
+			if have[e.Path] {
+				same = append(same, e.Path)
+				continue
+			}
+			send = append(send, e)
+			label := fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size))
+			if off := plan.Partial[filepath.ToSlash(e.Path)]; off > 0 {
+				label = fmt.Sprintf("%s (%s, resuming at %s)", e.Path, humanSize(e.Size), humanSize(off))
+			}
+			names = append(names, label)
 			paths = append(paths, e.Path)
+			shas[filepath.ToSlash(e.Path)] = e.SHA
 		}
 		for _, e := range gone {
 			goneNames = append(goneNames, e.Path)
 		}
-		prompt := "send these ignored files to " + di.Name + "?"
 		if len(names) > 0 {
 			step("extras", "%s", strings.Join(names, ", "))
 		}
+		if len(same) > 0 {
+			step("extras", "already on %s, not sent: %s", di.Name, strings.Join(same, ", "))
+		}
+		prompt := "send these ignored files to " + di.Name + "?"
 		if len(gone) > 0 {
 			step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, strings.Join(goneNames, ", "))
 			prompt = "send these ignored files to " + di.Name + " and remove the deleted ones there?"
 		}
-		if opts.Yes || confirm(prompt) {
-			stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "extras")
+		switch {
+		case len(send) == 0 && len(gone) == 0:
+			sentExtras = true
+		case opts.Yes || confirm(prompt):
 			if len(paths) > 0 {
-				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: stage, Clean: true, Private: true}); err != nil {
+				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths, SHAs: shas, Offsets: plan.Partial}, dst, ImportReq{BaseRel: stage, Private: true}); err != nil {
 					return err
 				}
 			}
-			res, err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage, Task: t.Key, Remove: gone})
+			res, err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage, Task: t.Key, Files: send, Remove: gone})
 			if err != nil {
 				return err
 			}
@@ -322,7 +348,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 				step("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
 			}
 			sentExtras = true
-		} else {
+		default:
 			step("extras", "skipped")
 		}
 	}
