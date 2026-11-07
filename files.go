@@ -147,11 +147,16 @@ type ExportReq struct {
 	Paths   []string `json:"paths"`
 }
 
+// sumsName is the last entry of every export: "sha256 path" per file, so the
+// receiver can check what it wrote against what was read here.
+const sumsName = ".ferry-sums"
+
 // Export writes a tar of the given paths (files or whole directories),
-// relative to BaseRel, to w.
+// relative to BaseRel, to w, ending with a sumsName entry.
 func (l *Local) Export(q ExportReq, w io.Writer) error {
 	base := l.abs(q.BaseRel)
 	tw := tar.NewWriter(w)
+	var sums strings.Builder
 	for _, p := range q.Paths {
 		err := filepath.WalkDir(filepath.Join(base, p), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -165,6 +170,9 @@ func (l *Local) Export(q ExportReq, w io.Writer) error {
 				return err
 			}
 			rel, _ := filepath.Rel(base, path)
+			if filepath.ToSlash(rel) == sumsName {
+				return fmt.Errorf("can't send a file named %s", sumsName)
+			}
 			hdr := &tar.Header{Name: filepath.ToSlash(rel), Mode: int64(info.Mode().Perm()), Size: info.Size(), ModTime: info.ModTime(), Typeflag: tar.TypeReg}
 			if err := tw.WriteHeader(hdr); err != nil {
 				return err
@@ -174,12 +182,22 @@ func (l *Local) Export(q ExportReq, w io.Writer) error {
 				return err
 			}
 			defer f.Close()
-			_, err = io.Copy(tw, f)
-			return err
+			h := sha256.New()
+			if _, err := io.Copy(io.MultiWriter(tw, h), f); err != nil {
+				return err
+			}
+			fmt.Fprintf(&sums, "%x %s\n", h.Sum(nil), hdr.Name)
+			return nil
 		})
 		if err != nil {
 			return err
 		}
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: sumsName, Mode: 0o600, Size: int64(sums.Len()), Typeflag: tar.TypeReg}); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(tw, sums.String()); err != nil {
+		return err
 	}
 	return tw.Close()
 }
@@ -191,7 +209,9 @@ type ImportReq struct {
 }
 
 // Import extracts a tar from r under BaseRel. Entries that would land outside
-// BaseRel are rejected.
+// BaseRel are rejected. Every file is hashed as it's written and synced to
+// disk, and the stream must end with sums matching what was written; a
+// stream cut short or altered fails here, before anything is installed.
 func (l *Local) Import(q ImportReq, r io.Reader) error {
 	base := l.abs(q.BaseRel)
 	if q.Clean {
@@ -203,15 +223,26 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 		return err
 	}
 	tr := tar.NewReader(r)
+	written := map[string]string{}
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return errors.New("the transfer ended before its checksums arrived; nothing was installed")
 		} else if err != nil {
 			return err
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
+		}
+		if hdr.Name == sumsName {
+			if err := checkSums(tr, written); err != nil {
+				return err
+			}
+			if _, err := tr.Next(); !errors.Is(err, io.EOF) {
+				return errors.New("the transfer continued past its checksums")
+			}
+			_, err := io.Copy(io.Discard, r)
+			return err
 		}
 		name := filepath.FromSlash(hdr.Name)
 		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) || strings.Contains(name, string(filepath.Separator)+".."+string(filepath.Separator)) {
@@ -229,7 +260,13 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(f, tr); err != nil {
+		h := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(f, h), tr); err != nil {
+			f.Close()
+			return err
+		}
+		written[hdr.Name] = hex.EncodeToString(h.Sum(nil))
+		if err := f.Sync(); err != nil {
 			f.Close()
 			return err
 		}
@@ -243,6 +280,35 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 			return err
 		}
 	}
+}
+
+func checkSums(r io.Reader, written map[string]string) error {
+	data, err := io.ReadAll(io.LimitReader(r, 64<<20))
+	if err != nil {
+		return err
+	}
+	listed := 0
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		sum, name, ok := strings.Cut(line, " ")
+		if !ok {
+			return fmt.Errorf("bad checksum line %q", line)
+		}
+		got, have := written[name]
+		switch {
+		case !have:
+			return fmt.Errorf("%s was sent but never arrived", name)
+		case got != sum:
+			return fmt.Errorf("%s arrived different from what was sent (sha256 %s, want %s)", name, got[:12], sum[:min(12, len(sum))])
+		}
+		listed++
+	}
+	if listed != len(written) {
+		return errors.New("the transfer carried files its checksums don't list")
+	}
+	return nil
 }
 
 type InstallExtrasReq struct {

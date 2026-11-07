@@ -1,8 +1,8 @@
 #!/bin/sh
 # Model-check formal/Handoff.tla. See .claude/skills/verify-handoff/SKILL.md.
 #
-#   formal/check.sh              both modes, every invariant
-#   formal/check.sh NoFork       both modes, one invariant
+#   formal/check.sh              all three modes, every invariant
+#   formal/check.sh NoFork       all three modes, one invariant
 #
 # happy:   no crash, no failed call. Every invariant must hold.
 # faults:  crashes between steps, failed calls, lost replies. Every invariant

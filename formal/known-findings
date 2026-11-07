@@ -1,2 +1,7 @@
-# Known findings in fault mode: invariant, trace hash, shortest trace.
+# Known findings in overlap mode: invariant, trace hash, shortest trace.
 # formal/check.sh prints these; see .claude/skills/verify-handoff/SKILL.md.
+NoFork c3e5835fd7fa Initial,Start,Find,DstLive,Claim,Work,Transfer,Stage,CrashInFlight,Start,Find,DstLive,Claim,Work,Transfer,Deliver,CrashInFlight,Start,FinishCheck,FinishPark,FinishPlace,FinishRestore,FinishLive,FinishLaunch,Deliver,CrashInFlight,Start,FinishCheck,FinishPark,Deliver,CrashInFlight,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,FinishPark,FinishPlace,Deliver
+NoLostTurns f1bb2b80d8ac Initial,Start,Find,DstLive,Claim,Work,Transfer,CrashInFlight,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,FinishPark,Deliver
+OwnerCanResume e140dfc8cae3 Initial,Start,Find,DstLive,Claim,Work,Transfer,CrashInFlight,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,FinishPark,Deliver,FinishPlace,FinishRestore,FinishLive,FinishLaunch,FinishPut
+OneAgent 3708d2177317 Initial,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,FinishPark,FinishPlace,FinishRestore,FinishLive,CrashInFlight,Start,FinishCheck,FinishPark,FinishPlace,FinishRestore,FinishLive,FinishLaunch,Deliver
+AgentHasTranscript 45e7a3b7d7d5 Initial,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,FinishPark,FinishPlace,FinishRestore,FinishLive,CrashInFlight,Start,FinishCheck,FinishPark,FinishPlace,FinishRestore,FinishLive,FinishLaunch,FinishPut,Start,Find,DstLive,Claim,Work,Transfer,Stage,Commit,FinishCheck,Deliver,FinishPark

@@ -444,7 +444,7 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 			if err != nil {
 				return fmt.Errorf("%s: %w", r, err)
 			}
-			if err := os.WriteFile(p, got, 0o600); err != nil {
+			if err := writeAtomic(p, got, 0o600); err != nil {
 				return err
 			}
 		}
