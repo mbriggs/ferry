@@ -135,7 +135,7 @@ On kant, `ferry from` stops an idle agent in its Rex pane with `/exit`, retrying
 
 **Resuming.** `ferry` resumes with a first prompt that says what moved: the old and new working directories, that uncommitted changes came along, the `restore` summary, and that nothing else from the other machine is running here. Codex resumes with `-c model=<recorded model>`, because otherwise it silently switches to the configured default.
 
-**Trust.** A resumed agent in a folder the receiver has never trusted stops at the trust prompt, and Claude's default answer there is "No, exit". `ferry` carries trust over only if you trusted the folder on the sending machine. For Claude it sets `hasTrustDialogAccepted` for the new path in `~/.claude.json`. For Codex it passes the trust on the command line instead of editing `config.toml`, which is stowed from your dotfiles.
+**Trust.** A resumed agent in a folder the receiver has never trusted stops at the trust prompt, and Claude's default answer there is "No, exit". `ferry` carries trust over only if you trusted the folder on the sending machine, and it does it the way you would: after launching in Rex, it answers the prompt in the pane (Down then Enter for Claude, Enter for Codex). Codex ignores trust passed with `-c`, and editing `~/.claude.json` or the stowed `config.toml` behind a running agent's back is riskier than answering the question it asks.
 
 **Versions.** If the receiver's agent is older than the sender's, `ferry` refuses unless you pass `--force-version`.
 

@@ -89,6 +89,7 @@ func (l *Local) StopAgent(q StopReq) error {
 	if state == "working" {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
 	}
+	pid := live.PID // 0 for codex, whose lock release already means it's done
 	// Codex can drop input that lands as a turn finishes, so retry.
 	for range 3 {
 		run("", nil, "rex", "send", "-s", q.RexSession, "-b", block, "/exit")
@@ -96,12 +97,26 @@ func (l *Local) StopAgent(q StopReq) error {
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
 			if live, err := l.Liveness(q.Session); err == nil && !live.Live {
-				return nil
+				return waitExit(pid)
 			}
 			time.Sleep(300 * time.Millisecond)
 		}
 	}
 	return errors.New("sent /exit but the agent is still running; exit it by hand")
+}
+
+// waitExit waits for a process that has released its session to finish
+// exiting. Claude removes its registry file before it's done writing, so the
+// transcript is only safe to move once the process is gone.
+func waitExit(pid int) error {
+	deadline := time.Now().Add(15 * time.Second)
+	for pidAlive(pid) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("agent pid %d released the session but hasn't exited", pid)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil
 }
 
 // agentBlock finds the pane running claude or codex in a Rex session.
