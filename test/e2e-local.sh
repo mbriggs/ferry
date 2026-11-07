@@ -15,14 +15,15 @@ ferry="$here/ferry"
 root=/tmp/ferry-test-e2e
 lh=$root/laptop
 wt=$lh/src/ferry-e2e-probe
-task=src-ferry-e2e-probe
+task=src-ferry-e2e-probe  # record files are $task-<hash>.json
+record() { ls "$HOME"/.local/state/ferry/tasks/$task-*.json 2>/dev/null | head -1; }
 
 clean() {
   local rs
-  rs=$(jq -r '.rex_session // empty' "$HOME/.local/state/ferry/tasks/$task.json" 2>/dev/null || true)
+  rs=$(jq -r '.rex_session // empty' "$(record)" 2>/dev/null || true)
   rex ls 2>/dev/null | awk '$1 == "ferry-e2e-probe" {print $2}' | while read -r s; do rex kill "$s" >/dev/null 2>&1 || true; done
   [[ -n "$rs" ]] && rex kill "$rs" >/dev/null 2>&1 || true
-  rm -rf "$root" "$HOME/src/ferry-e2e-probe" "$HOME/.local/state/ferry/tasks/$task.json"
+  rm -rf "$root" "$HOME/src/ferry-e2e-probe" "$HOME"/.local/state/ferry/tasks/$task-*.json
   rm -rf "$HOME/.local/state/ferry/parked/$task"-* "$HOME/.claude/projects/-home-${USER}-src-ferry-e2e-probe"
 }
 
@@ -52,7 +53,7 @@ rmdir "$HOME/.claude/projects/$slug" 2>/dev/null || true
 echo "== ferry to kant"
 (cd "$wt" && HOME=$lh "$ferry" to kant --yes)
 
-rs=$(jq -r .rex_session "$HOME/.local/state/ferry/tasks/$task.json")
+rs=$(jq -r .rex_session "$(record)")
 block=$(rex block ls -s "$rs" --json | jq -r '.blocks[0].block_id')
 reg() { grep -l "$id" "$HOME"/.claude/sessions/*.json 2>/dev/null | head -1; }
 timeout 90 sh -c "until f=\$(grep -l $id $HOME/.claude/sessions/*.json 2>/dev/null) && [ \"\$(jq -r .status \$f)\" = idle ]; do sleep 1; done"
