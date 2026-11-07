@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,7 @@ func sessionPathOK(agent, id, projDir, rel string) bool {
 		proj := filepath.ToSlash(projDir)
 		return rel == proj+"/"+id+".jsonl" ||
 			strings.HasPrefix(rel, proj+"/"+id+"/") ||
+			strings.HasPrefix(rel, proj+"/memory/") ||
 			strings.HasPrefix(rel, ".claude/file-history/"+id+"/")
 	case agentCodex:
 		return codexRolloutPath.MatchString(rel) && strings.HasSuffix(rel, "-"+id+".jsonl")
@@ -161,6 +163,12 @@ func (l *Local) findClaude(q FindSessionReq) (*Session, error) {
 	s.WorkDir, _ = lastJSONField(transcript, func(m map[string]any) string { s, _ := m["cwd"].(string); return s })
 	if sub := strings.TrimSuffix(transcript, ".jsonl"); isDir(sub) {
 		s.Files = append(s.Files, rel(sub))
+	}
+	// The project's memory belongs to every session in the folder, not just
+	// this one, but it's what the agent knows about the project, so it goes
+	// where the session goes. PlaceSession merges it with what's there.
+	if mem := filepath.Join(filepath.Dir(transcript), "memory"); isDir(mem) {
+		s.Files = append(s.Files, rel(mem))
 	}
 	if fh := filepath.Join(l.Home, ".claude", "file-history", id); isDir(fh) {
 		s.Files = append(s.Files, rel(fh))
@@ -521,6 +529,9 @@ func (l *Local) PlaceSession(q PlaceReq) error {
 			return fmt.Errorf("refusing %s: not part of %s session %s", r, q.Session.Agent, q.Session.ID)
 		}
 		if exists(l.abs(r)) {
+			if sameFile(p, l.abs(r)) {
+				return os.Remove(p)
+			}
 			if err := moveFile(l.abs(r), filepath.Join(replaced, r)); err != nil {
 				return err
 			}
@@ -531,6 +542,13 @@ func (l *Local) PlaceSession(q PlaceReq) error {
 		return err
 	}
 	return os.RemoveAll(ready)
+}
+
+// sameFile reports whether two files hold the same bytes.
+func sameFile(a, b string) bool {
+	x, err1 := os.ReadFile(a)
+	y, err2 := os.ReadFile(b)
+	return err1 == nil && err2 == nil && bytes.Equal(x, y)
 }
 
 func (l *Local) readyDir(task string) (string, error) {

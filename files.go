@@ -36,43 +36,37 @@ func fileSHA(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// defaultInclude is used when a worktree has no .ferry/include.
-var defaultInclude = []string{".env*"}
-
-// alwaysInclude travels whatever .ferry/include says. .claude/ is the
-// agent's own project folder (skills, commands, local settings), often
-// ignored globally; the agent isn't the same agent without it. Claude keeps
-// git worktrees of its own under .claude/worktrees, and those don't move.
-var alwaysInclude = []string{stateDirRel + "/", ".claude/"}
-
-func neverExtra(rel string) bool {
-	return within(filepath.ToSlash(rel), ".claude/worktrees")
-}
-
 // ExtrasList is what ListExtras found: the files to send, and the ignored
-// paths left behind, so a miss shows up in the output instead of silently.
+// paths left behind, so what stays is visible in the output.
 type ExtrasList struct {
 	Files      []FileEntry `json:"files"`
 	LeftBehind []string    `json:"left_behind,omitempty"`
 }
 
-// ListExtras returns the ignored files in a worktree that should travel with
-// it: those matching .ferry/include (by base name or path, and a pattern
-// ending in / takes a whole directory), plus everything under .ferry/state
-// and .claude. Tracked and untracked files already ride in the git snapshot,
-// so only ignored files are considered.
+// ListExtras returns the ignored files in a worktree, which travel with it
+// next to the git snapshot (tracked and untracked files ride in git). All of
+// them go except:
+//
+//   - dependency and build trees (heavyDirs), which are built for one OS and
+//     rebuilt by restore,
+//   - git worktrees Claude keeps under .claude/worktrees,
+//   - paths matching .ferry/exclude: one pattern per line, a glob against
+//     the base name or the whole path, or a directory when it ends in /.
+//
+// .ferry/state always travels, even when it isn't ignored.
 func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 	root := l.abs(wtRel)
-	patterns := defaultInclude
-	if data, err := os.ReadFile(filepath.Join(root, ".ferry", "include")); err == nil {
-		patterns = nil
+	var exclude []string
+	if data, err := os.ReadFile(filepath.Join(root, ".ferry", "exclude")); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
-				patterns = append(patterns, line)
+				exclude = append(exclude, line)
 			}
 		}
 	}
-	patterns = append(patterns, alwaysInclude...)
+	stays := func(rel string) bool {
+		return neverExtra(rel) || (matchAny(exclude, rel) && !within(filepath.ToSlash(rel), stateDirRel))
+	}
 	out, err := git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
 	if err != nil {
 		return ExtrasList{}, err
@@ -81,8 +75,9 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 	defer hashes.save()
 	seen := map[string]bool{}
 	var entries []FileEntry
+	var left []string
 	add := func(rel string) {
-		if seen[rel] || neverExtra(rel) {
+		if seen[rel] {
 			return
 		}
 		p := filepath.Join(root, rel)
@@ -93,26 +88,27 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 			}
 		}
 	}
-	var left []string
 	for _, rel := range strings.Split(out, "\x00") {
 		if rel == "" {
 			continue
 		}
-		before := len(entries)
-		if strings.HasSuffix(rel, "/") {
-			// git collapsed an ignored directory; look inside it for files
-			// the include patterns ask for, skipping dependency and build trees.
-			walkIgnored(filepath.Join(root, strings.TrimSuffix(rel, "/")), func(p string) {
+		dir := strings.TrimSuffix(rel, "/")
+		switch {
+		case inHeavyDir(dir) || stays(dir):
+			if !neverExtra(dir) {
+				left = append(left, rel)
+			}
+		case strings.HasSuffix(rel, "/"):
+			// git collapsed an ignored directory; take the files inside,
+			// skipping dependency and build trees and excluded paths.
+			walkIgnored(filepath.Join(root, dir), func(p string) {
 				r, _ := filepath.Rel(root, p)
-				if matchAny(patterns, r) {
+				if !stays(r) {
 					add(r)
 				}
 			})
-		} else if matchAny(patterns, rel) {
+		default:
 			add(rel)
-		}
-		if len(entries) == before && !heavyDirs[filepath.Base(strings.TrimSuffix(rel, "/"))] && !neverExtra(strings.TrimSuffix(rel, "/")) {
-			left = append(left, rel)
 		}
 	}
 	// .ferry/state may be untracked but not ignored; it's excluded from the
@@ -122,6 +118,21 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 		add(r)
 	})
 	return ExtrasList{Files: entries, LeftBehind: left}, nil
+}
+
+// inHeavyDir reports whether any directory in rel is a dependency or build
+// tree.
+func inHeavyDir(rel string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if heavyDirs[part] {
+			return true
+		}
+	}
+	return false
+}
+
+func neverExtra(rel string) bool {
+	return within(filepath.ToSlash(rel), ".claude/worktrees") || filepath.Base(rel) == ".DS_Store"
 }
 
 // matchAny reports whether rel matches a pattern: a glob against the base
@@ -150,6 +161,9 @@ func matchAny(patterns []string, rel string) bool {
 var heavyDirs = map[string]bool{
 	"node_modules": true, "_build": true, "deps": true, "target": true, ".venv": true, "venv": true,
 	"vendor": true, "dist": true, "build": true, ".next": true, ".cache": true, "tmp": true, "log": true, ".git": true,
+	"__pycache__": true, ".pytest_cache": true, ".mypy_cache": true, ".ruff_cache": true, ".tox": true,
+	".gradle": true, ".terraform": true, ".turbo": true, ".parcel-cache": true, ".svelte-kit": true, ".nuxt": true,
+	".elixir_ls": true, ".expo": true, "elm-stuff": true, "coverage": true,
 }
 
 func walkIgnored(dir string, fn func(string)) {

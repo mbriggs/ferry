@@ -29,6 +29,8 @@ type Machine interface {
 	Snapshot(SnapshotReq) (SnapshotResult, error)
 	Apply(ApplyReq) (string, error)
 	ListExtras(wtRel string) (ExtrasList, error)
+	GitHooks(repoRel string) ([]GitHook, error)
+	InstallGitHooks(InstallGitHooksReq) error
 	Export(req ExportReq, w io.Writer) error
 	Import(req ImportReq, r io.Reader) error
 	StageSession(InstallReq) (Session, error)
@@ -295,6 +297,14 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return l.Liveness(q)
+	case "git-hooks":
+		rel, err := decode[string](raw)
+		if err != nil {
+			return nil, err
+		}
+		return l.GitHooks(rel)
+	case "install-git-hooks":
+		return none, serveInstallGitHooks(l, raw, os.Stdin)
 	case "agents":
 		return l.Agents()
 	case "worktree":

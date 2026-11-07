@@ -124,17 +124,17 @@ func TestRexRunsFromTheLoginShellPath(t *testing.T) {
 	}
 }
 
-// The agent's project folder travels even when it's ignored and
-// .ferry/include doesn't name it; ignored paths that stay are reported.
-func TestClaudeFolderTravelsAndLeftoversAreListed(t *testing.T) {
+// Every ignored file travels, the agent's project folder included, except
+// dependency and build trees and Claude's own worktrees, which are listed as
+// staying.
+func TestIgnoredFilesTravelAndLeftoversAreListed(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.write(wt, ".gitignore", ".env\n.claude/\nformal/out/\nconfig/\nnode_modules/\n.restored\n.ferry/state/\n")
-	w.write(wt, ".ferry/include", "config/\n")
+	w.write(wt, ".gitignore", ".env\n.claude/\nformal/out/\nnode_modules/\ndist/\n.restored\n.ferry/state/\n")
 	w.write(wt, ".claude/skills/verify/SKILL.md", "skill\n")
 	w.write(wt, ".claude/worktrees/side/README", "a whole checkout\n")
-	w.write(wt, "config/deep/secrets.json", "{}\n")
 	w.write(wt, "formal/out/run.out", "generated\n")
+	w.write(wt, "dist/ferry-linux", "binary\n")
 
 	got, err := (&Local{Home: w.laptop}).ListExtras("src/app-wt/fix-auth")
 	if err != nil {
@@ -145,16 +145,59 @@ func TestClaudeFolderTravelsAndLeftoversAreListed(t *testing.T) {
 		names = append(names, e.Path)
 	}
 	list := strings.Join(names, ",")
-	for _, want := range []string{".claude/skills/verify/SKILL.md", "config/deep/secrets.json"} {
+	for _, want := range []string{".claude/skills/verify/SKILL.md", "formal/out/run.out", ".env"} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("%s should travel: %s", want, list)
 		}
 	}
-	if strings.Contains(list, "worktrees") || strings.Contains(list, "formal") {
+	if strings.Contains(list, "worktrees") || strings.Contains(list, "dist/") || strings.Contains(list, "node_modules") {
 		t.Fatalf("sent something that should stay: %s", list)
 	}
 	left := strings.Join(got.LeftBehind, ",")
-	if !strings.Contains(left, "formal/out/") || strings.Contains(left, "node_modules") || strings.Contains(left, ".claude") {
+	if !strings.Contains(left, "dist/") || !strings.Contains(left, "node_modules/") || strings.Contains(left, ".claude") {
 		t.Fatalf("left behind = %s", left)
+	}
+}
+
+// The project's memory goes with the session and merges with what the
+// receiver has.
+func TestProjectMemoryTravelsWithTheSession(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
+	w.write(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/memory/MEMORY.md", "- [deploy](deploy.md)\n")
+	w.write(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/memory/deploy.md", "ship on fridays\n")
+	w.write(w.kant, ".claude/projects/"+claudeSlug(kwt)+"/memory/kant-only.md", "kant knows this\n")
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	mem := ".claude/projects/" + claudeSlug(kwt) + "/memory/"
+	if got := w.read(w.kant, mem+"deploy.md"); got != "ship on fridays\n" {
+		t.Fatalf("memory didn't travel: %q", got)
+	}
+	if got := w.read(w.kant, mem+"kant-only.md"); got != "kant knows this\n" {
+		t.Fatalf("kant's own memory was lost: %q", got)
+	}
+}
+
+// Git hooks go to kant as they are. Coming back, they're installed only with
+// a yes on that run, which --yes doesn't give.
+func TestGitHooksTravel(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	lhook := filepath.Join(w.laptop, "src", "app", ".git", "hooks", "pre-commit")
+	writeExec(t, lhook, "#!/bin/sh\necho laptop\n")
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	khook := filepath.Join(w.kant, "src", "app", ".git", "hooks", "pre-commit")
+	st, err := os.Stat(khook)
+	if err != nil || st.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("hook not installed executable on kant: %v %v", st, err)
+	}
+
+	writeExec(t, khook, "#!/bin/sh\necho kant changed this\n")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--no-launch")
+	if !strings.Contains(out, "git hooks from kant: pre-commit") || !strings.Contains(out, "skipped") {
+		t.Fatalf("expected the hook to be offered and skipped without a terminal:\n%s", out)
+	}
+	if got, _ := os.ReadFile(lhook); string(got) != "#!/bin/sh\necho laptop\n" {
+		t.Fatalf("kant's hook was installed without a yes: %q", got)
 	}
 }

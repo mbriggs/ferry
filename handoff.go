@@ -280,7 +280,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		if len(left) > 8 {
 			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
 		}
-		step("left", "ignored, staying on %s: %s (add to .ferry/include to bring them)", si.Name, strings.Join(left, ", "))
+		step("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
 	}
 	// Extras di sent last time that si no longer has were deleted here.
 	incoming := map[string]bool{}
@@ -304,23 +304,20 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		for _, p := range plan.Have {
 			have[p] = true
 		}
-		var send []FileEntry
-		var names, paths, same, goneNames []string
+		var send, unchanged []FileEntry
+		var paths, goneNames []string
 		shas := map[string]string{}
 		for _, e := range extras {
 			if have[e.Path] {
-				same = append(same, e.Path)
+				unchanged = append(unchanged, e)
 				continue
 			}
 			send = append(send, e)
-			label := fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size))
-			if off := plan.Partial[filepath.ToSlash(e.Path)]; off > 0 {
-				label = fmt.Sprintf("%s (%s, resuming at %s)", e.Path, humanSize(e.Size), humanSize(off))
-			}
-			names = append(names, label)
 			paths = append(paths, e.Path)
 			shas[filepath.ToSlash(e.Path)] = e.SHA
 		}
+		names := describeFiles(send, plan.Partial)
+		same := describeFiles(unchanged, nil)
 		for _, e := range gone {
 			goneNames = append(goneNames, e.Path)
 		}
@@ -361,6 +358,33 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	clock.lap("extras")
+
+	// --- git hooks -----------------------------------------------------------
+	// A hook runs on the next git command in the repo, so hooks coming to
+	// this machine from the other one are installed only with a yes on this
+	// run, like restore. Going the other way they're installed as they are.
+	srcHooks, err := src.GitHooks(t.RepoRel)
+	if err != nil {
+		return err
+	}
+	dstHooks, err := dst.GitHooks(t.RepoRel)
+	if err != nil {
+		return err
+	}
+	if send := hooksToSend(srcHooks, dstHooks); len(send) > 0 {
+		var names []string
+		for _, h := range send {
+			names = append(names, h.Name)
+		}
+		step("hooks", "git hooks from %s: %s", si.Name, strings.Join(names, ", "))
+		if !dst.IsLocal() || confirm("install these git hooks here? they run on git commands in this repo") {
+			if err := dst.InstallGitHooks(InstallGitHooksReq{RepoRel: t.RepoRel, Hooks: send}); err != nil {
+				return err
+			}
+		} else {
+			step("hooks", "skipped; %s's hooks stay as they were", di.Name)
+		}
+	}
 
 	// --- session -----------------------------------------------------------
 	// The session is staged on the receiver, with paths rewritten, but nothing
@@ -439,6 +463,52 @@ func sessionFits(home string, s Session, t task) error {
 		return nil
 	}
 	return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(s.ID), started, t.WtRel)
+}
+
+// describeFiles lists files with their sizes for the output. A long list is
+// folded into one line per top-level folder.
+func describeFiles(files []FileEntry, partial map[string]int64) []string {
+	if len(files) <= 8 {
+		var out []string
+		for _, e := range files {
+			label := fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size))
+			if off := partial[filepath.ToSlash(e.Path)]; off > 0 {
+				label = fmt.Sprintf("%s (%s, resuming at %s)", e.Path, humanSize(e.Size), humanSize(off))
+			}
+			out = append(out, label)
+		}
+		return out
+	}
+	type group struct {
+		n    int
+		size int64
+	}
+	groups := map[string]*group{}
+	var order []string
+	for _, e := range files {
+		top, _, nested := strings.Cut(filepath.ToSlash(e.Path), "/")
+		if nested {
+			top += "/"
+		}
+		g := groups[top]
+		if g == nil {
+			g = &group{}
+			groups[top] = g
+			order = append(order, top)
+		}
+		g.n++
+		g.size += e.Size
+	}
+	var out []string
+	for _, top := range order {
+		g := groups[top]
+		if g.n == 1 {
+			out = append(out, fmt.Sprintf("%s (%s)", top, humanSize(g.size)))
+		} else {
+			out = append(out, fmt.Sprintf("%s (%d files, %s)", top, g.n, humanSize(g.size)))
+		}
+	}
+	return out
 }
 
 // settle waits up to ten seconds for a session's transcript to stop changing.

@@ -57,13 +57,14 @@ func TestStateNeverBecomesABlob(t *testing.T) {
 	}
 }
 
-func TestIncludeFindsFilesInIgnoredDirectories(t *testing.T) {
+func TestExcludeKeepsIgnoredFilesBehind(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
 	w.write(wt, ".gitignore", ".env\nconfig/\nnode_modules/\n.restored\n.ferry/state/\n")
-	w.write(wt, ".ferry/include", "config/secrets.json\n.env*\n")
+	w.write(wt, ".ferry/exclude", "config/big/\n*.log\n")
 	w.write(wt, "config/secrets.json", "{}\n")
-	w.write(wt, "config/other.txt", "no\n")
+	w.write(wt, "config/big/blob", "large\n")
+	w.write(wt, "config/run.log", "noise\n")
 	w.write(wt, "node_modules/pkg/.env", "deep in deps\n")
 	got, err := (&Local{Home: w.laptop}).ListExtras("src/app-wt/fix-auth")
 	if err != nil {
@@ -75,10 +76,10 @@ func TestIncludeFindsFilesInIgnoredDirectories(t *testing.T) {
 	}
 	list := strings.Join(names, ",")
 	if !strings.Contains(list, "config/secrets.json") || !strings.Contains(list, ".env") {
-		t.Fatalf("missing included files: %s", list)
+		t.Fatalf("missing ignored files: %s", list)
 	}
-	if strings.Contains(list, "other.txt") || strings.Contains(list, "node_modules") {
-		t.Fatalf("included files it shouldn't: %s", list)
+	if strings.Contains(list, "blob") || strings.Contains(list, "run.log") || strings.Contains(list, "node_modules") {
+		t.Fatalf("sent files it shouldn't: %s", list)
 	}
 }
 
