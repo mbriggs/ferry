@@ -58,6 +58,8 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	hashes := l.hashCache()
+	defer hashes.save()
 	seen := map[string]bool{}
 	var entries []FileEntry
 	add := func(rel string) {
@@ -66,7 +68,7 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 		}
 		p := filepath.Join(root, rel)
 		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() {
-			if sum, err := fileSHA(p); err == nil {
+			if sum, err := hashes.sha(p); err == nil {
 				seen[rel] = true
 				entries = append(entries, FileEntry{Path: rel, Size: st.Size(), SHA: sum})
 			}
@@ -333,6 +335,12 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 			return err
 		}
 		written[hdr.Name] = hex.EncodeToString(h.Sum(nil))
+		if want := hdr.PAXRecords[paxSHA]; want != "" && want != written[hdr.Name] {
+			// The file changed between being listed and being read.
+			f.Close()
+			os.Remove(part)
+			return fmt.Errorf("%s changed while it was being sent; run this again", hdr.Name)
+		}
 		if err := f.Sync(); err != nil {
 			f.Close()
 			return err
@@ -398,13 +406,15 @@ type ExtrasPlan struct {
 func (l *Local) PlanExtras(q PlanReq) (ExtrasPlan, error) {
 	root, stage := l.abs(q.WtRel), l.abs(q.StageRel)
 	plan := ExtrasPlan{Partial: map[string]int64{}}
+	hashes := l.hashCache()
+	defer hashes.save()
 	for _, e := range q.Files {
 		if safeDest(root, e.Path) != nil || safeDest(stage, e.Path) != nil {
 			continue
 		}
 		p := filepath.Join(root, e.Path)
 		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() && st.Size() == e.Size {
-			if sum, err := fileSHA(p); err == nil && sum == e.SHA {
+			if sum, err := hashes.sha(p); err == nil && sum == e.SHA {
 				plan.Have = append(plan.Have, e.Path)
 				continue
 			}
@@ -447,6 +457,8 @@ func (l *Local) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 	var res InstallExtrasResult
 	root, stage := l.abs(q.WtRel), l.abs(q.StageRel)
 	defer os.RemoveAll(stage)
+	hashes := l.hashCache()
+	defer hashes.save()
 	if len(q.Remove) > 0 {
 		dir, err := l.parkDir(q.Task, "extras-"+time.Now().Format("20060102-150405"))
 		if err != nil {
@@ -460,7 +472,7 @@ func (l *Local) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 			if !exists(p) {
 				continue
 			}
-			if sum, err := fileSHA(p); err != nil || sum != e.SHA {
+			if sum, err := hashes.sha(p); err != nil || sum != e.SHA {
 				res.Kept = append(res.Kept, e.Path)
 				continue
 			}
@@ -493,6 +505,10 @@ func (l *Local) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 		}
 		if err != nil {
 			return res, err
+		}
+		// Import checked these bytes against the sender's sum.
+		if st, err := os.Lstat(dest); err == nil && e.SHA != "" {
+			hashes.put(dest, st, e.SHA)
 		}
 	}
 	return res, nil

@@ -100,6 +100,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", si.Name)
 	}
 	step("task", "%s  (%s, repo %s)", t.Name, t.WtRel, t.RepoRel)
+	clock = newStopwatch()
+	defer clock.report()
 
 	rec, err := hub.RecordGet(t.Key)
 	if err != nil {
@@ -205,6 +207,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 	}
 
+	clock.lap("preflight")
+
 	// --- dehydrate ---------------------------------------------------------
 	// Once a task has been on kant, the laptop's worktree holds code kant
 	// wrote, and dehydrate may run it (bin/rails, docker compose).
@@ -217,6 +221,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, askDehydrate, dehydrateChanges); err != nil {
 		return err
 	}
+
+	clock.lap("dehydrate")
 
 	// --- code --------------------------------------------------------------
 	ss, err := src.RepoState(t.RepoRel)
@@ -270,6 +276,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return err
 	}
 	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
+	clock.lap("git")
 
 	extras, err := src.ListExtras(t.WtRel)
 	if err != nil {
@@ -353,6 +360,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 	}
 
+	clock.lap("extras")
+
 	// --- session -----------------------------------------------------------
 	// The session is staged on the receiver, with paths rewritten, but nothing
 	// live moves until after the commit point. A failure before then leaves
@@ -370,6 +379,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		installed = &s
 		step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
 	}
+
+	clock.lap("session")
 
 	// --- commit ------------------------------------------------------------
 	expect := rec.Generation
@@ -451,6 +462,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		}
 		step("session", "%s: %s is live", di.Name, short(installed.ID))
 	}
+	clock.lap("commit")
 	changes := ""
 	if dst.IsLocal() {
 		changes = changeSummary(dst.GitURL(t.WtRel), t.Key, taskRef(t.Key, "wip"))
@@ -461,6 +473,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		step("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
 		return errors.New("restore failed; the task moved but the agent wasn't started")
 	}
+	clock.lap("restore")
 	rexSession := ""
 	switch {
 	case installed == nil:
@@ -490,12 +503,70 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		rexSession = id
 		step("launch", "%s: rex session %q running %s --resume %s", di.Name, t.Name, installed.Agent, short(installed.ID))
 	}
+	if installed != nil && rexSession != "" {
+		clock.lap("launch")
+	}
 	expect := rec.Generation
 	rec.State, rec.RexSession, rec.Generation = stateOwned, rexSession, expect+1
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		return err
 	}
 	return nil
+}
+
+// stopwatch times each step of a handoff, leaving out time spent at
+// prompts, and prints one line at the end, even when the handoff fails.
+type stopwatch struct {
+	last   time.Time
+	start  time.Time
+	waited time.Duration
+	laps   []string
+}
+
+// clock is the running handoff's stopwatch. A process runs one handoff.
+var clock = newStopwatch()
+
+func newStopwatch() *stopwatch {
+	now := time.Now()
+	return &stopwatch{last: now, start: now}
+}
+
+func (s *stopwatch) lap(name string) {
+	now := time.Now()
+	s.laps = append(s.laps, name+" "+roundDuration(now.Sub(s.last)))
+	s.last = now
+}
+
+// pause stops the clock until the returned function is called.
+func (s *stopwatch) pause() func() {
+	began := time.Now()
+	return func() {
+		d := time.Since(began)
+		s.last = s.last.Add(d)
+		s.waited += d
+	}
+}
+
+func (s *stopwatch) report() {
+	if len(s.laps) == 0 {
+		return
+	}
+	total := time.Since(s.start) - s.waited
+	line := strings.Join(s.laps, ", ") + "; total " + roundDuration(total)
+	if s.waited > time.Second {
+		line += " (plus " + roundDuration(s.waited) + " at prompts)"
+	}
+	step("time", "%s", line)
+}
+
+func roundDuration(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return d.Round(10 * time.Millisecond).String()
+	case d < time.Minute:
+		return d.Round(100 * time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }
 
 // moveRefs copies refs from src's repo to dst's using whichever side is local.
@@ -615,6 +686,7 @@ func versionLess(a, b string) bool {
 }
 
 func confirm(prompt string) bool {
+	defer clock.pause()()
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return false

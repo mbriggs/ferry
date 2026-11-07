@@ -1,24 +1,30 @@
 #!/bin/sh
 # Model-check formal/Handoff.tla. See .claude/skills/verify-handoff/SKILL.md.
 #
-#   formal/check.sh              all three modes, every invariant
-#   formal/check.sh NoFork       all three modes, one invariant
+#   formal/check.sh              every mode, every check
+#   formal/check.sh NoFork       every mode, one check
 #
-# happy:   no crash, no failed call. Every invariant must hold.
-# faults:  crashes between steps, failed calls, lost replies. Every invariant
-#          must hold.
+# happy:   no crash, no failed call.
+# faults:  crashes between steps, failed calls, lost replies.
 # overlap: faults, plus a dead run's call on kant finishing after the rerun
-#          started. Every invariant must hold, or fail with exactly the
-#          shortest trace listed for it in formal/known-findings.
-# Exit 0 when all of that is true. Exit 1 on a new violation, a known finding
-# whose trace changed or that now holds, or a TLC error. Traces are written to
-# formal/out/<mode>-<invariant>.out.
+#          started (DeadKinds = DeadCalls).
+#
+# In each mode, a promise must hold, unless formal/known-findings lists it for
+# that mode. A listed promise must fail as the code is, and must hold once the
+# switches on its line remove its cause; if it still fails, something else
+# breaks it too. Each Reach* check must fail in its mode, which shows the
+# model gets there.
+#
+# Exit 0 when all of that is true, 1 otherwise. TLC's output is written to
+# formal/out/<mode>-<check>[-pinned].out.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here"
 
 TLC_TOOL='http:tla2tools[url=https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar,checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88]@1.7.4'
-INVARIANTS="TypeOK NoFork NoLostTurns OwnerCanResume OneAgent AgentHasTranscript"
+PROMISES="TypeOK NoFork NoLostTurns OwnerCanResume OneAgent AgentHasTranscript SizeCheckFair"
+REACH="happy:ReachRoundTrip happy:ReachLaunch happy:ReachStopAgent faults:ReachRerunFinish faults:ReachSizeRefusal overlap:ReachDstLiveRefusal overlap:ReachDeadCall"
+ALLDEAD="put stop import stage park place launch"
 MAXGEN=${MAXGEN:-6}
 MAXV=${MAXV:-3}
 
@@ -31,56 +37,80 @@ fi
 java=${JAVA:-java}
 command -v "$java" >/dev/null || { echo "check.sh: needs Java 11 or later on PATH, or JAVA=/path/to/java" >&2; exit 2; }
 
-# The action names along a TLC trace, comma-separated, then a hash of every
-# state on it, so two traces with the same steps but different outcomes differ.
-trace() {
-  names=$(sed -n 's/^State [0-9]*: <\([A-Za-z]*\).*/\1/p' "$1" | paste -sd, -)
-  hash=$(sed -n '/^State 1:/,/^[0-9]* states generated/p' "$1" | grep -v 'states generated' |
-    sed 's/ line [0-9]*, col [0-9]* to line [0-9]*, col [0-9]* of module Handoff//' |
-    sha256sum | cut -c1-12)
-  echo "$hash $names"
-}
+# Warn when the code the model covers has changed since the sync commit.
+skill=../.claude/skills/verify-handoff/SKILL.md
+if [ -f "$skill" ]; then
+  sync=$(sed -n 's/.*Sync commit: `\([0-9a-f]*\)`.*/\1/p' "$skill")
+  if [ -n "$sync" ] && ! git -C .. diff --quiet "$sync" -- handoff.go record.go session.go machine.go main.go rex.go 2>/dev/null; then
+    echo "WARN   covered code changed since sync commit ${sync%"${sync#????????????}"}; recheck the coverage table in $skill"
+  fi
+fi
 
 mkdir -p out
 status=0
-for mode in happy faults overlap; do
-  faults=TRUE; overlap=FALSE
-  [ $mode = happy ] && faults=FALSE
-  [ $mode = overlap ] && overlap=TRUE
-  for inv in ${1:-$INVARIANTS}; do
-    base=out/$mode-$inv
-    printf 'SPECIFICATION Spec\nCONSTANTS MaxGen = %s\n          MaxV = %s\n          Faults = %s\n          Overlap = %s\nCONSTRAINT Bounds\nINVARIANT %s\n' \
-      "$MAXGEN" "$MAXV" "$faults" "$overlap" "$inv" > "$base.cfg"
-    rm -rf "$base.states"
-    # One worker, so TLC reports the same shortest trace on every run.
-    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers 1 -deadlock \
-      -config "$base.cfg" -metadir "$base.states" Handoff.tla > "$base.out" 2>&1 || true
-    states=$(sed -n 's/.* \([0-9]*\) distinct states found.*/\1/p' "$base.out" | tail -1)
-    want=""
-    [ $mode = overlap ] && want=$(awk -v i="$inv" '$1 == i {print $2, $3}' known-findings)
-    if grep -q "Invariant $inv is violated" "$base.out"; then
-      got=$(trace "$base.out")
-      if [ -n "$want" ] && [ "$got" = "$want" ]; then
-        echo "KNOWN  $mode $inv: known finding, same trace ($base.out)"
-      elif [ -n "$want" ]; then
-        echo "FAIL   $mode $inv: the trace changed ($base.out)"
-        echo "       was: $want"
-        echo "       now: $got"
-        status=1
-      else
-        echo "FAIL   $mode $inv: violated ($base.out)"
-        echo "       trace: $got"
-        status=1
-      fi
-    elif grep -q "Model checking completed. No error has been found" "$base.out"; then
-      if [ -n "$want" ]; then
-        echo "FIXED? $mode $inv: holds over $states states, but formal/known-findings lists it"; status=1
-      else
-        echo "PASS   $mode $inv: holds over $states states (MaxGen = $MAXGEN, MaxV = $MAXV)"
-      fi
-    else
-      echo "ERROR  $mode $inv: TLC did not finish ($base.out)"; status=1
-    fi
+
+# check MODE NAME OUT [SWITCH...]: run TLC, print VIOLATED, PASS or ERROR.
+# A switch is InstantRegister, SourceAtCommit, or -KIND to drop a dead call.
+check() {
+  mode=$1 inv=$2 base=out/$3; shift 3
+  faults=TRUE; dead=""
+  [ "$mode" = happy ] && faults=FALSE
+  [ "$mode" = overlap ] && dead=$ALLDEAD
+  ir=FALSE; sc=FALSE
+  for s in "$@"; do
+    case $s in
+      InstantRegister) ir=TRUE ;;
+      SourceAtCommit) sc=TRUE ;;
+      -*) dead=$(echo " $dead " | sed "s/ ${s#-} / /; s/^ *//; s/ *$//") ;;
+    esac
   done
+  set_=$(echo "$dead" | awk '{for(i=1;i<=NF;i++) printf "%s\"%s\"", (i>1?", ":""), $i}')
+  printf 'SPECIFICATION Spec\nCONSTANTS\n  MaxGen = %s\n  MaxV = %s\n  Faults = %s\n  DeadKinds = {%s}\n  InstantRegister = %s\n  SourceAtCommit = %s\nCONSTRAINT Bounds\nINVARIANT %s\n' \
+    "$MAXGEN" "$MAXV" "$faults" "$set_" "$ir" "$sc" "$inv" > "$base.cfg"
+  rm -rf "$base.states"
+  "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -deadlock \
+    -config "$base.cfg" -metadir "$base.states" Handoff.tla > "$base.out" 2>&1 || true
+  if grep -q "Invariant $inv is violated" "$base.out"; then echo VIOLATED
+  elif grep -q "Model checking completed. No error has been found" "$base.out"; then echo PASS
+  else echo ERROR; fi
+}
+trace() { sed -n 's/^State [0-9]*: <\([A-Za-z]*\).*/\1/p' "$1" | paste -sd, -; }
+
+for mode in happy faults overlap; do
+  for inv in ${1:-$PROMISES}; do
+    case " $PROMISES " in *" $inv "*) ;; *) continue ;; esac
+    line=$(awk -v m="$mode" -v i="$inv" '$1 == m && $2 == i' known-findings)
+    got=$(check "$mode" "$inv" "$mode-$inv")
+    if [ "$got" = ERROR ]; then
+      echo "ERROR  $mode $inv: TLC did not finish (out/$mode-$inv.out)"; status=1; continue
+    fi
+    if [ -z "$line" ]; then
+      if [ "$got" = PASS ]; then echo "PASS   $mode $inv"
+      else echo "FAIL   $mode $inv: violated (out/$mode-$inv.out)"; echo "       $(trace "out/$mode-$inv.out")"; status=1; fi
+      continue
+    fi
+    switches=$(echo "$line" | cut -d' ' -f3-)
+    if [ "$got" = PASS ]; then
+      echo "FIXED? $mode $inv: holds, but known-findings lists it"; status=1; continue
+    fi
+    # shellcheck disable=SC2086
+    pinned=$(check "$mode" "$inv" "$mode-$inv-pinned" $switches)
+    case $pinned in
+      PASS) echo "KNOWN  $mode $inv: fails, and holds with $switches (out/$mode-$inv.out)" ;;
+      VIOLATED) echo "FAIL   $mode $inv: still fails with $switches, so something else breaks it (out/$mode-$inv-pinned.out)"
+                echo "       $(trace "out/$mode-$inv-pinned.out")"; status=1 ;;
+      *) echo "ERROR  $mode $inv: pinned run did not finish (out/$mode-$inv-pinned.out)"; status=1 ;;
+    esac
+  done
+done
+
+for r in $REACH; do
+  mode=${r%%:*} inv=${r#*:}
+  [ -n "${1:-}" ] && [ "$1" != "$inv" ] && continue
+  case $(check "$mode" "$inv" "$mode-$inv") in
+    VIOLATED) echo "REACH  $mode $inv: reached" ;;
+    PASS) echo "FAIL   $mode $inv: never reached, so the model is vacuous there"; status=1 ;;
+    *) echo "ERROR  $mode $inv: TLC did not finish (out/$mode-$inv.out)"; status=1 ;;
+  esac
 done
 exit $status
