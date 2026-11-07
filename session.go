@@ -39,12 +39,47 @@ type FindSessionReq struct {
 
 var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
 
+// Session ids from both agents are UUIDs. Anything else is refused, because
+// ids are joined into paths and may arrive from the other machine.
+var sessionIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+func checkSessionID(id string) error {
+	if !sessionIDPattern.MatchString(id) {
+		return fmt.Errorf("%q is not a session id", id)
+	}
+	return nil
+}
+
+// sessionPathOK reports whether rel (relative to home) is one of the files a
+// session of this agent and id may consist of. projDir is the Claude project
+// directory the session belongs to.
+func sessionPathOK(agent, id, projDir, rel string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	switch agent {
+	case agentClaude:
+		proj := filepath.ToSlash(projDir)
+		return rel == proj+"/"+id+".jsonl" ||
+			strings.HasPrefix(rel, proj+"/"+id+"/") ||
+			strings.HasPrefix(rel, ".claude/file-history/"+id+"/")
+	case agentCodex:
+		return codexRolloutPath.MatchString(rel) && strings.HasSuffix(rel, "-"+id+".jsonl")
+	}
+	return false
+}
+
+var codexRolloutPath = regexp.MustCompile(`^\.codex/sessions/[0-9]{4}/[0-9]{2}/[0-9]{2}/rollout-[^/]+\.jsonl$`)
+
 // claudeSlug is the project directory Claude Code keeps a cwd's sessions in.
 func claudeSlug(cwd string) string { return nonAlnum.ReplaceAllString(cwd, "-") }
 
 // FindSession returns the newest session for a working directory, or the
 // session with the given id. It returns nil when there is none.
 func (l *Local) FindSession(q FindSessionReq) (*Session, error) {
+	if q.ID != "" {
+		if err := checkSessionID(q.ID); err != nil {
+			return nil, err
+		}
+	}
 	var found []Session
 	if q.Agent == "" || q.Agent == agentClaude {
 		if s, err := l.findClaude(q); err != nil {
@@ -354,6 +389,9 @@ type InstallReq struct {
 // contents, so they are copied untouched. This is the handoff's commit point
 // for the receiving side.
 func (l *Local) InstallSession(q InstallReq) (Session, error) {
+	if err := checkSessionID(q.Session.ID); err != nil {
+		return Session{}, err
+	}
 	stage := l.abs(q.StageRel)
 	rel, err := filepath.Rel(q.OldHome, q.Session.Cwd)
 	if err != nil || strings.HasPrefix(rel, "..") {
@@ -376,6 +414,9 @@ func (l *Local) InstallSession(q InstallReq) (Session, error) {
 			return err
 		}
 		r, _ := filepath.Rel(stage, p)
+		if !d.Type().IsRegular() || !sessionPathOK(q.Session.Agent, q.Session.ID, oldProj, r) {
+			return fmt.Errorf("refusing %s: not part of %s session %s", r, q.Session.Agent, q.Session.ID)
+		}
 		dest := mapRel(r)
 		if strings.HasSuffix(p, ".jsonl") || strings.HasSuffix(p, ".json") {
 			if !strings.HasPrefix(r, filepath.Join(".claude", "file-history")) {
@@ -400,6 +441,7 @@ func (l *Local) InstallSession(q InstallReq) (Session, error) {
 		return nil
 	})
 	if err != nil {
+		os.RemoveAll(stage)
 		return Session{}, err
 	}
 	parked := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))
@@ -432,8 +474,15 @@ type ParkReq struct {
 // habitual `claude --resume` or `codex resume` on this machine fails instead
 // of forking the conversation. File history stays; it is only read on rewind.
 func (l *Local) Park(q ParkReq) error {
+	if err := checkSessionID(q.Session.ID); err != nil {
+		return err
+	}
 	dest := l.stateDir("parked", fmt.Sprintf("%s-g%d", q.Task, q.Gen))
+	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
 	for _, f := range q.Session.Files {
+		if !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f) && !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f+"/x") {
+			return fmt.Errorf("refusing to park %s: not part of session %s", f, q.Session.ID)
+		}
 		if strings.HasPrefix(f, filepath.Join(".claude", "file-history")) {
 			continue
 		}

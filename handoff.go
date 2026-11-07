@@ -245,7 +245,11 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 		step("extras", "%s", strings.Join(names, ", "))
 		if opts.Yes || confirm("send these ignored files to "+di.Name+"?") {
-			if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: t.WtRel, Private: true}); err != nil {
+			stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "extras")
+			if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: stage, Clean: true, Private: true}); err != nil {
+				return err
+			}
+			if err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage}); err != nil {
 				return err
 			}
 		} else {

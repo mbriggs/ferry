@@ -30,6 +30,7 @@ type Machine interface {
 	Export(req ExportReq, w io.Writer) error
 	Import(req ImportReq, r io.Reader) error
 	InstallSession(InstallReq) (Session, error)
+	InstallExtras(InstallExtrasReq) error
 	Park(ParkReq) error
 	RecordGet(task string) (*Record, error)
 	RecordPut(RecordPutReq) error
@@ -163,6 +164,10 @@ func (r *Remote) Import(q ImportReq, rd io.Reader) error {
 }
 func (r *Remote) InstallSession(q InstallReq) (Session, error) {
 	return rpc[Session](r, "install-session", q)
+}
+func (r *Remote) InstallExtras(q InstallExtrasReq) error {
+	_, err := rpc[struct{}](r, "install-extras", q)
+	return err
 }
 func (r *Remote) Park(q ParkReq) error                   { _, err := rpc[struct{}](r, "park", q); return err }
 func (r *Remote) RecordGet(task string) (*Record, error) { return rpc[*Record](r, "record-get", task) }
@@ -302,6 +307,12 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return l.InstallSession(q)
+	case "install-extras":
+		q, err := decode[InstallExtrasReq](raw)
+		if err != nil {
+			return nil, err
+		}
+		return none, l.InstallExtras(q)
 	case "park":
 		q, err := decode[ParkReq](raw)
 		if err != nil {

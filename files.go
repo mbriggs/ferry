@@ -202,6 +202,92 @@ func (l *Local) Import(q ImportReq, r io.Reader) error {
 	}
 }
 
+type InstallExtrasReq struct {
+	WtRel    string `json:"wt_rel"`
+	StageRel string `json:"stage_rel"`
+}
+
+// InstallExtras moves staged extras into the worktree. The worktree's tracked
+// contents came from the other machine, so every path is checked here: no
+// component may be a symlink (a tracked symlink could otherwise redirect a
+// write anywhere in this home), nothing goes under .git, and files are
+// written through a fresh, randomly named temp file and renamed into place.
+func (l *Local) InstallExtras(q InstallExtrasReq) error {
+	root, stage := l.abs(q.WtRel), l.abs(q.StageRel)
+	defer os.RemoveAll(stage)
+	return filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(stage, p)
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("refusing extra %s: not a regular file", rel)
+		}
+		if err := safeDest(root, rel); err != nil {
+			return err
+		}
+		dest := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(dest), ".ferry-extra-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmp.Name())
+		if _, err := tmp.Write(data); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Chmod(0o600); err != nil {
+			tmp.Close()
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		return os.Rename(tmp.Name(), dest)
+	})
+}
+
+// safeDest checks that writing root/rel stays inside root: rel is relative and
+// clean, no component is ".git", and no existing component along the way
+// (including the file itself) is a symlink or a non-directory.
+func safeDest(root, rel string) error {
+	clean := filepath.Clean(rel)
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing extra %q: outside the worktree", rel)
+	}
+	parts := strings.Split(clean, string(filepath.Separator))
+	cur := root
+	for i, part := range parts {
+		if part == ".git" {
+			return fmt.Errorf("refusing extra %q: inside .git", rel)
+		}
+		cur = filepath.Join(cur, part)
+		st, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		last := i == len(parts)-1
+		switch {
+		case st.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("refusing extra %q: %s is a symlink", rel, cur)
+		case !last && !st.IsDir():
+			return fmt.Errorf("refusing extra %q: %s is not a directory", rel, cur)
+		case last && !st.Mode().IsRegular():
+			return fmt.Errorf("refusing extra %q: %s is not a regular file", rel, cur)
+		}
+	}
+	return nil
+}
+
 // transfer streams Export from src into Import on dst.
 func transfer(src Machine, ex ExportReq, dst Machine, im ImportReq) error {
 	pr, pw := io.Pipe()
