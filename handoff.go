@@ -1,0 +1,471 @@
+package main
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+type handoffOpts struct {
+	Agent        string
+	SessionID    string
+	Yes          bool
+	NoLaunch     bool
+	Force        bool
+	ForceVersion bool
+}
+
+// task identifies the worktree being moved. Paths are relative to home so
+// they mean the same thing on both machines.
+type task struct {
+	Key     string
+	Name    string
+	WtRel   string
+	RepoRel string
+}
+
+func step(label, format string, a ...any) {
+	fmt.Printf("%-10s %s\n", label, fmt.Sprintf(format, a...))
+}
+
+// taskHere resolves the git worktree containing dir on this machine.
+func taskHere(l *Local, dir string) (task, error) {
+	top, err := git(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return task{}, errors.New("not inside a git worktree (ferry v1 only moves git repos)")
+	}
+	common, err := git(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return task{}, err
+	}
+	repo := filepath.Dir(common)
+	home, _ := filepath.EvalSymlinks(l.Home)
+	top, _ = filepath.EvalSymlinks(top)
+	repo, _ = filepath.EvalSymlinks(repo)
+	src := filepath.Join(home, "src")
+	wtRel, err1 := filepath.Rel(home, top)
+	repoRel, err2 := filepath.Rel(home, repo)
+	if err1 != nil || err2 != nil || !strings.HasPrefix(top, src+string(filepath.Separator)) || !strings.HasPrefix(repo, src+string(filepath.Separator)) {
+		return task{}, fmt.Errorf("%s is outside ~/src; ferry only moves work under ~/src", top)
+	}
+	return task{Key: taskKey(wtRel), Name: filepath.Base(top), WtRel: wtRel, RepoRel: repoRel}, nil
+}
+
+// findTask looks a task up in the hub's records by name or key.
+func findTask(hub Machine, name string) (*Record, error) {
+	recs, err := hub.RecordList()
+	if err != nil {
+		return nil, err
+	}
+	var hits []Record
+	for _, r := range recs {
+		if r.Name == name || r.Task == name || r.WtRel == name {
+			hits = append(hits, r)
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return nil, fmt.Errorf("no task named %q; see `ferry ls`", name)
+	case 1:
+		return &hits[0], nil
+	}
+	var keys []string
+	for _, h := range hits {
+		keys = append(keys, h.WtRel)
+	}
+	return nil, fmt.Errorf("%q matches several tasks: %s", name, strings.Join(keys, ", "))
+}
+
+// handoff moves task t from src to dst. hub keeps the ownership record; it is
+// always the remote machine, because the laptop drives every handoff.
+func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
+	direction := "to"
+	if !src.IsLocal() {
+		direction = "from"
+	}
+	si, err := src.Info()
+	if err != nil {
+		return err
+	}
+	di, err := dst.Info()
+	if err != nil {
+		return err
+	}
+	if si.Name == di.Name {
+		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", si.Name)
+	}
+	step("task", "%s  (%s, repo %s)", t.Name, t.WtRel, t.RepoRel)
+
+	rec, err := hub.RecordGet(t.Key)
+	if err != nil {
+		return err
+	}
+
+	// --- session -----------------------------------------------------------
+	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
+	if direction == "from" && rec != nil && opts.SessionID == "" && rec.Session != "" {
+		find = FindSessionReq{Agent: rec.Agent, ID: rec.Session}
+	}
+	sess, err := src.FindSession(find)
+	if err != nil {
+		return err
+	}
+
+	// A rerun after the commit point only needs to finish the last steps.
+	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
+		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
+		var installed *Session
+		if sess != nil || rec.Session != "" {
+			installed, _ = dst.FindSession(FindSessionReq{Agent: rec.Agent, ID: rec.Session})
+		}
+		return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
+	}
+
+	if sess != nil {
+		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
+		live, err := src.Liveness(*sess)
+		if err != nil {
+			return err
+		}
+		if live.Live {
+			if src.IsLocal() || rec == nil || rec.RexSession == "" {
+				return fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
+			}
+			step("agent", "%s: stopping the idle agent in rex", si.Name)
+			if err := src.StopAgent(StopReq{Session: *sess, RexSession: rec.RexSession}); err != nil {
+				return err
+			}
+		}
+		if live, err := dst.Liveness(*sess); err != nil {
+			return err
+		} else if live.Live {
+			return fmt.Errorf("%s: %s already has this session loaded", di.Name, live.Detail)
+		}
+		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
+		switch {
+		case have == "" || want == "":
+			step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
+		case versionLess(want, have) && !opts.ForceVersion:
+			return fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
+		default:
+			step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
+		}
+	} else {
+		step("agent", "no Claude or Codex session found for this worktree; moving code only")
+	}
+
+	// --- claim -------------------------------------------------------------
+	if rec == nil {
+		rec = &Record{Task: t.Key, Name: t.Name, WtRel: t.WtRel, RepoRel: t.RepoRel, Owner: si.Name, State: stateOwned}
+		step("owner", "new task")
+	}
+	resuming := rec.State == stateHandingOff && rec.From == si.Name && rec.To == di.Name
+	switch {
+	case resuming:
+		step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
+	case rec.State == stateHandingOff && !opts.Force:
+		return fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
+	case rec.State == stateLanding && !opts.Force:
+		return fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
+	case rec.Owner != si.Name && !opts.Force:
+		return fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
+	}
+	if !resuming {
+		expect := rec.Generation
+		rec.State, rec.From, rec.To, rec.Generation = stateHandingOff, si.Name, di.Name, expect+1
+		if sess != nil {
+			rec.Agent, rec.Session = sess.Agent, sess.ID
+		}
+		if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+			return err
+		}
+	}
+
+	// --- dehydrate ---------------------------------------------------------
+	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, true); err != nil {
+		return err
+	}
+
+	// --- code --------------------------------------------------------------
+	ss, err := src.RepoState(t.RepoRel)
+	if err != nil {
+		return err
+	}
+	ds, err := dst.RepoState(t.RepoRel)
+	if err != nil {
+		return err
+	}
+	if ds.Exists && len(ds.Roots) > 0 && !sharesRoot(ss.Roots, ds.Roots) {
+		return fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", di.Name, t.RepoRel)
+	}
+	if !ds.Exists || len(ds.Roots) == 0 {
+		step("repo", "%s has no %s; creating it", di.Name, t.RepoRel)
+		if err := dst.InitRepo(t.RepoRel); err != nil {
+			return err
+		}
+		if err := moveRefs(src, dst, t.RepoRel, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
+			return err
+		}
+		if err := dst.FinishRepo(FinishRepoReq{RepoRel: t.RepoRel, Branch: ss.Branch, Origin: ss.Origin}); err != nil {
+			return err
+		}
+	} else {
+		step("repo", "%s: %s exists, same history", di.Name, t.RepoRel)
+	}
+	snap, err := src.Snapshot(SnapshotReq{WtRel: t.WtRel, Task: t.Key})
+	if err != nil {
+		return err
+	}
+	step("snapshot", "branch %s at %s, %d changed paths", snap.Branch, snap.Base[:7], snap.Dirty)
+	ref := "+refs/ferry/" + t.Key + "/*:refs/ferry/" + t.Key + "/*"
+	if err := moveRefs(src, dst, t.RepoRel, ref); err != nil {
+		return err
+	}
+	step("git", "moved refs/ferry/%s/* to %s", t.Key, di.Name)
+	_, err = dst.Apply(ApplyReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: snap.Branch, Task: t.Key, Expected: snap.Fingerprint, LastSent: rec.LastSent[di.Name]})
+	if err != nil {
+		return err
+	}
+	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
+
+	extras, err := src.ListExtras(t.WtRel)
+	if err != nil {
+		return err
+	}
+	if len(extras) > 0 {
+		var names []string
+		var paths []string
+		for _, e := range extras {
+			names = append(names, fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size)))
+			paths = append(paths, e.Path)
+		}
+		step("extras", "%s", strings.Join(names, ", "))
+		if opts.Yes || confirm("send these ignored files to "+di.Name+"?") {
+			if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths}, dst, ImportReq{BaseRel: t.WtRel, Private: true}); err != nil {
+				return err
+			}
+		} else {
+			step("extras", "skipped")
+		}
+	}
+
+	// --- session -----------------------------------------------------------
+	var installed *Session
+	if sess != nil {
+		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
+		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
+			return err
+		}
+		s, err := dst.InstallSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
+		if err != nil {
+			return err
+		}
+		installed = &s
+		step("session", "%s installed on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
+	}
+
+	// --- commit ------------------------------------------------------------
+	expect := rec.Generation
+	if rec.LastSent == nil {
+		rec.LastSent = map[string]string{}
+	}
+	rec.LastSent[si.Name] = snap.Fingerprint
+	delete(rec.LastSent, di.Name)
+	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
+	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+		return err
+	}
+	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+
+	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
+}
+
+// finish runs the steps after the commit point: park the source copy, run
+// restore, and start the agent. Each is safe to repeat.
+func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts) error {
+	if sess != nil {
+		if err := src.Park(ParkReq{Session: *sess, Task: t.Key, Gen: rec.Generation}); err != nil {
+			return err
+		}
+		step("park", "%s: transcript moved to ~/.local/state/ferry/parked/", si.Name)
+	}
+	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, false)
+	if err != nil {
+		step("restore", "failed: %v", err)
+		step("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
+		return errors.New("restore failed; the task moved but the agent wasn't started")
+	}
+	rexSession := ""
+	switch {
+	case installed == nil:
+		step("done", "code is on %s at ~/%s", di.Name, t.WtRel)
+	default:
+		note := resumeNote(si, di, t, *installed, summary)
+		argv := resumeArgv(*installed, note)
+		cwdRel, _ := filepath.Rel(di.Home, installed.Cwd)
+		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
+			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv))
+			break
+		}
+		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, AcceptTrust: sess != nil && sess.Trusted})
+		if err != nil {
+			step("launch", "failed: %v", err)
+			step("resume", "on %s: cd ~/%s && %s", di.Name, cwdRel, shellJoin(argv))
+			break
+		}
+		rexSession = id
+		step("launch", "%s: rex session %q running %s --resume %s", di.Name, t.Name, installed.Agent, short(installed.ID))
+	}
+	expect := rec.Generation
+	rec.State, rec.RexSession, rec.Generation = stateOwned, rexSession, expect+1
+	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// moveRefs copies refs from src's repo to dst's using whichever side is local.
+func moveRefs(src, dst Machine, repoRel string, refspecs ...string) error {
+	if src.IsLocal() {
+		_, err := git(src.GitURL(repoRel), append([]string{"push", "-q", dst.GitURL(repoRel)}, refspecs...)...)
+		return err
+	}
+	_, err := git(dst.GitURL(repoRel), append([]string{"fetch", "-q", src.GitURL(repoRel)}, refspecs...)...)
+	return err
+}
+
+// runHook runs a project hook on m after the user approves its contents.
+// Approval is remembered on m by content hash; --yes never approves a hook.
+func runHook(m Machine, where string, q HookReq, required bool) (string, error) {
+	info, err := m.HookInfo(q)
+	if err != nil || !info.Exists {
+		return "", err
+	}
+	if !info.Approved {
+		fmt.Printf("%-10s %s: .ferry/%s isn't approved on %s (sha %s):\n%s\n", q.Name, where, q.Name, where, info.SHA[:12], indent(info.Content))
+		if !confirm(fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)) {
+			step(q.Name, "skipped")
+			return "", nil
+		}
+		if err := m.Approve(info.SHA); err != nil {
+			return "", err
+		}
+	}
+	q.SHA = info.SHA
+	res, err := m.RunHook(q)
+	if err != nil {
+		return "", err
+	}
+	if !res.OK {
+		fmt.Println(indent(res.Output))
+		return "", fmt.Errorf("%s failed on %s", q.Name, where)
+	}
+	step(q.Name, "%s: %s", where, res.Summary)
+	return res.Summary, nil
+}
+
+func resumeNote(si, di Info, t task, s Session, summary string) string {
+	oldCwd := filepath.Join(si.Home, mustRel(di.Home, s.Cwd))
+	var b strings.Builder
+	fmt.Fprintf(&b, "[ferry] This session moved from %s to %s. ", si.Name, di.Name)
+	fmt.Fprintf(&b, "The working directory is now %s (it was %s), and paths under %s are now under %s. ", s.Cwd, oldCwd, si.Home, di.Home)
+	b.WriteString("Committed and uncommitted changes came along. ")
+	if summary != "" {
+		fmt.Fprintf(&b, "Environment: %s. ", summary)
+	} else {
+		b.WriteString("The environment here is cold: dependencies, databases and dev servers from the other machine did not come along. ")
+	}
+	b.WriteString("Nothing that was running on the other machine is running here. Briefly confirm where things stand, then continue.")
+	return b.String()
+}
+
+func resumeArgv(s Session, note string) []string {
+	if s.Agent == agentCodex {
+		argv := []string{"codex", "--no-daemon"}
+		if s.Model != "" {
+			argv = append(argv, "-c", fmt.Sprintf("model=%q", s.Model))
+		}
+		return append(argv, "resume", s.ID, note)
+	}
+	return []string{"claude", "--resume", s.ID, note}
+}
+
+func agentVersion(i Info, agent string) string {
+	if agent == agentCodex {
+		return i.Codex
+	}
+	return i.Claude
+}
+
+// versionLess compares dotted numeric versions; non-numeric parts compare as 0.
+func versionLess(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(pa) || i < len(pb); i++ {
+		var x, y int
+		if i < len(pa) {
+			x, _ = strconv.Atoi(strings.TrimFunc(pa[i], func(r rune) bool { return r < '0' || r > '9' }))
+		}
+		if i < len(pb) {
+			y, _ = strconv.Atoi(strings.TrimFunc(pb[i], func(r rune) bool { return r < '0' || r > '9' }))
+		}
+		if x != y {
+			return x < y
+		}
+	}
+	return false
+}
+
+func confirm(prompt string) bool {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+	fmt.Fprintf(tty, "%s [y/N] ", prompt)
+	line, _ := bufio.NewReader(tty).ReadString('\n')
+	line = strings.ToLower(strings.TrimSpace(line))
+	return line == "y" || line == "yes"
+}
+
+func short(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
+func mustRel(base, p string) string {
+	r, err := filepath.Rel(base, p)
+	if err != nil {
+		return p
+	}
+	return r
+}
+
+func shellJoin(argv []string) string {
+	var parts []string
+	for _, a := range argv {
+		if a != "" && strings.IndexFunc(a, func(r rune) bool {
+			return !(r == '-' || r == '_' || r == '.' || r == '/' || r == '=' || r == ':' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'))
+		}) < 0 {
+			parts = append(parts, a)
+			continue
+		}
+		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+	}
+	return strings.Join(parts, " ")
+}
