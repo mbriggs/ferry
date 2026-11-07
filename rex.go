@@ -115,14 +115,22 @@ func (l *Local) StopAgent(q StopReq) error {
 	if live.Busy {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
 	}
+	// The agent's own environment names its pane exactly; the record and the
+	// session label are fallbacks for where that can't be read.
+	block := ""
+	if sess, b := rexOfPID(live.PID); sess != "" && b != "" {
+		q.RexSession, block = sess, b
+	}
 	if q.RexSession == "" {
 		q.RexSession = rexSessionNamed(q.Name)
 	}
 	if q.RexSession == "" {
 		return fmt.Errorf("%s; exit it first", live.Detail)
 	}
-	block, state, err := agentBlock(q.RexSession)
-	if err != nil {
+	state := ""
+	if block != "" {
+		state = blockState(q.RexSession, block)
+	} else if block, state, err = agentBlock(q.RexSession); err != nil {
 		return err
 	}
 	if state == "working" {
@@ -173,26 +181,40 @@ func agentBlock(session string) (block, state string, err error) {
 		return "", "", err
 	}
 	for _, b := range ls.Blocks {
-		ps, err := run("", nil, "rex", "block", "call", "-s", session, "-b", b.BlockID, "program_status")
-		if err != nil {
-			continue
-		}
-		var st struct {
-			Records []struct {
-				State string `json:"state"`
-				App   string `json:"app"`
-			} `json:"records"`
-		}
-		if json.Unmarshal([]byte(ps), &st) != nil {
-			continue
-		}
-		for _, r := range st.Records {
-			if r.App == "claude-code" || r.App == "codex" {
-				return b.BlockID, r.State, nil
-			}
+		if app, state := programStatus(session, b.BlockID); app != "" {
+			return b.BlockID, state, nil
 		}
 	}
 	return "", "", fmt.Errorf("no agent pane found in rex session %s", session)
+}
+
+// blockState is the agent's state in one pane ("working", "idle"), or "".
+func blockState(session, block string) string {
+	_, state := programStatus(session, block)
+	return state
+}
+
+// programStatus returns the agent app a pane reports and its state, or "".
+func programStatus(session, block string) (app, state string) {
+	ps, err := run("", nil, "rex", "block", "call", "-s", session, "-b", block, "program_status")
+	if err != nil {
+		return "", ""
+	}
+	var st struct {
+		Records []struct {
+			State string `json:"state"`
+			App   string `json:"app"`
+		} `json:"records"`
+	}
+	if json.Unmarshal([]byte(ps), &st) != nil {
+		return "", ""
+	}
+	for _, r := range st.Records {
+		if r.App == "claude-code" || r.App == "codex" {
+			return r.App, r.State
+		}
+	}
+	return "", ""
 }
 
 // rexSessionNamed returns the id of the one rex session with this label, or "".

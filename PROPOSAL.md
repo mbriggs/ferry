@@ -24,7 +24,7 @@ All `ferry` commands run on the laptop and connect to kant. kant never connects 
 
 ```
 ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]   hand the task in $PWD to HOST
-ferry from HOST NAME [--yes] [--no-launch]                                  bring task NAME back here
+ferry from HOST [NAME] [--yes] [--no-launch]                                bring a task back here
 ferry ls HOST                                                               tasks, owner, generation
 ferry setup                                                                 add ferry's Claude Code permission rules
 ```
@@ -70,6 +70,10 @@ resume     cd ~/src/app-wt/fix-auth && claude --resume 7c1e9a02
 
 Run from a terminal, `ferry from` then turns into the resumed agent, in the worktree, in the same terminal (or Rex pane). With `--no-launch`, or when its output isn't a terminal, it prints the command instead.
 If the agent on kant is mid-turn, `ferry from` refuses and tells you to wait.
+
+A task doesn't have to have started on the laptop. Any git worktree under `~/src` is a task, and a worktree with no record lives on whichever machine has it; the first handoff in either direction writes the record. `ferry from kant` with no name lists what can be pulled: the agents running on kant, from Claude's session registry and Codex's thread locks, then tasks kant owns with no agent running. Each agent is placed in the worktree it is working in now, which is the last `cwd` in its transcript, so a Claude opened in `~/src` that went on to work in `~/src/app` counts as `src/app`. Picking one brings that worktree and that session. NAME narrows the list: a task name, a Rex session label, the start of a session id, or a path like `src/app`, which also reaches a worktree with no agent and no record.
+
+A session that started in a folder above the worktree moves with it and resumes from that folder on the other side (`cd ~/src && claude --resume ...`), as long as it is now working inside the worktree. To stop an agent that ferry didn't launch, ferry reads `REX_SESSION` and `REX_BLOCK` from the agent's environment, which Rex sets for everything it runs, so it sends `/exit` to exactly that pane.
 
 ## Repos kant doesn't have
 

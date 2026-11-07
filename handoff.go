@@ -58,31 +58,6 @@ func taskHere(l *Local, dir string) (task, error) {
 	return task{Key: taskKey(wtRel), Name: filepath.Base(top), WtRel: wtRel, RepoRel: repoRel}, nil
 }
 
-// findTask looks a task up in the hub's records by name or key.
-func findTask(hub Machine, name string) (*Record, error) {
-	recs, err := hub.RecordList()
-	if err != nil {
-		return nil, err
-	}
-	var hits []Record
-	for _, r := range recs {
-		if r.Name == name || r.Task == name || r.WtRel == name {
-			hits = append(hits, r)
-		}
-	}
-	switch len(hits) {
-	case 0:
-		return nil, fmt.Errorf("no task named %q; see `ferry ls`", name)
-	case 1:
-		return &hits[0], nil
-	}
-	var keys []string
-	for _, h := range hits {
-		keys = append(keys, h.WtRel)
-	}
-	return nil, fmt.Errorf("%q matches several tasks: %s", name, strings.Join(keys, ", "))
-}
-
 // handoff moves task t from src to dst. hub keeps the ownership record; it is
 // always the remote machine, because the laptop drives every handoff.
 func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
@@ -132,8 +107,8 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	if sess != nil {
-		if rel := mustRel(si.Home, sess.Cwd); rel != t.WtRel && !strings.HasPrefix(rel, t.WtRel+"/") {
-			return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(sess.ID), rel, t.WtRel)
+		if err := sessionFits(si.Home, *sess, t); err != nil {
+			return err
 		}
 		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
 		live, err := settle(src, *sess)
@@ -141,11 +116,15 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return err
 		}
 		if live.Live {
-			if src.IsLocal() || rec == nil {
+			if src.IsLocal() {
 				return fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
 			}
 			step("agent", "%s: stopping the idle agent in rex", si.Name)
-			if err := src.StopAgent(StopReq{Session: *sess, RexSession: rec.RexSession, Name: t.Name}); err != nil {
+			stop := StopReq{Session: *sess, Name: t.Name}
+			if rec != nil {
+				stop.RexSession = rec.RexSession
+			}
+			if err := src.StopAgent(stop); err != nil {
 				return err
 			}
 			// The agent writes its last lines on the way out; the record keeps
@@ -427,6 +406,20 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
+}
+
+// sessionFits checks that a session belongs to the worktree being moved: it
+// started there, or it started in a folder above it inside ~/src and has
+// since moved into it (Claude opened in ~/src, then working in ~/src/app).
+func sessionFits(home string, s Session, t task) error {
+	started := mustRel(home, s.Cwd)
+	if within(started, t.WtRel) {
+		return nil
+	}
+	if s.WorkDir != "" && within(mustRel(home, s.WorkDir), t.WtRel) && within(t.WtRel, started) && within(started, "src") {
+		return nil
+	}
+	return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(s.ID), started, t.WtRel)
 }
 
 // settle waits up to ten seconds for a session's transcript to stop changing.

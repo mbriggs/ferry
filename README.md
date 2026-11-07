@@ -5,6 +5,7 @@ Hand a coding task, meaning a git worktree under `~/src` plus its Claude Code or
 ```
 ferry to kant                 # in the worktree, after exiting the agent
 ferry from kant fix-auth      # bring it back
+ferry from kant               # pick from the agents running on kant
 ferry ls kant
 ```
 

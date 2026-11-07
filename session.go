@@ -22,9 +22,12 @@ const (
 
 // Session is one agent conversation as files under a home directory.
 type Session struct {
-	Agent   string   `json:"agent"`
-	ID      string   `json:"id"`
-	Cwd     string   `json:"cwd"`
+	Agent string `json:"agent"`
+	ID    string `json:"id"`
+	Cwd   string `json:"cwd"`
+	// WorkDir is the directory the agent is in now. It can differ from Cwd,
+	// where the session started (and where it resumes), after a cd.
+	WorkDir string   `json:"work_dir,omitempty"`
 	Files   []string `json:"files"` // relative to home; directories included whole
 	Model   string   `json:"model,omitempty"`
 	Trusted bool     `json:"trusted"`
@@ -141,6 +144,7 @@ func (l *Local) findClaude(q FindSessionReq) (*Session, error) {
 	}
 	rel := func(p string) string { r, _ := filepath.Rel(l.Home, p); return r }
 	s := &Session{Agent: agentClaude, ID: id, Cwd: cwd, Files: []string{rel(transcript)}}
+	s.WorkDir, _ = lastJSONField(transcript, func(m map[string]any) string { s, _ := m["cwd"].(string); return s })
 	if sub := strings.TrimSuffix(transcript, ".jsonl"); isDir(sub) {
 		s.Files = append(s.Files, rel(sub))
 	}
@@ -185,6 +189,14 @@ func (l *Local) findCodex(q FindSessionReq) (*Session, error) {
 	cwd, _ := bestMeta["cwd"].(string)
 	id, _ := bestMeta["id"].(string)
 	s := &Session{Agent: agentCodex, ID: id, Cwd: cwd, Files: []string{rel}}
+	s.WorkDir, _ = lastJSONField(best, func(m map[string]any) string {
+		if m["type"] != "turn_context" {
+			return ""
+		}
+		p, _ := m["payload"].(map[string]any)
+		v, _ := p["cwd"].(string)
+		return v
+	})
 	s.Model, _ = lastJSONField(best, func(m map[string]any) string {
 		if m["type"] != "turn_context" {
 			return ""

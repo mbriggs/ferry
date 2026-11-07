@@ -21,6 +21,8 @@ type Machine interface {
 	FindSession(FindSessionReq) (*Session, error)
 	Liveness(Session) (Liveness, error)
 	StopAgent(StopReq) error
+	Agents() ([]AgentInfo, error)
+	Worktree(rel string) (task, error)
 	RepoState(repoRel string) (RepoState, error)
 	InitRepo(repoRel string) error
 	FinishRepo(FinishRepoReq) error
@@ -171,6 +173,8 @@ func (r *Remote) FindSession(q FindSessionReq) (*Session, error) {
 }
 func (r *Remote) Liveness(s Session) (Liveness, error) { return rpc[Liveness](r, "liveness", s) }
 func (r *Remote) StopAgent(q StopReq) error            { _, err := rpc[struct{}](r, "stop-agent", q); return err }
+func (r *Remote) Agents() ([]AgentInfo, error)         { return rpc[[]AgentInfo](r, "agents", nil) }
+func (r *Remote) Worktree(rel string) (task, error)    { return rpc[task](r, "worktree", rel) }
 func (r *Remote) RepoState(rel string) (RepoState, error) {
 	return rpc[RepoState](r, "repo-state", rel)
 }
@@ -291,6 +295,14 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return l.Liveness(q)
+	case "agents":
+		return l.Agents()
+	case "worktree":
+		rel, err := decode[string](raw)
+		if err != nil {
+			return nil, err
+		}
+		return l.Worktree(rel)
 	case "stop-agent":
 		q, err := decode[StopReq](raw)
 		if err != nil {
