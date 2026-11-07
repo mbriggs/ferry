@@ -92,14 +92,37 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts)
 	}
 
+	// Whether this machine may hand the task off. It's decided before the
+	// session step, which may stop an agent on the other machine.
+	resuming := false
+	if rec != nil {
+		if rec.WtRel != t.WtRel || rec.RepoRel != t.RepoRel {
+			return fmt.Errorf("task record %s is for ~/%s, not ~/%s", t.Key, rec.WtRel, t.WtRel)
+		}
+		resuming = rec.State == stateHandingOff && rec.From == si.Name && rec.To == di.Name
+		switch {
+		case resuming:
+			step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
+		case rec.State == stateHandingOff && !opts.Force:
+			return fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
+		case rec.State == stateLanding && !opts.Force:
+			return fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
+		case rec.Owner != si.Name && !opts.Force:
+			return fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
+		}
+	}
+
 	// --- session -----------------------------------------------------------
 	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
 	switch {
 	case opts.SessionID != "":
 	case rec != nil && rec.State == stateHandingOff && rec.From == si.Name && rec.Source != nil:
 		find = FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID}
-	case direction == "from" && rec != nil && rec.Session != "":
-		find = FindSessionReq{Agent: rec.Agent, ID: rec.Session}
+	case rec != nil && rec.Session != "":
+		// The session the task last moved with may live outside the
+		// worktree's own project folder (it started in a folder above), so
+		// it's a candidate alongside the worktree's newest; newest wins.
+		find.KnownAgent, find.KnownID = rec.Agent, rec.Session
 	}
 	sess, err := src.FindSession(find)
 	if err != nil {
@@ -111,6 +134,22 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return err
 		}
 		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
+		// Everything that can refuse runs before the agent is stopped: once
+		// it's gone from the live registry, a rerun can't find it that way.
+		if live, err := dst.Liveness(*sess); err != nil {
+			return err
+		} else if live.Live && !live.Settling {
+			return fmt.Errorf("%s: %s already has this session loaded", di.Name, live.Detail)
+		}
+		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
+		switch {
+		case have == "" || want == "":
+			step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
+		case versionLess(want, have) && !opts.ForceVersion:
+			return fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
+		default:
+			step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
+		}
 		live, err := settle(src, *sess)
 		if err != nil {
 			return err
@@ -120,9 +159,9 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 				return fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
 			}
 			step("agent", "%s: stopping the idle agent in rex", si.Name)
-			stop := StopReq{Session: *sess, Name: t.Name}
-			if rec != nil {
-				stop.RexSession = rec.RexSession
+			stop := StopReq{Session: *sess}
+			if rec != nil && rec.Owner == si.Name {
+				stop.RexSession, stop.Name = rec.RexSession, t.Name
 			}
 			if err := src.StopAgent(stop); err != nil {
 				return err
@@ -139,20 +178,6 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 				return fmt.Errorf("%s: the session disappeared after stopping the agent", si.Name)
 			}
 		}
-		if live, err := dst.Liveness(*sess); err != nil {
-			return err
-		} else if live.Live && !live.Settling {
-			return fmt.Errorf("%s: %s already has this session loaded", di.Name, live.Detail)
-		}
-		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
-		switch {
-		case have == "" || want == "":
-			step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
-		case versionLess(want, have) && !opts.ForceVersion:
-			return fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
-		default:
-			step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
-		}
 	} else {
 		step("agent", "no Claude or Codex session found for this worktree; moving code only")
 	}
@@ -161,20 +186,6 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if rec == nil {
 		rec = &Record{Task: t.Key, Name: t.Name, WtRel: t.WtRel, RepoRel: t.RepoRel, Owner: si.Name, State: stateOwned}
 		step("owner", "new task")
-	}
-	if rec.WtRel != t.WtRel || rec.RepoRel != t.RepoRel {
-		return fmt.Errorf("task record %s is for ~/%s, not ~/%s", t.Key, rec.WtRel, t.WtRel)
-	}
-	resuming := rec.State == stateHandingOff && rec.From == si.Name && rec.To == di.Name
-	switch {
-	case resuming:
-		step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
-	case rec.State == stateHandingOff && !opts.Force:
-		return fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
-	case rec.State == stateLanding && !opts.Force:
-		return fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
-	case rec.Owner != si.Name && !opts.Force:
-		return fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
 	}
 	if !resuming {
 		expect := rec.Generation
@@ -259,9 +270,17 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
 	clock.lap("git")
 
-	extras, err := src.ListExtras(t.WtRel)
+	found, err := src.ListExtras(t.WtRel)
 	if err != nil {
 		return err
+	}
+	extras := found.Files
+	if len(found.LeftBehind) > 0 {
+		left := found.LeftBehind
+		if len(left) > 8 {
+			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
+		}
+		step("left", "ignored, staying on %s: %s (add to .ferry/include to bring them)", si.Name, strings.Join(left, ", "))
 	}
 	// Extras di sent last time that si no longer has were deleted here.
 	incoming := map[string]bool{}

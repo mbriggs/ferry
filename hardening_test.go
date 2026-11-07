@@ -70,7 +70,7 @@ func TestIncludeFindsFilesInIgnoredDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, e := range got {
+	for _, e := range got.Files {
 		names = append(names, e.Path)
 	}
 	list := strings.Join(names, ",")

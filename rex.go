@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -41,7 +42,7 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 		return "", fmt.Errorf("%s isn't trusted here and wasn't on the sending machine; not starting an agent that would wait at the trust prompt", cwd)
 	}
 	args := append([]string{"new", q.Name, "-c", l.abs(q.CwdRel), "--window", q.Agent, "--json", "--"}, q.Argv...)
-	out, err := run(l.Home, nil, "rex", args...)
+	out, err := rexRun(l.Home, args...)
 	if err != nil {
 		return "", err
 	}
@@ -68,7 +69,7 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	if _, err := run("", nil, "rex", "kill", created.SessionID); err != nil {
+	if _, err := rexRun("", "kill", created.SessionID); err != nil {
 		return "", fmt.Errorf("the agent didn't load the session within %v, and killing rex session %s failed (%v); kill it by hand before resuming", launchTimeout, created.SessionID, err)
 	}
 	return "", fmt.Errorf("the agent didn't load the session within %v (waiting at a prompt?); killed its rex session", launchTimeout)
@@ -80,17 +81,17 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 func answerTrust(session, block, agent string) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		screen, err := run("", nil, "rex", "capture", "-s", session, "-b", block, "--trim")
+		screen, err := rexRun("", "capture", "-s", session, "-b", block, "--trim")
 		if err != nil {
 			return
 		}
 		switch {
 		case agent == agentClaude && strings.Contains(screen, "Yes, I trust this folder") && strings.Contains(screen, "No, exit"):
-			run("", nil, "rex", "send-key", "-s", session, "-b", block, "down")
-			run("", nil, "rex", "send-key", "-s", session, "-b", block, "enter")
+			rexRun("", "send-key", "-s", session, "-b", block, "down")
+			rexRun("", "send-key", "-s", session, "-b", block, "enter")
 			return
 		case agent == agentCodex && strings.Contains(screen, "Trust and continue"):
-			run("", nil, "rex", "send-key", "-s", session, "-b", block, "enter")
+			rexRun("", "send-key", "-s", session, "-b", block, "enter")
 			return
 		case strings.Contains(screen, "Ask Codex") || strings.Contains(screen, "? for shortcuts") || strings.Contains(screen, "auto mode") || strings.Contains(screen, "for agents"):
 			return
@@ -100,9 +101,13 @@ func answerTrust(session, block, agent string) {
 }
 
 type StopReq struct {
-	Session    Session `json:"session"`
-	RexSession string  `json:"rex_session"`
-	Name       string  `json:"name"` // rex session label, if the id was never recorded
+	Session Session `json:"session"`
+	// RexSession and Name come from the task record: the Rex session ferry
+	// launched the agent in, or its label if the id was never recorded. They
+	// are empty for an agent ferry didn't launch, which can only be stopped
+	// through the pane its own environment names.
+	RexSession string `json:"rex_session"`
+	Name       string `json:"name"`
 }
 
 // StopAgent asks an idle agent in a Rex session on this machine to exit and
@@ -115,23 +120,27 @@ func (l *Local) StopAgent(q StopReq) error {
 	if live.Busy {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
 	}
-	// The agent's own environment names its pane exactly; the record and the
-	// session label are fallbacks for where that can't be read.
-	block := ""
-	if sess, b := rexOfPID(live.PID); sess != "" && b != "" {
-		q.RexSession, block = sess, b
-	}
-	if q.RexSession == "" {
-		q.RexSession = rexSessionNamed(q.Name)
-	}
-	if q.RexSession == "" {
-		return fmt.Errorf("%s; exit it first", live.Detail)
-	}
-	state := ""
-	if block != "" {
-		state = blockState(q.RexSession, block)
-	} else if block, state, err = agentBlock(q.RexSession); err != nil {
-		return err
+	// The agent's own environment names its pane exactly. The record's Rex
+	// session is the fallback, for where that can't be read. Either way /exit
+	// is only typed into a pane that Rex says is running this kind of agent.
+	app := rexApp(q.Session.Agent)
+	block, state := "", ""
+	if sess, b := rexOfPID(agentPID(l, q.Session, live)); sess != "" && b != "" {
+		got, st := programStatus(sess, b)
+		if got != app {
+			return fmt.Errorf("%s; its rex pane isn't showing %s now, so exit it by hand", live.Detail, q.Session.Agent)
+		}
+		q.RexSession, block, state = sess, b, st
+	} else {
+		if q.RexSession == "" {
+			q.RexSession = rexSessionNamed(q.Name)
+		}
+		if q.RexSession == "" {
+			return fmt.Errorf("%s; exit it first", live.Detail)
+		}
+		if block, state, err = agentBlock(q.RexSession, app); err != nil {
+			return err
+		}
 	}
 	if state == "working" {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
@@ -139,8 +148,8 @@ func (l *Local) StopAgent(q StopReq) error {
 	pid := live.PID // 0 for codex, whose lock release already means it's done
 	// Codex can drop input that lands as a turn finishes, so retry.
 	for range 3 {
-		run("", nil, "rex", "send", "-s", q.RexSession, "-b", block, "/exit")
-		run("", nil, "rex", "send-key", "-s", q.RexSession, "-b", block, "enter")
+		rexRun("", "send", "-s", q.RexSession, "-b", block, "/exit")
+		rexRun("", "send-key", "-s", q.RexSession, "-b", block, "enter")
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
 			if live, err := l.Liveness(q.Session); err == nil && (!live.Live || live.Settling) {
@@ -166,9 +175,26 @@ func waitExit(pid int) error {
 	return nil
 }
 
-// agentBlock finds the pane running claude or codex in a Rex session.
-func agentBlock(session string) (block, state string, err error) {
-	out, err := run("", nil, "rex", "block", "ls", "-s", session, "--json")
+// rexApp is the name Rex's program status gives an agent.
+func rexApp(agent string) string {
+	if agent == agentClaude {
+		return "claude-code"
+	}
+	return agent
+}
+
+// agentPID is the process that has a session loaded. Claude's registry
+// names it; for Codex it's whichever process holds the thread lock.
+func agentPID(l *Local, s Session, live Liveness) int {
+	if s.Agent == agentCodex {
+		return lockHolder(filepath.Join(l.Home, ".codex", "thread-writer-locks", s.ID+".lock"))
+	}
+	return live.PID
+}
+
+// agentBlock finds the pane running app in a Rex session.
+func agentBlock(session, app string) (block, state string, err error) {
+	out, err := rexRun("", "block", "ls", "-s", session, "--json")
 	if err != nil {
 		return "", "", err
 	}
@@ -181,22 +207,16 @@ func agentBlock(session string) (block, state string, err error) {
 		return "", "", err
 	}
 	for _, b := range ls.Blocks {
-		if app, state := programStatus(session, b.BlockID); app != "" {
+		if got, state := programStatus(session, b.BlockID); got == app {
 			return b.BlockID, state, nil
 		}
 	}
-	return "", "", fmt.Errorf("no agent pane found in rex session %s", session)
-}
-
-// blockState is the agent's state in one pane ("working", "idle"), or "".
-func blockState(session, block string) string {
-	_, state := programStatus(session, block)
-	return state
+	return "", "", fmt.Errorf("no %s pane found in rex session %s", app, session)
 }
 
 // programStatus returns the agent app a pane reports and its state, or "".
 func programStatus(session, block string) (app, state string) {
-	ps, err := run("", nil, "rex", "block", "call", "-s", session, "-b", block, "program_status")
+	ps, err := rexRun("", "block", "call", "-s", session, "-b", block, "program_status")
 	if err != nil {
 		return "", ""
 	}
@@ -222,7 +242,7 @@ func rexSessionNamed(name string) string {
 	if name == "" {
 		return ""
 	}
-	out, err := run("", nil, "rex", "ls", "--json")
+	out, err := rexRun("", "ls", "--json")
 	if err != nil {
 		return ""
 	}

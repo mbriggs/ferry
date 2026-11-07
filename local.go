@@ -84,6 +84,10 @@ func run(dir string, env []string, name string, args ...string) (string, error) 
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
+	return output(cmd, name, args)
+}
+
+func output(cmd *exec.Cmd, name string, args []string) (string, error) {
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb

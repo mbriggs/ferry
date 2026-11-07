@@ -63,7 +63,7 @@ func (l *Local) Agents() ([]AgentInfo, error) {
 	locks, _ := filepath.Glob(filepath.Join(l.Home, ".codex", "thread-writer-locks", "*.lock"))
 	for _, f := range locks {
 		if held, err := flockHeld(f); err == nil && held {
-			add(agentCodex, strings.TrimSuffix(filepath.Base(f), ".lock"), 0)
+			add(agentCodex, strings.TrimSuffix(filepath.Base(f), ".lock"), lockHolder(f))
 		}
 	}
 	return out, nil
@@ -97,9 +97,24 @@ func rexOfPID(pid int) (session, block string) {
 	return session, block
 }
 
+// lockHolder returns a process that has path open, or 0. Codex holds its
+// thread lock open for as long as the thread is loaded, so this finds the
+// Codex process (TUI or app-server daemon) behind a lock. It reads /proc, so
+// it only works on Linux, and only sees this user's processes.
+func lockHolder(path string) int {
+	fds, _ := filepath.Glob("/proc/[0-9]*/fd/*")
+	for _, fd := range fds {
+		if target, err := os.Readlink(fd); err == nil && target == path {
+			pid, _ := strconv.Atoi(strings.Split(fd, "/")[2])
+			return pid
+		}
+	}
+	return 0
+}
+
 // rexLabel returns a Rex session's label, or "".
 func rexLabel(id string) string {
-	out, err := run("", nil, "rex", "ls", "--json")
+	out, err := rexRun("", "ls", "--json")
 	if err != nil {
 		return ""
 	}

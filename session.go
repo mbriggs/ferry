@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -38,6 +39,10 @@ type FindSessionReq struct {
 	Agent  string `json:"agent"`
 	ID     string `json:"id"`
 	CwdRel string `json:"cwd_rel"`
+	// KnownAgent and KnownID name a session to consider alongside the
+	// newest one for CwdRel; the more recently written of the two is found.
+	KnownAgent string `json:"known_agent,omitempty"`
+	KnownID    string `json:"known_id,omitempty"`
 }
 
 var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
@@ -96,6 +101,15 @@ func (l *Local) FindSession(q FindSessionReq) (*Session, error) {
 			return nil, err
 		} else if s != nil {
 			found = append(found, *s)
+		}
+	}
+	if q.ID == "" && q.KnownID != "" && (q.Agent == "" || q.Agent == q.KnownAgent) {
+		known, err := l.FindSession(FindSessionReq{Agent: q.KnownAgent, ID: q.KnownID})
+		if err != nil {
+			return nil, err
+		}
+		if known != nil && !slices.ContainsFunc(found, func(s Session) bool { return s.ID == known.ID }) {
+			found = append(found, *known)
 		}
 	}
 	if len(found) == 0 {
@@ -488,6 +502,13 @@ func (l *Local) PlaceSession(q PlaceReq) error {
 	ready, err := l.readyDir(q.Task)
 	if err != nil || !isDir(ready) {
 		return err
+	}
+	// This machine may have its own copy from an earlier trip, and someone
+	// may have resumed it since the handoff began.
+	if live, err := l.Liveness(q.Session); err != nil {
+		return err
+	} else if live.Live && !live.Settling {
+		return fmt.Errorf("%s has session %s loaded here; exit it, then run this again", live.Detail, q.Session.ID)
 	}
 	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
 	replaced := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))

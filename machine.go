@@ -28,7 +28,7 @@ type Machine interface {
 	FinishRepo(FinishRepoReq) error
 	Snapshot(SnapshotReq) (SnapshotResult, error)
 	Apply(ApplyReq) (string, error)
-	ListExtras(wtRel string) ([]FileEntry, error)
+	ListExtras(wtRel string) (ExtrasList, error)
 	Export(req ExportReq, w io.Writer) error
 	Import(req ImportReq, r io.Reader) error
 	StageSession(InstallReq) (Session, error)
@@ -187,8 +187,8 @@ func (r *Remote) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	return rpc[SnapshotResult](r, "snapshot", q)
 }
 func (r *Remote) Apply(q ApplyReq) (string, error) { return rpc[string](r, "apply", q) }
-func (r *Remote) ListExtras(rel string) ([]FileEntry, error) {
-	return rpc[[]FileEntry](r, "list-extras", rel)
+func (r *Remote) ListExtras(rel string) (ExtrasList, error) {
+	return rpc[ExtrasList](r, "list-extras", rel)
 }
 func (r *Remote) Export(q ExportReq, w io.Writer) error { return r.call("export", q, nil, nil, w) }
 func (r *Remote) Import(q ImportReq, rd io.Reader) error {

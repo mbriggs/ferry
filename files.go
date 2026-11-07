@@ -39,11 +39,29 @@ func fileSHA(path string) (string, error) {
 // defaultInclude is used when a worktree has no .ferry/include.
 var defaultInclude = []string{".env*"}
 
+// alwaysInclude travels whatever .ferry/include says. .claude/ is the
+// agent's own project folder (skills, commands, local settings), often
+// ignored globally; the agent isn't the same agent without it. Claude keeps
+// git worktrees of its own under .claude/worktrees, and those don't move.
+var alwaysInclude = []string{stateDirRel + "/", ".claude/"}
+
+func neverExtra(rel string) bool {
+	return within(filepath.ToSlash(rel), ".claude/worktrees")
+}
+
+// ExtrasList is what ListExtras found: the files to send, and the ignored
+// paths left behind, so a miss shows up in the output instead of silently.
+type ExtrasList struct {
+	Files      []FileEntry `json:"files"`
+	LeftBehind []string    `json:"left_behind,omitempty"`
+}
+
 // ListExtras returns the ignored files in a worktree that should travel with
-// it: those matching .ferry/include (by base name or path), plus everything
-// under .ferry/state. Tracked and untracked files already ride in the git
-// snapshot, so only ignored files are considered.
-func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
+// it: those matching .ferry/include (by base name or path, and a pattern
+// ending in / takes a whole directory), plus everything under .ferry/state
+// and .claude. Tracked and untracked files already ride in the git snapshot,
+// so only ignored files are considered.
+func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 	root := l.abs(wtRel)
 	patterns := defaultInclude
 	if data, err := os.ReadFile(filepath.Join(root, ".ferry", "include")); err == nil {
@@ -54,16 +72,17 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 			}
 		}
 	}
+	patterns = append(patterns, alwaysInclude...)
 	out, err := git(root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory")
 	if err != nil {
-		return nil, err
+		return ExtrasList{}, err
 	}
 	hashes := l.hashCache()
 	defer hashes.save()
 	seen := map[string]bool{}
 	var entries []FileEntry
 	add := func(rel string) {
-		if seen[rel] {
+		if seen[rel] || neverExtra(rel) {
 			return
 		}
 		p := filepath.Join(root, rel)
@@ -74,23 +93,26 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 			}
 		}
 	}
+	var left []string
 	for _, rel := range strings.Split(out, "\x00") {
 		if rel == "" {
 			continue
 		}
+		before := len(entries)
 		if strings.HasSuffix(rel, "/") {
 			// git collapsed an ignored directory; look inside it for files
 			// the include patterns ask for, skipping dependency and build trees.
 			walkIgnored(filepath.Join(root, strings.TrimSuffix(rel, "/")), func(p string) {
 				r, _ := filepath.Rel(root, p)
-				if strings.HasPrefix(r, stateDirRel+string(filepath.Separator)) || matchAny(patterns, r) {
+				if matchAny(patterns, r) {
 					add(r)
 				}
 			})
-			continue
-		}
-		if strings.HasPrefix(rel, stateDirRel+"/") || matchAny(patterns, rel) {
+		} else if matchAny(patterns, rel) {
 			add(rel)
+		}
+		if len(entries) == before && !heavyDirs[filepath.Base(strings.TrimSuffix(rel, "/"))] && !neverExtra(strings.TrimSuffix(rel, "/")) {
+			left = append(left, rel)
 		}
 	}
 	// .ferry/state may be untracked but not ignored; it's excluded from the
@@ -99,11 +121,21 @@ func (l *Local) ListExtras(wtRel string) ([]FileEntry, error) {
 		r, _ := filepath.Rel(root, p)
 		add(r)
 	})
-	return entries, nil
+	return ExtrasList{Files: entries, LeftBehind: left}, nil
 }
 
+// matchAny reports whether rel matches a pattern: a glob against the base
+// name or the whole path, or, for a pattern ending in /, anything under that
+// directory.
 func matchAny(patterns []string, rel string) bool {
+	rel = filepath.ToSlash(rel)
 	for _, p := range patterns {
+		if dir, ok := strings.CutSuffix(p, "/"); ok {
+			if within(rel, dir) {
+				return true
+			}
+			continue
+		}
 		if ok, _ := filepath.Match(p, filepath.Base(rel)); ok {
 			return true
 		}
@@ -128,7 +160,7 @@ func walkIgnored(dir string, fn func(string)) {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && p != dir && heavyDirs[d.Name()] {
+		if d.IsDir() && p != dir && (heavyDirs[d.Name()] || (d.Name() == "worktrees" && filepath.Base(filepath.Dir(p)) == ".claude")) {
 			return filepath.SkipDir
 		}
 		if d.Type().IsRegular() {

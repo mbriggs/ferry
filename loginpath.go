@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,19 @@ func lookTool(name string) (string, error) {
 	return exec.LookPath(name)
 }
 
+// rexRun runs rex with the same PATH that found it, so `ferry remote`
+// launches and stops agents through the rex that Info reported.
+func rexRun(dir string, args ...string) (string, error) {
+	path, err := lookTool("rex")
+	if err != nil {
+		return "", fmt.Errorf("rex: %v", err)
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Dir = dir
+	cmd.Env = toolEnv()
+	return output(cmd, "rex", args)
+}
+
 // askLoginShell returns the PATH a login shell sets up, or "" if the shell
 // fails or hangs. Markers fence the value off from anything the profile prints.
 func askLoginShell() string {
@@ -72,6 +86,8 @@ func askLoginShell() string {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, shell, "-lc", `printf '\n@@ferry-path@@%s@@\n' "$PATH"`)
 	cmd.Stdin = nil
+	// A profile can leave a background child holding stdout; don't wait for it.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
