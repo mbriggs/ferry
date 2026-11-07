@@ -43,6 +43,7 @@ Use a scratch repo:
 
 - `make test` runs a round trip between two fake homes. The remote side runs as a real `ferry remote` subprocess.
 - `test/e2e-local.sh` runs a real Claude session on kant through Rex, with a fake laptop home. Run `test/e2e-local.sh clean` afterwards.
+- `test/worktree.sh` tests `bin/worktree`, which gives each linked git worktree its own lane of test-script names. See `.claude/skills/worktree/SKILL.md`.
 - `test/liveness.sh` rechecks the agent internals ferry depends on. Run it after upgrading Claude Code or Codex.
 
 ## CI and releases

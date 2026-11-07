@@ -10,6 +10,7 @@ build:
 	$(GOBUILD) -o ferry .
 
 install: build
+	bin/worktree guard --confirm "make install"
 	mkdir -p $(BIN)
 	install -m 0755 ferry $(BIN)/ferry
 

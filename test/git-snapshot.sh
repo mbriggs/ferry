@@ -9,8 +9,9 @@
 #
 # usage: test/git-snapshot.sh
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
-root=/tmp/ferry-git
+root=/tmp/ferry-git$FERRY_LANE_SUFFIX
 rm -rf "$root"
 trap 'rm -rf "$root"' EXIT
 mkdir -p "$root"

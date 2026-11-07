@@ -9,6 +9,7 @@
 #
 # usage: test/codex-resume.sh SESSION_ID
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
 id=${1:?usage: codex-resume.sh SESSION_ID}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,12 +20,13 @@ src=$(find "$HOME/.codex/sessions" -name "rollout-*-$id.jsonl" -print -quit)
 rel=${src#"$HOME/.codex/"}
 
 old_cwd=$(jq -rn 'first(inputs | select(.type == "session_meta") | .payload.cwd)' "$src")
-fake_home=/tmp/ferry-test/fakehome
+scratch=/tmp/ferry-test$FERRY_LANE_SUFFIX
+fake_home=$scratch/fakehome
 new_cwd="$fake_home${old_cwd#"$HOME"}"
-codex_home=/tmp/ferry-test/codex-home
+codex_home=$scratch/codex-home
 dst="$codex_home/$rel"
 
-cleanup() { rm -rf /tmp/ferry-test; }
+cleanup() { rm -rf "$scratch"; }
 trap cleanup EXIT
 cleanup
 

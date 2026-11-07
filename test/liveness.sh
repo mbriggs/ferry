@@ -14,12 +14,13 @@
 # Uses scratch repos under /tmp/ferry-live and accepts their trust prompts.
 # usage: test/liveness.sh
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
-root=/tmp/ferry-live
+root=/tmp/ferry-live$FERRY_LANE_SUFFIX
 mkdir -p "$root/claude" "$root/codex"
 for d in "$root/claude" "$root/codex"; do [[ -d "$d/.git" ]] || git -C "$d" init -q; done
 
-S=$(rex new ferry-liveness-test -c "$root" --window scratch --json | jq -r .session_id)
+S=$(rex new "ferry-liveness-test$FERRY_LANE_SUFFIX" -c "$root" --window scratch --json | jq -r .session_id)
 cleanup() { rex kill "$S" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 

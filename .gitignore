@@ -1,2 +1,5 @@
 /ferry
 /dist/
+/worktree.env
+/.claude/worktrees/
+/tmp/

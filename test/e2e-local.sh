@@ -5,26 +5,28 @@
 #
 # It writes a throwaway ~/src/ferry-e2e-probe, answers that folder's trust
 # prompt (leaving a trust entry in ~/.claude.json), and starts a Rex session
-# named ferry-e2e-probe. Run `test/e2e-local.sh clean` to remove them.
+# named ferry-e2e-probe (each name ends in -lane-<n> in a lane). Run `test/e2e-local.sh clean` to remove them.
 #
 # usage: test/e2e-local.sh [clean]
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 ferry="$here/ferry"
-root=/tmp/ferry-test-e2e
+root=/tmp/ferry-test-e2e$FERRY_LANE_SUFFIX
+probe=ferry-e2e-probe$FERRY_LANE_SUFFIX
 lh=$root/laptop
-wt=$lh/src/ferry-e2e-probe
-task=src-ferry-e2e-probe  # record files are $task-<hash>.json
+wt=$lh/src/$probe
+task=src-$probe  # record files are $task-<hash>.json
 record() { ls "$HOME"/.local/state/ferry/tasks/$task-*.json 2>/dev/null | head -1; }
 
 clean() {
   local rs
   rs=$(jq -r '.rex_session // empty' "$(record)" 2>/dev/null || true)
-  rex ls 2>/dev/null | awk '$1 == "ferry-e2e-probe" {print $2}' | while read -r s; do rex kill "$s" >/dev/null 2>&1 || true; done
+  rex ls 2>/dev/null | awk -v l="$probe" '$1 == l {print $2}' | while read -r s; do rex kill "$s" >/dev/null 2>&1 || true; done
   [[ -n "$rs" ]] && rex kill "$rs" >/dev/null 2>&1 || true
-  rm -rf "$root" "$HOME/src/ferry-e2e-probe" "$HOME"/.local/state/ferry/tasks/$task-*.json
-  rm -rf "$HOME/.local/state/ferry/parked/$task"-* "$HOME/.claude/projects/-home-${USER}-src-ferry-e2e-probe"
+  rm -rf "$root" "$HOME/src/$probe" "$HOME"/.local/state/ferry/tasks/$task-*.json
+  rm -rf "$HOME/.local/state/ferry/parked/$task"-* "$HOME/.claude/projects/-home-${USER}-src-$probe"
 }
 
 if [[ "${1:-}" == clean ]]; then clean; echo cleaned; exit 0; fi
@@ -63,11 +65,11 @@ rex send -s "$rs" -b "$block" 'What was the codeword? Then create a file kant-wa
 rex send-key -s "$rs" -b "$block" enter
 timeout 10 sh -c "until [ \"\$(jq -r .status $(reg))\" = busy ]; do sleep 0.5; done" || true
 timeout 180 sh -c "until [ \"\$(jq -r .status $(reg))\" = idle ]; do sleep 1; done"
-got=$(cat "$HOME/src/ferry-e2e-probe/kant-was-here.txt")
+got=$(cat "$HOME/src/$probe/kant-was-here.txt")
 echo "kant-was-here.txt: $got"
 
 echo "== ferry from kant"
-(cd /tmp && HOME=$lh "$ferry" from kant ferry-e2e-probe --yes)
+(cd /tmp && HOME=$lh "$ferry" from kant "$probe" --yes)
 
 fail=0
 [[ "$got" == *HERON* ]] || { echo "FAIL: resumed agent didn't recall the codeword"; fail=1; }

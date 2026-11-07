@@ -1,0 +1,258 @@
+#!/bin/sh
+# Lanes: each linked git worktree of ferry gets an index n (0-99) and its own
+# names for everything the shell test scripts would otherwise share with the
+# primary checkout and other lanes. Every name ends in FERRY_LANE_SUFFIX
+# (-lane-<n>), so teardown finds a lane's leftovers after its directory is gone.
+# The primary checkout keeps the unsuffixed names.
+#
+#   bin/worktree setup                       provision this worktree's lane
+#   bin/worktree info                        this checkout's lane and the names it uses
+#   bin/worktree teardown --stale            drop the lanes whose directory is gone (hooks)
+#   bin/worktree teardown NAME [--discard]   from the primary: remove a worktree, its branch, and its lane
+#   bin/worktree land NAME                   from the primary: rebase the lane onto main, fast-forward main to it
+#   bin/worktree guard --deny|--confirm|--warn ACTION
+#
+# WORKTREE_LANE_RANGE=LO-HI narrows allocation (the script's own tests use it).
+# It can't widen the range past 0-99.
+set -eu
+
+die() { echo "bin/worktree: $*" >&2; exit 1; }
+MAX=99
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git checkout"
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+primary=$(dirname "$common")
+reg=$primary/tmp/worktrees
+is_lane() { [ -f "$top/.git" ]; }
+
+# lane_dirs N: every path a lane's test scripts create, one per line.
+lane_dirs() {
+  s=-lane-$1
+  printf '%s\n' "/tmp/ferry-test$s" "/tmp/ferry-test-e2e$s" "/tmp/ferry-git$s" "/tmp/ferry-live$s" \
+    "$HOME/src/ferry-e2e-probe$s"
+  # Records, parked state, and transcripts the e2e and claude-resume scripts leave in the real home.
+  for f in "$HOME"/.local/state/ferry/tasks/src-ferry-e2e-probe"$s"-*.json \
+           "$HOME"/.local/state/ferry/parked/src-ferry-e2e-probe"$s"-* \
+           "$HOME"/.claude/projects/*-src-ferry-e2e-probe"$s" \
+           "$HOME"/.claude/projects/-tmp-ferry-test"$s"-* \
+           "$HOME"/.claude/projects/-private-tmp-ferry-test"$s"-* \
+           "$HOME"/.claude/projects/-tmp-ferry-test-e2e"$s"-* \
+           "$HOME"/.claude/projects/-private-tmp-ferry-test-e2e"$s"-*; do
+    [ -e "$f" ] && printf '%s\n' "$f"
+  done
+  return 0
+}
+# lane_sessions N: labels of the Rex sessions a lane's scripts start.
+lane_sessions() { printf '%s\n' "ferry-e2e-probe-lane-$1" "ferry-liveness-test-lane-$1"; }
+rex_ids() { # rex_ids LABEL: ids of running Rex sessions with that label
+  command -v rex >/dev/null 2>&1 || return 0
+  rex ls 2>/dev/null | awk -v l="$1" '$1 == l {print $2}'
+}
+in_use() { # in_use N: true if anything named for lane N exists
+  [ -n "$(lane_dirs "$1" | while read -r d; do [ -e "$d" ] && echo x; done)" ] && return 0
+  for l in $(lane_sessions "$1"); do [ -n "$(rex_ids "$l")" ] && return 0; done
+  return 1
+}
+
+# --- the registry: tmp/worktrees/<n> in the primary holds the worktree's path
+
+lock() {
+  mkdir -p "$reg"
+  i=0
+  until mkdir "$reg/.lock" 2>/dev/null; do
+    pid=$(cat "$reg/.lock/pid" 2>/dev/null || true)
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then rm -rf "$reg/.lock"; continue; fi
+    i=$((i + 1)); [ $i -lt 300 ] || die "timed out waiting for $reg/.lock"
+    sleep 0.1
+  done
+  echo $$ > "$reg/.lock/pid"
+  trap 'rm -rf "$reg/.lock"' EXIT
+  trap 'exit 1' INT TERM HUP
+}
+unlock() { rm -rf "$reg/.lock"; trap - EXIT INT TERM HUP; }
+
+valid_index() { case $1 in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -le $MAX ]; }
+entries() { # entries: registered lane indexes
+  for f in "$reg"/*; do
+    [ -f "$f" ] || continue
+    n=${f##*/}
+    if valid_index "$n"; then echo "$n"; else echo "bin/worktree: ignoring $f, not a lane index 0-$MAX" >&2; fi
+  done
+}
+lane_of() { # lane_of PATH: the index registered for PATH, if any
+  for n in $(entries); do [ "$(cat "$reg/$n")" = "$1" ] && { echo "$n"; return 0; }; done
+  return 1
+}
+
+# drop_lane N: stop the lane's Rex sessions, delete what it created, then its registry entry.
+drop_lane() {
+  for l in $(lane_sessions "$1"); do
+    for id in $(rex_ids "$l"); do rex kill "$id" >/dev/null 2>&1 || true; done
+  done
+  lane_dirs "$1" | while read -r d; do rm -rf "$d"; done
+  rm -f "$reg/$1"
+  echo "dropped lane $1"
+}
+
+sweep() { # under the lock: drop lanes whose directory is gone
+  for n in $(entries); do
+    p=$(cat "$reg/$n")
+    [ -d "$p" ] && continue
+    echo "lane $n: $p is gone"
+    drop_lane "$n"
+  done
+  git -C "$primary" worktree prune
+}
+
+range() {
+  lo=0 hi=$MAX
+  if [ -n "${WORKTREE_LANE_RANGE:-}" ]; then
+    l=${WORKTREE_LANE_RANGE%-*} h=${WORKTREE_LANE_RANGE#*-}
+    valid_index "$l" && valid_index "$h" || die "WORKTREE_LANE_RANGE must be LO-HI within 0-$MAX"
+    [ "$l" -gt $lo ] && lo=$l
+    [ "$h" -lt $hi ] && hi=$h
+  fi
+  echo "$lo $hi"
+}
+
+allocate() {
+  r=$(range) || exit 1
+  set -- $r
+  n=$1
+  while [ "$n" -le "$2" ]; do
+    if [ ! -e "$reg/$n" ] && ! in_use "$n"; then echo "$n"; return 0; fi
+    n=$((n + 1))
+  done
+  die "no free lane in $1-$2"
+}
+
+# --- commands
+
+cmd_setup() {
+  is_lane || die "setup runs in a linked worktree; this is the primary checkout"
+  lock
+  sweep
+  n=$(lane_of "$top") || { n=$(allocate); printf '%s\n' "$top" > "$reg/$n"; }
+  unlock
+
+  # Build the lane's own binary; scripts in test/ run ./ferry.
+  command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
+  (cd "$top" && make -s build) || die "make build failed in $top"
+
+  mkdir -p "$top/tmp"
+  tmpf=$top/worktree.env.tmp.$$
+  {
+    echo "# Written by bin/worktree setup. Loaded by .claude/hooks/worktree-env.sh and test/lib/lane.sh."
+    echo "WORKTREE_LANE=$n"
+    echo "FERRY_LANE_SUFFIX=-lane-$n"
+    printf "WORKTREE_PRIMARY='%s'\n" "$(printf '%s' "$primary" | sed "s/'/'\\\\''/g")"
+  } > "$tmpf"
+  mv "$tmpf" "$top/worktree.env"
+  rm -f "$top/tmp/worktree-setup.failed"
+  echo "lane $n ready in $top"
+}
+
+cmd_info() {
+  if is_lane; then
+    [ -f "$top/worktree.env" ] || die "this worktree has no lane yet; run bin/worktree setup"
+    n=$(sed -n 's/^WORKTREE_LANE=//p' "$top/worktree.env")
+    echo "checkout          $top (lane $n)"
+    echo "primary           $primary"
+    echo "WORKTREE_LANE     $n"
+    echo "FERRY_LANE_SUFFIX -lane-$n"
+  else
+    n="" ; echo "checkout          $top (primary)"
+    echo "FERRY_LANE_SUFFIX (empty)"
+  fi
+  s=${n:+-lane-$n}
+  echo "binary            $top/ferry (make build); make install asks first in a lane"
+  echo "test scratch      /tmp/ferry-test$s, /tmp/ferry-test-e2e$s, /tmp/ferry-git$s, /tmp/ferry-live$s"
+  echo "e2e probe         ~/src/ferry-e2e-probe$s, Rex session ferry-e2e-probe$s"
+  echo "liveness          Rex session ferry-liveness-test$s"
+}
+
+resolve() { # resolve NAME: a worktree path from a name under .claude/worktrees or a path
+  case $1 in
+    */*) (cd "$1" 2>/dev/null && pwd -P) || die "no worktree at $1" ;;
+    *) [ -d "$primary/.claude/worktrees/$1" ] || die "no worktree $primary/.claude/worktrees/$1"
+       (cd "$primary/.claude/worktrees/$1" && pwd -P) ;;
+  esac
+}
+in_primary_on_main() {
+  [ "$top" = "$primary" ] || die "$1 runs in the primary checkout ($primary)"
+  [ "$(git symbolic-ref --short HEAD 2>/dev/null)" = main ] || die "$1 needs the primary on main"
+}
+dirty() { [ -n "$(git -C "$1" status --porcelain)" ]; }
+registered_path() { # the path as the registry and git record it
+  for p in "$1" "$(git -C "$1" rev-parse --show-toplevel)"; do
+    lane_of "$p" >/dev/null && { echo "$p"; return 0; }
+  done
+  git -C "$1" rev-parse --show-toplevel
+}
+
+cmd_teardown() {
+  if [ "${1:-}" = --stale ]; then lock; sweep; unlock; return 0; fi
+  name=${1:?usage: bin/worktree teardown NAME [--discard] | --stale}
+  discard=${2:-}
+  [ -z "$discard" ] || [ "$discard" = --discard ] || die "unknown flag $discard"
+  in_primary_on_main teardown
+  wt=$(resolve "$name")
+  [ "$wt" != "$primary" ] || die "won't tear down the primary checkout"
+  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
+  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
+  if [ -z "$discard" ]; then
+    dirty "$wt" && die "$wt has uncommitted changes; commit them, or pass --discard once the user agrees to lose them"
+    git merge-base --is-ancestor "$(git -C "$wt" rev-parse HEAD)" main \
+      || die "$wt's HEAD isn't on main; land it first (bin/worktree land $name), or pass --discard once the user agrees"
+  fi
+  path=$(registered_path "$wt")
+  if [ -n "$discard" ]; then git worktree remove --force "$wt"; else git worktree remove "$wt"; fi
+  if [ -n "$branch" ]; then
+    if [ -n "$discard" ]; then git branch -D "$branch"; else git branch -d "$branch"; fi
+  fi
+  lock
+  if n=$(lane_of "$path"); then drop_lane "$n"; else echo "no lane was registered for $wt"; fi
+  unlock
+}
+
+cmd_land() {
+  name=${1:?usage: bin/worktree land NAME}
+  in_primary_on_main land
+  wt=$(resolve "$name")
+  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
+  dirty "$primary" && die "the primary checkout has uncommitted changes; commit or stash them first"
+  dirty "$wt" && die "$wt has uncommitted changes; commit them first"
+  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
+  git -C "$wt" rebase main || die "rebase of $branch onto main stopped; resolve it in $wt, then land again"
+  git merge --ff-only "$branch"
+  echo "main is at $(git rev-parse --short HEAD) with $branch. Pushing main publishes a release; push when ready."
+}
+
+cmd_guard() {
+  mode=${1:-} action=${2:?usage: bin/worktree guard --deny|--confirm|--warn ACTION}
+  is_lane || return 0
+  case $mode in
+    --deny) echo "$action refuses to run in a lane ($top). Run it from the primary checkout, $primary." >&2; exit 3 ;;
+    --warn) echo "warning: running $action from a lane ($top), not the primary checkout." >&2 ;;
+    --confirm)
+      branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)
+      if ! { : </dev/tty; } 2>/dev/null; then
+        echo "$action refuses to run in a lane ($top) without a terminal to confirm on. Run it from $primary." >&2; exit 3
+      fi
+      printf '%s runs from lane %s (branch %s), not the primary.\nType the branch name to go ahead: ' "$action" "$top" "$branch" >/dev/tty
+      read -r answer </dev/tty || answer=
+      [ "$answer" = "$branch" ] || { echo "$action: not confirmed" >&2; exit 3; } ;;
+    *) die "usage: bin/worktree guard --deny|--confirm|--warn ACTION" ;;
+  esac
+}
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  setup) cmd_setup ;;
+  info) cmd_info ;;
+  teardown) cmd_teardown "$@" ;;
+  land) cmd_land "$@" ;;
+  guard) cmd_guard "$@" ;;
+  *) sed -n '/^#   bin/s/^#   //p' "$0" >&2; exit 2 ;;
+esac

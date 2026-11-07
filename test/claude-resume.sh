@@ -12,6 +12,7 @@
 #
 # usage: test/claude-resume.sh SESSION_ID
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
 id=${1:?usage: claude-resume.sh SESSION_ID}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,7 +23,8 @@ src=$(find "$HOME/.claude/projects" -maxdepth 2 -name "$id.jsonl" -not -path '*-
 src_dir=$(dirname "$src")
 
 old_cwd=$(jq -rn 'first(inputs | select(.cwd != null) | .cwd)' "$src")
-fake_home=/tmp/ferry-test/fakehome
+scratch=/tmp/ferry-test$FERRY_LANE_SUFFIX
+fake_home=$scratch/fakehome
 new_cwd="$fake_home${old_cwd#"$HOME"}"
 slug=$(printf '%s' "$new_cwd" | sed 's#[^A-Za-z0-9]#-#g')
 dst_dir="$HOME/.claude/projects/$slug"
@@ -30,7 +32,7 @@ dst="$dst_dir/$id.jsonl"
 
 case "$slug" in -tmp-ferry-test-*) ;; *) echo "refusing slug $slug" >&2; exit 1 ;; esac
 
-cleanup() { rm -rf "$dst_dir" /tmp/ferry-test; }
+cleanup() { rm -rf "$dst_dir" "$scratch"; }
 trap cleanup EXIT
 cleanup
 

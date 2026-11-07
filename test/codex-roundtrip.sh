@@ -9,6 +9,7 @@
 #
 # usage: test/codex-roundtrip.sh SESSION_ID
 set -euo pipefail
+source "$(dirname "$0")/lib/lane.sh"
 
 id=${1:?usage: codex-roundtrip.sh SESSION_ID}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +21,7 @@ rel=${src#"$HOME/.codex/"}
 old_cwd=$(jq -rn 'first(inputs | select(.type == "session_meta") | .payload.cwd)' "$src")
 model=$(jq -rn 'first(inputs | select(.type == "turn_context") | .payload.model)' "$src")
 
-root=/tmp/ferry-test
+root=/tmp/ferry-test$FERRY_LANE_SUFFIX
 cleanup() { rm -rf "$root"; }
 trap cleanup EXIT
 cleanup
