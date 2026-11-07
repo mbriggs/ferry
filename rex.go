@@ -22,6 +22,10 @@ type LaunchReq struct {
 // otherwise leave an unattended agent waiting. Claude's prompt defaults to
 // "No, exit", so it needs Down before Enter; Codex defaults to trusting.
 func (l *Local) Launch(q LaunchReq) (string, error) {
+	cwd := l.abs(q.CwdRel)
+	if q.AcceptTrust && ((q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))) {
+		q.AcceptTrust = false // already trusted here; there's no prompt to answer
+	}
 	args := append([]string{"new", q.Name, "-c", l.abs(q.CwdRel), "--window", q.Agent, "--json", "--"}, q.Argv...)
 	out, err := run(l.Home, nil, "rex", args...)
 	if err != nil {
@@ -42,6 +46,9 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 	return created.SessionID, nil
 }
 
+// answerTrust answers the folder-trust dialog if it appears before the agent
+// is ready. It matches the dialog's own option text, so a conversation that
+// merely mentions trusting a folder never receives keystrokes.
 func answerTrust(session, block, agent string) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -50,11 +57,11 @@ func answerTrust(session, block, agent string) {
 			return
 		}
 		switch {
-		case agent == agentClaude && strings.Contains(screen, "trust this folder"):
+		case agent == agentClaude && strings.Contains(screen, "Yes, I trust this folder") && strings.Contains(screen, "No, exit"):
 			run("", nil, "rex", "send-key", "-s", session, "-b", block, "down")
 			run("", nil, "rex", "send-key", "-s", session, "-b", block, "enter")
 			return
-		case agent == agentCodex && strings.Contains(screen, "Trust this folder"):
+		case agent == agentCodex && strings.Contains(screen, "Trust and continue"):
 			run("", nil, "rex", "send-key", "-s", session, "-b", block, "enter")
 			return
 		case strings.Contains(screen, "Ask Codex") || strings.Contains(screen, "? for shortcuts") || strings.Contains(screen, "auto mode") || strings.Contains(screen, "for agents"):
@@ -67,6 +74,7 @@ func answerTrust(session, block, agent string) {
 type StopReq struct {
 	Session    Session `json:"session"`
 	RexSession string  `json:"rex_session"`
+	Name       string  `json:"name"` // rex session label, if the id was never recorded
 }
 
 // StopAgent asks an idle agent in a Rex session on this machine to exit and
@@ -78,6 +86,9 @@ func (l *Local) StopAgent(q StopReq) error {
 	}
 	if live.Busy {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
+	}
+	if q.RexSession == "" {
+		q.RexSession = rexSessionNamed(q.Name)
 	}
 	if q.RexSession == "" {
 		return fmt.Errorf("%s; exit it first", live.Detail)
@@ -154,4 +165,34 @@ func agentBlock(session string) (block, state string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf("no agent pane found in rex session %s", session)
+}
+
+// rexSessionNamed returns the id of the one rex session with this label, or "".
+func rexSessionNamed(name string) string {
+	if name == "" {
+		return ""
+	}
+	out, err := run("", nil, "rex", "ls", "--json")
+	if err != nil {
+		return ""
+	}
+	var ls struct {
+		Sessions []struct {
+			SessionID string `json:"session_id"`
+			Label     string `json:"label"`
+		} `json:"sessions"`
+	}
+	if json.Unmarshal([]byte(out), &ls) != nil {
+		return ""
+	}
+	id := ""
+	for _, s := range ls.Sessions {
+		if s.Label == name {
+			if id != "" {
+				return "" // ambiguous
+			}
+			id = s.SessionID
+		}
+	}
+	return id
 }

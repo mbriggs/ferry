@@ -42,7 +42,13 @@ type Record struct {
 	// Attempt is the fingerprint this handoff last applied on the receiver,
 	// so a rerun recognizes the receiver's state as its own.
 	Attempt string `json:"attempt,omitempty"`
-	Updated string `json:"updated"`
+	// Source is the session as found on the sending machine when this handoff
+	// claimed the task, and Installed is it as installed on the receiver.
+	// Recovery uses these instead of searching again, because by then the
+	// source copy may be parked and a search would find a different session.
+	Source    *Session `json:"source,omitempty"`
+	Installed *Session `json:"installed,omitempty"`
+	Updated   string   `json:"updated"`
 }
 
 type RecordPutReq struct {

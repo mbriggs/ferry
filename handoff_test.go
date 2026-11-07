@@ -36,6 +36,7 @@ func TestMain(m *testing.M) {
 type world struct {
 	t                  *testing.T
 	root, laptop, kant string
+	path               string // PATH for ferry, when a test fakes rex
 }
 
 const sessionID = "11111111-2222-3333-4444-555555555555"
@@ -85,6 +86,9 @@ func (w *world) ferry(dir string, args ...string) (string, error) {
 	cmd := exec.Command(ferryBin, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "HOME="+w.laptop)
+	if w.path != "" {
+		cmd.Env = append(cmd.Env, "PATH="+w.path)
+	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()

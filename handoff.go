@@ -105,24 +105,25 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return err
 	}
 
+	// A rerun after the commit point only needs to finish the last steps, and
+	// it uses the sessions this handoff recorded rather than searching again.
+	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
+		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
+		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts)
+	}
+
 	// --- session -----------------------------------------------------------
 	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
-	if direction == "from" && rec != nil && opts.SessionID == "" && rec.Session != "" {
+	switch {
+	case opts.SessionID != "":
+	case rec != nil && rec.State == stateHandingOff && rec.From == si.Name && rec.Source != nil:
+		find = FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID}
+	case direction == "from" && rec != nil && rec.Session != "":
 		find = FindSessionReq{Agent: rec.Agent, ID: rec.Session}
 	}
 	sess, err := src.FindSession(find)
 	if err != nil {
 		return err
-	}
-
-	// A rerun after the commit point only needs to finish the last steps.
-	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
-		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
-		var installed *Session
-		if sess != nil || rec.Session != "" {
-			installed, _ = dst.FindSession(FindSessionReq{Agent: rec.Agent, ID: rec.Session})
-		}
-		return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
 	}
 
 	if sess != nil {
@@ -132,11 +133,11 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return err
 		}
 		if live.Live {
-			if src.IsLocal() || rec == nil || rec.RexSession == "" {
+			if src.IsLocal() || rec == nil {
 				return fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
 			}
 			step("agent", "%s: stopping the idle agent in rex", si.Name)
-			if err := src.StopAgent(StopReq{Session: *sess, RexSession: rec.RexSession}); err != nil {
+			if err := src.StopAgent(StopReq{Session: *sess, RexSession: rec.RexSession, Name: t.Name}); err != nil {
 				return err
 			}
 		}
@@ -177,6 +178,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if !resuming {
 		expect := rec.Generation
 		rec.State, rec.From, rec.To, rec.Generation = stateHandingOff, si.Name, di.Name, expect+1
+		rec.Source, rec.Installed = sess, nil
 		if sess != nil {
 			rec.Agent, rec.Session = sess.Agent, sess.ID
 		}
@@ -291,6 +293,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	rec.LastSent[si.Name] = snap.Fingerprint
 	delete(rec.LastSent, di.Name)
 	rec.Attempt = ""
+	rec.Installed = installed
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		return err
@@ -325,6 +328,14 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		cwdRel, _ := filepath.Rel(di.Home, installed.Cwd)
 		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
 			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv))
+			break
+		}
+		// A rerun may find the agent already started by the run it is finishing.
+		if live, err := dst.Liveness(*installed); err != nil {
+			return err
+		} else if live.Live {
+			step("launch", "%s: %s is already running (%s); not starting another", di.Name, short(installed.ID), live.Detail)
+			rexSession = rec.RexSession
 			break
 		}
 		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, AcceptTrust: sess != nil && sess.Trusted})
