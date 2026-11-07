@@ -152,3 +152,65 @@ func taskKey(wtRel string) string {
 	sum := sha256.Sum256([]byte(rel))
 	return strings.Trim(nonAlnum.ReplaceAllString(rel, "-"), "-") + "-" + hex.EncodeToString(sum[:3])
 }
+
+// A task lock keeps two ferry commands from handing off the same task at
+// once. The record's generation check only guards state changes; the steps
+// between them (apply, extras, the session) would otherwise interleave. The
+// lock is a lease: the holder renews it while it works, so one left behind
+// by a killed ferry expires on its own.
+type LockReq struct {
+	Task   string `json:"task"`
+	Token  string `json:"token"`
+	Holder string `json:"holder"`
+	TTL    int    `json:"ttl"` // seconds
+}
+
+type taskLock struct {
+	Token   string    `json:"token"`
+	Holder  string    `json:"holder"`
+	Since   time.Time `json:"since"`
+	Expires time.Time `json:"expires"`
+}
+
+func (l *Local) lockPath(task string) string { return l.stateDir("tasks", task+".lock") }
+
+// Lock takes or renews the task's lease. It fails while someone else holds
+// an unexpired lease.
+func (l *Local) Lock(q LockReq) error {
+	if q.Token == "" || q.TTL <= 0 {
+		return errors.New("lock: missing token or ttl")
+	}
+	return l.withRecordLock(func() error {
+		now := time.Now().UTC()
+		var cur taskLock
+		if data, err := os.ReadFile(l.lockPath(q.Task)); err == nil && json.Unmarshal(data, &cur) == nil {
+			if cur.Token != q.Token && now.Before(cur.Expires) {
+				return fmt.Errorf("another ferry (%s, started %s) is handing off this task; wait for it, or for its lock to expire at %s",
+					cur.Holder, cur.Since.Local().Format("15:04:05"), cur.Expires.Local().Format("15:04:05"))
+			}
+		}
+		next := taskLock{Token: q.Token, Holder: q.Holder, Since: now, Expires: now.Add(time.Duration(q.TTL) * time.Second)}
+		if cur.Token == q.Token {
+			next.Since = cur.Since
+		}
+		data, _ := json.Marshal(next)
+		return writeAtomic(l.lockPath(q.Task), append(data, '\n'), 0o600)
+	})
+}
+
+// Unlock releases the lease if q.Token still holds it.
+func (l *Local) Unlock(q LockReq) error {
+	return l.withRecordLock(func() error {
+		var cur taskLock
+		data, err := os.ReadFile(l.lockPath(q.Task))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if json.Unmarshal(data, &cur) == nil && cur.Token != q.Token {
+			return nil
+		}
+		return os.Remove(l.lockPath(q.Task))
+	})
+}

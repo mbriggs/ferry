@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -100,6 +102,12 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", si.Name)
 	}
 	step("task", "%s  (%s, repo %s)", t.Name, t.WtRel, t.RepoRel)
+
+	release, err := lockTask(hub, t.Key, si.Name)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	rec, err := hub.RecordGet(t.Key)
 	if err != nil {
@@ -319,6 +327,42 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
 
 	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
+}
+
+const lockTTL = 2 * time.Minute
+
+// lockTask takes the task's lease on the hub and renews it in the background
+// until release is called.
+func lockTask(hub Machine, key, here string) (release func(), err error) {
+	tok := make([]byte, 16)
+	if _, err := rand.Read(tok); err != nil {
+		return nil, err
+	}
+	q := LockReq{Task: key, Token: hex.EncodeToString(tok), Holder: fmt.Sprintf("%s pid %d", here, os.Getpid()), TTL: int(lockTTL / time.Second)}
+	if err := hub.Lock(q); err != nil {
+		return nil, err
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(lockTTL / 4)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				if err := hub.Lock(q); err != nil {
+					fmt.Fprintf(os.Stderr, "ferry: renewing the task lock: %v\n", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+		hub.Unlock(q)
+	}, nil
 }
 
 // finish runs the steps after the commit point: park the source copy, run
