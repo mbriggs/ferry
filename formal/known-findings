@@ -1,0 +1,5 @@
+# Known findings in fault mode: invariant, trace hash, shortest trace.
+# formal/check.sh prints these; see .claude/skills/verify-handoff/SKILL.md.
+NoFork 92bd3434680a Initial,Start,Find,Claim,Work,Park,Transfer,Install,UndoDst,UndoSrc
+NoLoss b78f02c6c8c4 Initial,Start,Find,Claim,Work,Park,Transfer,Install,Commit,UndoDst,UndoSrc,Start,FinishArchive
+OwnerCanResume 2a3b5d0c02f6 Initial,Start,Find,Claim,Work,Park,Transfer,Install,Commit,UndoDst,UndoSrc,Start,FinishArchive,FinishRestore,FinishPut

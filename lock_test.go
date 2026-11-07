@@ -42,21 +42,22 @@ func TestSecondHandoffOfTheSameTaskIsRefused(t *testing.T) {
 	if err := first.Wait(); err != nil {
 		t.Fatalf("first handoff failed: %v\n%s", err, out.String())
 	}
-	if exists(filepath.Join(w.kant, ".local/state/ferry/tasks", taskKey("src/app-wt/fix-auth")+".lock")) {
-		t.Fatal("the lock outlived the handoff")
-	}
 }
 
-func TestExpiredLockIsTakenOver(t *testing.T) {
+func TestTaskLockIsExclusiveUntilReleased(t *testing.T) {
 	l := &Local{Home: t.TempDir()}
-	if err := l.Lock(LockReq{Task: "x", Token: "a", Holder: "dead", TTL: 1}); err != nil {
+	release, err := l.lockTask("src-app-abc123")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Lock(LockReq{Task: "x", Token: "b", Holder: "new", TTL: 60}); err == nil {
-		t.Fatal("took a live lock")
+	if _, err := l.lockTask("src-app-abc123"); err == nil {
+		t.Fatal("took a held lock")
 	}
-	time.Sleep(1100 * time.Millisecond)
-	if err := l.Lock(LockReq{Task: "x", Token: "b", Holder: "new", TTL: 60}); err != nil {
-		t.Fatalf("expired lock wasn't taken over: %v", err)
+	release()
+	if _, err := l.lockTask("src-app-abc123"); err != nil {
+		t.Fatalf("lock not released: %v", err)
+	}
+	if _, err := l.lockTask("../escape"); err == nil {
+		t.Fatal("accepted a path as a task key")
 	}
 }

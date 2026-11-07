@@ -113,6 +113,11 @@ func cmdTo(l *Local, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	release, err := l.lockTask(t.Key)
+	if err != nil {
+		return fail(err)
+	}
+	defer release()
 	if err := handoff(l, remote, remote, t, o); err != nil {
 		return fail(err)
 	}
@@ -138,6 +143,11 @@ func cmdFrom(l *Local, args []string) int {
 		return fail(err)
 	}
 	t := task{Key: rec.Task, Name: rec.Name, WtRel: rec.WtRel, RepoRel: rec.RepoRel}
+	release, err := l.lockTask(t.Key)
+	if err != nil {
+		return fail(err)
+	}
+	defer release()
 	if err := handoff(remote, l, remote, t, o); err != nil {
 		return fail(err)
 	}

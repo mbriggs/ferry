@@ -37,8 +37,6 @@ type Machine interface {
 	RecordGet(task string) (*Record, error)
 	RecordPut(RecordPutReq) error
 	RecordList() ([]Record, error)
-	Lock(LockReq) error
-	Unlock(LockReq) error
 	HookInfo(HookReq) (HookInfo, error)
 	Approve(sha string) error
 	RunHook(HookReq) (HookResult, error)
@@ -184,8 +182,6 @@ func (r *Remote) RecordPut(q RecordPutReq) error {
 	return err
 }
 func (r *Remote) RecordList() ([]Record, error)         { return rpc[[]Record](r, "record-list", nil) }
-func (r *Remote) Lock(q LockReq) error                  { _, err := rpc[struct{}](r, "lock", q); return err }
-func (r *Remote) Unlock(q LockReq) error                { _, err := rpc[struct{}](r, "unlock", q); return err }
 func (r *Remote) HookInfo(q HookReq) (HookInfo, error)  { return rpc[HookInfo](r, "hook-info", q) }
 func (r *Remote) Approve(sha string) error              { _, err := rpc[struct{}](r, "approve", sha); return err }
 func (r *Remote) RunHook(q HookReq) (HookResult, error) { return rpc[HookResult](r, "run-hook", q) }
@@ -355,15 +351,6 @@ func dispatch(l *Local, op string, raw []byte) (any, error) {
 		return none, l.RecordPut(q)
 	case "record-list":
 		return l.RecordList()
-	case "lock", "unlock":
-		q, err := decode[LockReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		if op == "lock" {
-			return none, l.Lock(q)
-		}
-		return none, l.Unlock(q)
 	case "hook-info":
 		q, err := decode[HookReq](raw)
 		if err != nil {
