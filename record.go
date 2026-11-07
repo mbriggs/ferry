@@ -39,7 +39,10 @@ type Record struct {
 	Session    string            `json:"session,omitempty"`
 	RexSession string            `json:"rex_session,omitempty"`
 	LastSent   map[string]string `json:"last_sent,omitempty"`
-	Updated    string            `json:"updated"`
+	// Attempt is the fingerprint this handoff last applied on the receiver,
+	// so a rerun recognizes the receiver's state as its own.
+	Attempt string `json:"attempt,omitempty"`
+	Updated string `json:"updated"`
 }
 
 type RecordPutReq struct {

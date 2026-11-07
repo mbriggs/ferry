@@ -202,7 +202,10 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if ds.Exists && len(ds.Roots) > 0 && !sharesRoot(ss.Roots, ds.Roots) {
 		return fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", di.Name, t.RepoRel)
 	}
-	if !ds.Exists || len(ds.Roots) == 0 {
+	// A repo still on the placeholder branch was created by an earlier,
+	// interrupted run; finish creating it the same way.
+	fresh := !ds.Exists || len(ds.Roots) == 0 || ds.Branch == placeholderBranch
+	if fresh {
 		step("repo", "%s has no %s; creating it", di.Name, t.RepoRel)
 		if err := dst.InitRepo(t.RepoRel); err != nil {
 			return err
@@ -226,7 +229,15 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		return err
 	}
 	step("git", "moved refs/ferry/%s/* to %s", t.Key, di.Name)
-	_, err = dst.Apply(ApplyReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: snap.Branch, Task: t.Key, Expected: snap.Fingerprint, LastSent: rec.LastSent[di.Name]})
+	previous := []string{rec.LastSent[di.Name], rec.Attempt}
+	if rec.Attempt != snap.Fingerprint {
+		expect := rec.Generation
+		rec.Attempt, rec.Generation = snap.Fingerprint, expect+1
+		if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+			return err
+		}
+	}
+	_, err = dst.Apply(ApplyReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: snap.Branch, Task: t.Key, Expected: snap.Fingerprint, Previous: previous, Fresh: fresh, Force: opts.Force})
 	if err != nil {
 		return err
 	}
@@ -279,6 +290,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 	rec.LastSent[si.Name] = snap.Fingerprint
 	delete(rec.LastSent, di.Name)
+	rec.Attempt = ""
 	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
 	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
 		return err

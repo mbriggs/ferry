@@ -222,7 +222,7 @@ func TestRoundTrip(t *testing.T) {
 	if exists(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")) {
 		t.Fatal("laptop transcript should be parked")
 	}
-	if r := w.record(task); r.Owner != "kant" || r.State != stateOwned || r.Generation != 3 {
+	if r := w.record(task); r.Owner != "kant" || r.State != stateOwned || r.Attempt != "" {
 		t.Fatalf("record after to: %+v", r)
 	}
 	if !strings.Contains(out, "claude --resume "+sessionID) {
@@ -257,7 +257,7 @@ func TestRoundTrip(t *testing.T) {
 	if exists(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl")) {
 		t.Fatal("kant transcript should be parked")
 	}
-	if r := w.record(task); r.Owner != "laptop" || r.State != stateOwned || r.Generation != 6 {
+	if r := w.record(task); r.Owner != "laptop" || r.State != stateOwned || r.Attempt != "" {
 		t.Fatalf("record after from: %+v", r)
 	}
 
