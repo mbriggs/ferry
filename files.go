@@ -626,11 +626,15 @@ func safeDest(root, rel string) error {
 }
 
 // transfer streams Export from src into Import on dst.
-func transfer(src Machine, ex ExportReq, dst Machine, im ImportReq) error {
+// total, when known, is about how many bytes will move, for the progress
+// line on a terminal.
+func transfer(src Machine, ex ExportReq, dst Machine, im ImportReq, label string, total int64) error {
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
+	w, done := progress(label, total, pw)
 	go func() {
-		err := src.Export(ex, pw)
+		err := src.Export(ex, w)
+		done()
 		pw.CloseWithError(err)
 		errc <- err
 	}()

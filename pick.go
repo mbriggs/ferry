@@ -1,11 +1,7 @@
 package main
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 )
 
@@ -93,30 +89,4 @@ func choosePull(remote Machine, here, there string, name string) (pullable, erro
 func matches(name string, t task) bool {
 	name = strings.TrimSuffix(strings.TrimPrefix(name, "~/"), "/")
 	return name == t.Name || name == t.WtRel || name == t.Key
-}
-
-// pick asks the user to choose one of lines on the terminal.
-func pick(title string, lines []string) (int, error) {
-	defer clock.pause()()
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return 0, errors.New(title + " more than one match, and no terminal to ask on:\n  " + strings.Join(lines, "\n  "))
-	}
-	defer tty.Close()
-	fmt.Fprintln(tty, title)
-	for i, l := range lines {
-		fmt.Fprintf(tty, "  %d  %s\n", i+1, l)
-	}
-	r := bufio.NewReader(tty)
-	for {
-		fmt.Fprintf(tty, "pick 1-%d: ", len(lines))
-		line, err := r.ReadString('\n')
-		n, convErr := strconv.Atoi(strings.TrimSpace(line))
-		if convErr == nil && n >= 1 && n <= len(lines) {
-			return n - 1, nil
-		}
-		if err != nil {
-			return 0, errors.New("nothing picked")
-		}
-	}
 }

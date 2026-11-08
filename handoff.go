@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -29,10 +28,6 @@ type task struct {
 	Name    string
 	WtRel   string
 	RepoRel string
-}
-
-func step(label, format string, a ...any) {
-	fmt.Printf("%-10s %s\n", label, fmt.Sprintf(format, a...))
 }
 
 // taskHere resolves the git worktree containing dir on this machine.
@@ -344,7 +339,11 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			sentExtras = true
 		case opts.Yes || confirm(prompt):
 			if len(paths) > 0 {
-				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths, SHAs: shas, Offsets: plan.Partial}, dst, ImportReq{BaseRel: stage, Private: true}); err != nil {
+				var total int64
+				for _, e := range send {
+					total += e.Size - plan.Partial[filepath.ToSlash(e.Path)]
+				}
+				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths, SHAs: shas, Offsets: plan.Partial}, dst, ImportReq{BaseRel: stage, Private: true}, "sending", total); err != nil {
 					return err
 				}
 			}
@@ -410,7 +409,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 		sess = cur
 		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}); err != nil {
+		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}, "session", sess.Size); err != nil {
 			return err
 		}
 		s, err := dst.StageSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
@@ -725,9 +724,9 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		if everyRun {
 			why = "may run code from the other machine; ferry asks before every run here"
 		}
-		fmt.Printf("%-10s .ferry/%s %s (sha %s):\n%s\n", q.Name, q.Name, why, info.SHA[:12], indent(forTerminal(info.Content)))
+		step(q.Name, ".ferry/%s %s (sha %s):\n%s", q.Name, why, info.SHA[:12], indent(forTerminal(info.Content)))
 		if changes != "" {
-			fmt.Printf("%-10s changed since this machine last sent the task:\n%s\n", "", indent(forTerminal(changes)))
+			step("", "changed since this machine last sent the task:\n%s", indent(forTerminal(changes)))
 		}
 		prompt := fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)
 		if everyRun {
@@ -803,19 +802,6 @@ func versionLess(a, b string) bool {
 		}
 	}
 	return false
-}
-
-func confirm(prompt string) bool {
-	defer clock.pause()()
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return false
-	}
-	defer tty.Close()
-	fmt.Fprintf(tty, "%s [y/N] ", prompt)
-	line, _ := bufio.NewReader(tty).ReadString('\n')
-	line = strings.ToLower(strings.TrimSpace(line))
-	return line == "y" || line == "yes"
 }
 
 func short(id string) string {

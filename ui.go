@@ -1,0 +1,222 @@
+package main
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/term"
+)
+
+// Ferry's output is one step per line: a label column and what happened.
+// On a terminal the labels are colored, long lines wrap under the text
+// column, prompts are huh forms, and big transfers show progress. Piped,
+// in tests, or with FERRY_PLAIN=1, it's plain text and line prompts, so the
+// output stays easy to grep and script.
+
+const labelWidth = 10
+
+var (
+	stdoutTTY = term.IsTerminal(int(os.Stdout.Fd()))
+	plain     = os.Getenv("FERRY_PLAIN") != "" || os.Getenv("NO_COLOR") != "" || !stdoutTTY
+
+	styleLabel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	styleGood  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
+	styleWarn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	styleBad   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+	styleFaint = lipgloss.NewStyle().Faint(true)
+)
+
+// interactive reports whether there's someone at a terminal to run an agent
+// for: stdin and stdout are both a terminal.
+func interactive() bool {
+	return stdoutTTY && term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// step prints one line of a handoff.
+func step(label, format string, a ...any) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	clearProgress()
+	text := fmt.Sprintf(format, a...)
+	if plain {
+		fmt.Printf("%-*s %s\n", labelWidth, label, text)
+		return
+	}
+	fmt.Println(styleFor(label, text).Render(fmt.Sprintf("%-*s", labelWidth, label)) + " " + wrapHanging(text))
+}
+
+func styleFor(label, text string) lipgloss.Style {
+	switch {
+	case strings.HasPrefix(text, "failed") || label == "fix":
+		return styleBad
+	case label == "time":
+		return styleFaint
+	case label == "left" || label == "next" || label == "claude" || strings.HasPrefix(text, "skipped"):
+		return styleWarn
+	case label == "launch" || label == "resume" || label == "commit" || label == "done":
+		return styleGood
+	}
+	return styleLabel
+}
+
+// wrapHanging wraps text to the terminal, indenting continuation lines to
+// the text column. Lines the text already breaks (a hook's source) keep
+// their breaks.
+func wrapHanging(text string) string {
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width < labelWidth+30 {
+		return text
+	}
+	indent := strings.Repeat(" ", labelWidth+1)
+	var out []string
+	for i, line := range strings.Split(text, "\n") {
+		wrapped := strings.Split(ansi.Wrap(line, width-labelWidth-1, " /,"), "\n")
+		for j, w := range wrapped {
+			if i > 0 || j > 0 {
+				w = indent + w
+			}
+			out = append(out, w)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// openTTY opens the controlling terminal for a prompt, so prompts work even
+// with stdout redirected.
+func openTTY() (*os.File, error) {
+	return os.OpenFile("/dev/tty", os.O_RDWR, 0)
+}
+
+// confirm asks a yes/no question, defaulting to no. With no terminal the
+// answer is no.
+func confirm(prompt string) bool {
+	defer clock.pause()()
+	tty, err := openTTY()
+	if err != nil {
+		return false
+	}
+	defer tty.Close()
+	if plain {
+		fmt.Fprintf(tty, "%s [y/N] ", prompt)
+		line, _ := bufio.NewReader(tty).ReadString('\n')
+		line = strings.ToLower(strings.TrimSpace(line))
+		return line == "y" || line == "yes"
+	}
+	yes := false
+	err = huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title(prompt).Affirmative("Yes").Negative("No").Value(&yes),
+	)).WithInput(tty).WithOutput(tty).WithShowHelp(false).Run()
+	return err == nil && yes
+}
+
+// pick asks the user to choose one of lines.
+func pick(title string, lines []string) (int, error) {
+	defer clock.pause()()
+	tty, err := openTTY()
+	if err != nil {
+		return 0, errors.New(title + " more than one match, and no terminal to ask on:\n  " + strings.Join(lines, "\n  "))
+	}
+	defer tty.Close()
+	if plain {
+		fmt.Fprintln(tty, title)
+		for i, l := range lines {
+			fmt.Fprintf(tty, "  %d  %s\n", i+1, l)
+		}
+		r := bufio.NewReader(tty)
+		for {
+			fmt.Fprintf(tty, "pick 1-%d: ", len(lines))
+			line, err := r.ReadString('\n')
+			n, convErr := strconv.Atoi(strings.TrimSpace(line))
+			if convErr == nil && n >= 1 && n <= len(lines) {
+				return n - 1, nil
+			}
+			if err != nil {
+				return 0, errors.New("nothing picked")
+			}
+		}
+	}
+	opts := make([]huh.Option[int], len(lines))
+	for i, l := range lines {
+		opts[i] = huh.NewOption(l, i)
+	}
+	choice := 0
+	err = huh.NewForm(huh.NewGroup(
+		huh.NewSelect[int]().Title(title).Options(opts...).Value(&choice),
+	)).WithInput(tty).WithOutput(tty).WithShowHelp(false).Run()
+	if err != nil {
+		return 0, errors.New("nothing picked")
+	}
+	return choice, nil
+}
+
+// --- progress ---------------------------------------------------------------
+
+var (
+	progressMu    sync.Mutex
+	progressShown bool
+)
+
+// clearProgress erases the progress line; progressMu must be held.
+func clearProgress() {
+	if progressShown {
+		fmt.Print("\r\x1b[2K")
+		progressShown = false
+	}
+}
+
+// progress counts bytes written through it and shows "label 45 MB / 149 MB,
+// 21 MB/s" on the terminal until done is called. Without a terminal it only
+// counts.
+func progress(label string, total int64, w io.Writer) (io.Writer, func()) {
+	c := &counter{w: w}
+	if plain || total < 8<<20 {
+		return c, func() {}
+	}
+	start := time.Now()
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(250 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				progressMu.Lock()
+				clearProgress()
+				progressMu.Unlock()
+				return
+			case <-t.C:
+				n := c.n.Load()
+				rate := float64(n) / time.Since(start).Seconds()
+				progressMu.Lock()
+				fmt.Printf("\r\x1b[2K%s %s / %s, %s/s", styleLabel.Render(fmt.Sprintf("%-*s", labelWidth, label)), humanSize(n), humanSize(total), humanSize(int64(rate)))
+				progressShown = true
+				progressMu.Unlock()
+			}
+		}
+	}()
+	return c, func() { close(stop); <-finished }
+}
+
+type counter struct {
+	w io.Writer
+	n atomic.Int64
+}
+
+func (c *counter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}

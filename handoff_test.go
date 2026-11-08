@@ -55,6 +55,7 @@ func newWorld(t *testing.T) *world {
 	// a strange HOME). Fake agents report a version; tests that need more
 	// write over them in the same bin.
 	t.Setenv("SHELL", "")
+	t.Setenv("FERRY_PLAIN", "1") // line prompts the pty tests can answer
 	bin := filepath.Join(root, "bin")
 	writeExec(t, filepath.Join(bin, "claude"), "#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
 	writeExec(t, filepath.Join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.100.0'\n")
