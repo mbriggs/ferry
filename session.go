@@ -29,11 +29,18 @@ type Session struct {
 	Cwd   string `json:"cwd"`
 	// WorkDir is the directory the agent is in now. It can differ from Cwd,
 	// where the session started (and where it resumes), after a cd.
-	WorkDir string   `json:"work_dir,omitempty"`
-	Files   []string `json:"files"` // relative to home; directories included whole
-	Model   string   `json:"model,omitempty"`
-	Trusted bool     `json:"trusted"`
-	Size    int64    `json:"size"`
+	WorkDir string `json:"work_dir,omitempty"`
+	// ProjDir is the Claude project folder the transcript is in, relative to
+	// home, when that isn't Cwd's: Claude refiles a worktree session's
+	// transcript when the session leaves the worktree. See projDir.
+	ProjDir string `json:"proj_dir,omitempty"`
+	// ClaudeWorktree is the Claude worktree a Claude session is still in
+	// (see claudeworktree.go). Its next /exit deletes it or asks.
+	ClaudeWorktree string   `json:"claude_worktree,omitempty"`
+	Files          []string `json:"files"` // relative to home; directories included whole
+	Model          string   `json:"model,omitempty"`
+	Trusted        bool     `json:"trusted"`
+	Size           int64    `json:"size"`
 }
 
 type FindSessionReq struct {
@@ -121,6 +128,26 @@ func (l *Local) FindSession(q FindSessionReq) (*Session, error) {
 	return &found[0], nil
 }
 
+// projDir is the Claude project folder the session's files are in. ProjDir
+// may arrive from the other machine, and it decides which paths count as the
+// session's, so anything but one folder under .claude/projects is ignored;
+// the session's files then fail the path checks instead.
+func (s Session) projDir() string {
+	projects := filepath.Join(".claude", "projects")
+	if dir, name := filepath.Split(s.ProjDir); filepath.Clean(dir) == projects && name != "" && name != "." && name != ".." {
+		return s.ProjDir
+	}
+	return filepath.Join(projects, claudeSlug(s.Cwd))
+}
+
+func modTime(path string) time.Time {
+	st, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return st.ModTime()
+}
+
 func (l *Local) mtime(rel string) time.Time {
 	st, err := os.Stat(l.abs(rel))
 	if err != nil {
@@ -131,19 +158,35 @@ func (l *Local) mtime(rel string) time.Time {
 
 func (l *Local) findClaude(q FindSessionReq) (*Session, error) {
 	var transcript string
+	var info claudeTranscript
 	if q.ID != "" {
 		matches, _ := filepath.Glob(filepath.Join(l.Home, ".claude", "projects", "*", q.ID+".jsonl"))
 		if len(matches) == 0 {
 			return nil, nil
 		}
+		sort.Slice(matches, func(i, j int) bool { return modTime(matches[i]).After(modTime(matches[j])) })
 		transcript = matches[0]
+		var err error
+		if info, err = readClaudeTranscript(transcript); err != nil {
+			return nil, err
+		}
 	} else {
-		dir := filepath.Join(l.Home, ".claude", "projects", claudeSlug(l.abs(q.CwdRel)))
-		matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-		var newest time.Time
+		// The worktree's own folder, plus transcripts Claude refiled
+		// elsewhere when the session left this worktree. Either way, a
+		// transcript only counts if it resumes here: one refiled into this
+		// folder from a worktree below it belongs to that worktree.
+		dir := l.abs(q.CwdRel)
+		matches, _ := filepath.Glob(filepath.Join(l.Home, ".claude", "projects", claudeSlug(dir), "*.jsonl"))
+		matches = append(matches, l.worktreeTranscripts(dir)...)
+		sort.Slice(matches, func(i, j int) bool { return modTime(matches[i]).After(modTime(matches[j])) })
 		for _, m := range matches {
-			if st, err := os.Stat(m); err == nil && st.ModTime().After(newest) {
-				newest, transcript = st.ModTime(), m
+			t, err := readClaudeTranscript(m)
+			if err != nil {
+				return nil, err
+			}
+			if at := t.resumeDir(); at == "" || claudeSlug(at) == claudeSlug(dir) {
+				transcript, info = m, t
+				break
 			}
 		}
 		if transcript == "" {
@@ -151,16 +194,18 @@ func (l *Local) findClaude(q FindSessionReq) (*Session, error) {
 		}
 	}
 	id := strings.TrimSuffix(filepath.Base(transcript), ".jsonl")
-	cwd, err := firstJSONField(transcript, func(m map[string]any) string { s, _ := m["cwd"].(string); return s })
-	if err != nil {
-		return nil, err
-	}
+	cwd := info.resumeDir()
 	if cwd == "" {
 		cwd = l.abs(q.CwdRel)
 	}
 	rel := func(p string) string { r, _ := filepath.Rel(l.Home, p); return r }
-	s := &Session{Agent: agentClaude, ID: id, Cwd: cwd, Files: []string{rel(transcript)}}
-	s.WorkDir, _ = lastJSONField(transcript, func(m map[string]any) string { s, _ := m["cwd"].(string); return s })
+	s := &Session{Agent: agentClaude, ID: id, Cwd: cwd, WorkDir: info.lastCwd, Files: []string{rel(transcript)}}
+	if proj := rel(filepath.Dir(transcript)); proj != filepath.Join(".claude", "projects", claudeSlug(cwd)) {
+		s.ProjDir = proj
+	}
+	if info.inWorktree {
+		s.ClaudeWorktree = info.worktree
+	}
 	if sub := strings.TrimSuffix(transcript, ".jsonl"); isDir(sub) {
 		s.Files = append(s.Files, rel(sub))
 	}
@@ -445,9 +490,10 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 		return Session{}, fmt.Errorf("session cwd %s is outside %s", q.Session.Cwd, q.OldHome)
 	}
 	out := q.Session
-	out.Cwd = l.abs(rel)
-	oldProj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
-	newProj := filepath.Join(".claude", "projects", claudeSlug(out.Cwd))
+	out.Cwd, out.ProjDir, out.ClaudeWorktree = l.abs(rel), "", ""
+	oldProj := q.Session.projDir()
+	newProj := out.projDir()
+	transcript := filepath.Join(oldProj, q.Session.ID+".jsonl")
 	mapRel := func(r string) string {
 		if after, ok := strings.CutPrefix(r, oldProj+string(filepath.Separator)); ok {
 			return filepath.Join(newProj, after)
@@ -480,6 +526,9 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 			got, _, err := rewrite(data, q.OldHome, l.Home)
 			if err != nil {
 				return fmt.Errorf("%s: %w", r, err)
+			}
+			if q.Session.Agent == agentClaude && r == transcript {
+				got = leaveClaudeWorktree(got, q.Session.ID)
 			}
 			if err := writeAtomic(p, got, 0o600); err != nil {
 				return err
@@ -521,8 +570,27 @@ func (l *Local) PlaceSession(q PlaceReq) error {
 	} else if live.Live && !live.Settling {
 		return fmt.Errorf("session %s is loaded here (%s); exit it, then run this again", q.Session.ID, live.Detail)
 	}
-	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
+	proj := q.Session.projDir()
 	replaced := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))
+	// A copy this machine has in another project folder, as Claude leaves
+	// when it refiles a worktree session, is parked too: a lookup by id
+	// could otherwise resume the older one.
+	if q.Session.Agent == agentClaude {
+		others, _ := filepath.Glob(filepath.Join(l.Home, ".claude", "projects", "*", q.Session.ID+".jsonl"))
+		for _, o := range others {
+			r, _ := filepath.Rel(l.Home, o)
+			if filepath.Dir(r) == proj {
+				continue
+			}
+			for _, f := range []string{r, strings.TrimSuffix(r, ".jsonl")} {
+				if exists(l.abs(f)) {
+					if err := moveFile(l.abs(f), filepath.Join(replaced, f)); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 	err = filepath.WalkDir(ready, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -593,7 +661,7 @@ func (l *Local) Park(q ParkReq) error {
 	if err != nil {
 		return err
 	}
-	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
+	proj := q.Session.projDir()
 	for _, f := range q.Session.Files {
 		if !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f) && !sessionPathOK(q.Session.Agent, q.Session.ID, proj, f+"/x") {
 			return fmt.Errorf("refusing to park %s: not part of session %s", f, q.Session.ID)

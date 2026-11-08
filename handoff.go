@@ -242,6 +242,9 @@ func (m *move) stopAgent() (*Session, error) {
 	if !live.Live {
 		return sess, nil
 	}
+	if src.IsLocal() && sess.ClaudeWorktree != "" {
+		return nil, fmt.Errorf("%s in its own worktree; close its pane (or /exit and pick Keep; /exit deletes a worktree with no changes), then run this again", live.Detail)
+	}
 	if src.IsLocal() {
 		return nil, fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
 	}

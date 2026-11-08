@@ -11,7 +11,7 @@ import (
 )
 
 const usage = `usage:
-  ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]
+  ferry to HOST [NAME] [--agent claude|codex] [--session ID] [--yes] [--no-launch]
                [--force] [--force-version]
   ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version]
   ferry ls HOST
@@ -22,7 +22,8 @@ const usage = `usage:
   ferry version
 
 HOST is a name in ~/.config/ferry/hosts ("kant mbriggs@kant" per line), or an
-ssh target. Run "ferry to" inside the worktree you want to hand off. "ferry
+ssh target. Run "ferry to" inside the worktree you want to hand off; in a
+repo's main checkout, NAME (or a prompt) picks one of its worktrees. "ferry
 from" with no NAME lists the agents running on HOST and asks which to pull;
 NAME can be a task name, a Rex session label, the first 8 or more characters
 of a running agent's session id, or a path like src/app. --force takes a task
@@ -109,7 +110,7 @@ func cmdTo(l *Local, args []string) int {
 	if err != nil {
 		return 2
 	}
-	if len(pos) != 1 {
+	if len(pos) != 1 && len(pos) != 2 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
@@ -121,9 +122,16 @@ func cmdTo(l *Local, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	t, err := taskHere(l, cwd)
+	name := ""
+	if len(pos) == 2 {
+		name = pos[1]
+	}
+	t, err := chooseTo(l, cwd, name)
 	if err != nil {
 		return fail(err)
+	}
+	if unlockDeadClaude(l.abs(t.WtRel)) {
+		step("worktree", "unlocked ~/%s: the Claude that locked it has exited", t.WtRel)
 	}
 	release, err := l.lockTask(t.Key)
 	if err != nil {
@@ -166,6 +174,9 @@ func cmdFrom(l *Local, args []string) int {
 	t := p.t
 	if o.SessionID == "" {
 		o.SessionID = p.session
+	}
+	if unlockDeadClaude(l.abs(t.WtRel)) {
+		step("worktree", "unlocked ~/%s: the Claude that locked it has exited", t.WtRel)
 	}
 	release, err := l.lockTask(t.Key)
 	if err != nil {

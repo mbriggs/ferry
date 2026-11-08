@@ -4,10 +4,22 @@ Hand a coding task, meaning a git worktree under `~/src` plus its Claude Code or
 
 ```
 ferry to kant                 # in the worktree, after exiting the agent
+ferry to kant fix-auth        # in the repo's main checkout: send its worktree fix-auth
 ferry from kant fix-auth      # bring it back
 ferry from kant               # pick from the agents running on kant
 ferry ls kant
 ```
+
+## Worktrees Claude made
+
+A worktree from `claude --worktree NAME` or the EnterWorktree tool belongs to Claude: when its session ends with `/exit`, Claude deletes the worktree if it has no changes and no commits, and otherwise asks Keep or Remove. Keep moves the transcript into the main checkout's project folder. ferry finds the session either way, resumes it in the worktree, and sends it as a plain session, so its next `/exit` on the other machine leaves the worktree alone.
+
+To hand one off:
+
+- Say "ferry this to kant" in the session. The `ferry` skill (`skills/ferry/`, installed to `~/.claude/skills/ferry/` by `make install`) opens a Rex tab that waits for the reply to end, stops the session with SIGTERM, which skips Claude's worktree cleanup, and runs `ferry to kant` there.
+- Or close the session's pane (or `/exit` and pick Keep), then run `ferry to kant` in the worktree, or `ferry to kant` in the main checkout, which lists the worktrees that have a session and asks which one to send.
+
+Don't `/exit` a session whose worktree has no changes and no commits: that deletes the worktree. ferry releases the git lock a stopped Claude leaves on its worktree.
 
 ## Setup
 
@@ -73,6 +85,7 @@ Use a scratch repo:
 - `test/e2e-local.sh` runs a real Claude session on kant through Rex, with a fake laptop home. Run `test/e2e-local.sh clean` afterwards.
 - `test/worktree.sh` tests `bin/worktree`, which gives each linked git worktree its own lane of test-script names. See `.claude/skills/worktree/SKILL.md`.
 - `test/liveness.sh` rechecks the agent internals ferry depends on. Run it after upgrading Claude Code or Codex.
+- `test/claude-worktree.sh` rechecks what Claude does when a worktree session ends (see "Worktrees Claude made"). Run it after upgrading Claude Code.
 
 ## CI and releases
 

@@ -15,6 +15,9 @@ install: build
 	$(ROOT)/bin/worktree guard --confirm "make install"
 	mkdir -p $(BIN)
 	install -m 0755 ferry $(BIN)/ferry
+	mkdir -p $(HOME)/.claude/skills/ferry
+	install -m 0644 skills/ferry/SKILL.md $(HOME)/.claude/skills/ferry/SKILL.md
+	install -m 0755 skills/ferry/after-exit.sh $(HOME)/.claude/skills/ferry/after-exit.sh
 
 dist:
 	mkdir -p dist

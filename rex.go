@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -171,10 +172,19 @@ func (l *Local) StopAgent(q StopReq) error {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
 	}
 	pid := live.PID // 0 for codex, whose lock release already means it's done
+	// A Claude still in its own worktree would delete it on /exit, or ask,
+	// and Keep refiles the transcript. SIGTERM exits it with neither.
+	byTerm := q.Session.Agent == agentClaude && q.Session.ClaudeWorktree != "" && pid > 0
 	// Codex can drop input that lands as a turn finishes, so retry.
 	for range 3 {
-		rexRun("", "send", "-s", q.RexSession, "-b", block, "/exit")
-		rexRun("", "send-key", "-s", q.RexSession, "-b", block, "enter")
+		if byTerm {
+			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return err
+			}
+		} else {
+			rexRun("", "send", "-s", q.RexSession, "-b", block, "/exit")
+			rexRun("", "send-key", "-s", q.RexSession, "-b", block, "enter")
+		}
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
 			if live, err := l.Liveness(q.Session); err == nil && (!live.Live || live.Settling) {

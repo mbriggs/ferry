@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // pullable is something `ferry from` can bring back: a worktree on the other
@@ -82,6 +83,81 @@ func choosePull(remote Machine, here, there string, name string) (pullable, erro
 		return pullable{}, err
 	}
 	return all[i], nil
+}
+
+// chooseTo works out what `ferry to HOST [NAME]` sends. In a linked worktree
+// it's that worktree. In the repo's main checkout it may be a worktree
+// instead, since a Claude session that made one with --worktree or
+// EnterWorktree ends with its shell back in the main checkout. NAME picks
+// one of the repo's worktrees. With no NAME, and worktrees that have a
+// session, it asks on a terminal, and sends the main checkout otherwise.
+func chooseTo(l *Local, dir, name string) (task, error) {
+	here, err := taskHere(l, dir)
+	if err != nil {
+		return task{}, err
+	}
+	if name == "" && here.WtRel != here.RepoRel {
+		return here, nil
+	}
+	type option struct {
+		t    task
+		what string
+	}
+	describe := func(t task) string {
+		what := fmt.Sprintf("%-16s ~/%s", t.Name, t.WtRel)
+		s, err := l.FindSession(FindSessionReq{CwdRel: t.WtRel})
+		if err != nil || s == nil {
+			return what + "  (no session)"
+		}
+		return fmt.Sprintf("%s  %s %s, %s ago", what, s.Agent, short(s.ID), roundDuration(time.Since(l.mtime(s.Files[0]))))
+	}
+	all := []option{{here, describe(here)}}
+	if here.WtRel == here.RepoRel {
+		all[0].what += "  (this checkout)"
+	}
+	out, err := git(dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return task{}, err
+	}
+	for line := range strings.Lines(out) {
+		path, ok := strings.CutPrefix(strings.TrimSpace(line), "worktree ")
+		if !ok || !isDir(path) {
+			continue
+		}
+		t, err := taskHere(l, path)
+		if err != nil || t.WtRel == here.WtRel {
+			continue
+		}
+		if name != "" {
+			if matches(name, t) {
+				return t, nil
+			}
+			continue
+		}
+		if s, err := l.FindSession(FindSessionReq{CwdRel: t.WtRel}); err == nil && s != nil {
+			all = append(all, option{t, describe(t)})
+		}
+	}
+	switch {
+	case name != "" && matches(name, here):
+		return here, nil
+	case name != "":
+		return task{}, fmt.Errorf("no worktree of ~/%s matches %q; `git worktree list` shows them", here.RepoRel, name)
+	case len(all) == 1:
+		return here, nil
+	case !interactive():
+		step("task", "sending this checkout; name a worktree to send that instead (`ferry to HOST NAME`)")
+		return here, nil
+	}
+	lines := make([]string, len(all))
+	for i, o := range all {
+		lines[i] = o.what
+	}
+	i, err := pick("send which worktree?", lines)
+	if err != nil {
+		return task{}, err
+	}
+	return all[i].t, nil
 }
 
 // matches reports whether a name the user typed refers to task t: its
