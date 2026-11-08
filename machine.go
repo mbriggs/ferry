@@ -197,22 +197,25 @@ func rpc[T any](r *Remote, op string, req any) (T, error) {
 	return v, err
 }
 
+// do runs an op that returns only an error.
+func do(r *Remote, op string, req any) error {
+	_, err := rpc[struct{}](r, op, req)
+	return err
+}
+
 func (r *Remote) Info() (Info, error) { return rpc[Info](r, "info", nil) }
 func (r *Remote) FindSession(q FindSessionReq) (*Session, error) {
 	return rpc[*Session](r, "find-session", q)
 }
 func (r *Remote) Liveness(s Session) (Liveness, error) { return rpc[Liveness](r, "liveness", s) }
-func (r *Remote) StopAgent(q StopReq) error            { _, err := rpc[struct{}](r, "stop-agent", q); return err }
+func (r *Remote) StopAgent(q StopReq) error            { return do(r, "stop-agent", q) }
 func (r *Remote) Agents() ([]AgentInfo, error)         { return rpc[[]AgentInfo](r, "agents", nil) }
 func (r *Remote) Worktree(rel string) (task, error)    { return rpc[task](r, "worktree", rel) }
 func (r *Remote) RepoState(rel string) (RepoState, error) {
 	return rpc[RepoState](r, "repo-state", rel)
 }
-func (r *Remote) InitRepo(rel string) error { _, err := rpc[struct{}](r, "init-repo", rel); return err }
-func (r *Remote) FinishRepo(q FinishRepoReq) error {
-	_, err := rpc[struct{}](r, "finish-repo", q)
-	return err
-}
+func (r *Remote) InitRepo(rel string) error        { return do(r, "init-repo", rel) }
+func (r *Remote) FinishRepo(q FinishRepoReq) error { return do(r, "finish-repo", q) }
 func (r *Remote) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	return rpc[SnapshotResult](r, "snapshot", q)
 }
@@ -228,27 +231,21 @@ func (r *Remote) Import(q ImportReq, rd io.Reader) error {
 func (r *Remote) StageSession(q InstallReq) (Session, error) {
 	return rpc[Session](r, "stage-session", q)
 }
-func (r *Remote) PlaceSession(q PlaceReq) error {
-	_, err := rpc[struct{}](r, "place-session", q)
-	return err
-}
+func (r *Remote) PlaceSession(q PlaceReq) error { return do(r, "place-session", q) }
 func (r *Remote) PlanExtras(q PlanReq) (ExtrasPlan, error) {
 	return rpc[ExtrasPlan](r, "plan-extras", q)
 }
 func (r *Remote) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
 	return rpc[InstallExtrasResult](r, "install-extras", q)
 }
-func (r *Remote) Park(q ParkReq) error                   { _, err := rpc[struct{}](r, "park", q); return err }
+func (r *Remote) Park(q ParkReq) error                   { return do(r, "park", q) }
 func (r *Remote) RecordGet(task string) (*Record, error) { return rpc[*Record](r, "record-get", task) }
-func (r *Remote) RecordPut(q RecordPutReq) error {
-	_, err := rpc[struct{}](r, "record-put", q)
-	return err
-}
-func (r *Remote) RecordList() ([]Record, error)         { return rpc[[]Record](r, "record-list", nil) }
-func (r *Remote) HookInfo(q HookReq) (HookInfo, error)  { return rpc[HookInfo](r, "hook-info", q) }
-func (r *Remote) Approve(sha string) error              { _, err := rpc[struct{}](r, "approve", sha); return err }
-func (r *Remote) RunHook(q HookReq) (HookResult, error) { return rpc[HookResult](r, "run-hook", q) }
-func (r *Remote) Launch(q LaunchReq) (string, error)    { return rpc[string](r, "launch", q) }
+func (r *Remote) RecordPut(q RecordPutReq) error         { return do(r, "record-put", q) }
+func (r *Remote) RecordList() ([]Record, error)          { return rpc[[]Record](r, "record-list", nil) }
+func (r *Remote) HookInfo(q HookReq) (HookInfo, error)   { return rpc[HookInfo](r, "hook-info", q) }
+func (r *Remote) Approve(sha string) error               { return do(r, "approve", sha) }
+func (r *Remote) RunHook(q HookReq) (HookResult, error)  { return rpc[HookResult](r, "run-hook", q) }
+func (r *Remote) Launch(q LaunchReq) (string, error)     { return rpc[string](r, "launch", q) }
 
 // --- remote server -------------------------------------------------------
 
@@ -308,163 +305,81 @@ func decode[T any](raw []byte) (T, error) {
 	return v, err
 }
 
-func dispatch(l *Local, op string, raw []byte) (any, error) {
-	none := struct{}{}
-	switch op {
-	case "info":
-		return l.Info()
-	case "find-session":
-		q, err := decode[FindSessionReq](raw)
+// handler serves one remote op from its JSON argument.
+type handler func(l *Local, raw []byte) (any, error)
+
+// query serves an op that returns a value.
+func query[Q, R any](f func(*Local, Q) (R, error)) handler {
+	return func(l *Local, raw []byte) (any, error) {
+		q, err := decode[Q](raw)
 		if err != nil {
 			return nil, err
 		}
-		return l.FindSession(q)
-	case "liveness":
-		q, err := decode[Session](raw)
+		return f(l, q)
+	}
+}
+
+// command serves an op that returns only an error.
+func command[Q any](f func(*Local, Q) error) handler {
+	return func(l *Local, raw []byte) (any, error) {
+		q, err := decode[Q](raw)
 		if err != nil {
 			return nil, err
 		}
-		return l.Liveness(q)
-	case "git-hooks":
-		rel, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.GitHooks(rel)
-	case "install-git-hooks":
-		return none, serveInstallGitHooks(l, raw, os.Stdin)
-	case "agents":
-		return l.Agents()
-	case "worktree":
-		rel, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.Worktree(rel)
-	case "stop-agent":
-		q, err := decode[StopReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.StopAgent(q)
-	case "repo-state":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.RepoState(q)
-	case "init-repo":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.InitRepo(q)
-	case "finish-repo":
-		q, err := decode[FinishRepoReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.FinishRepo(q)
-	case "snapshot":
-		q, err := decode[SnapshotReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.Snapshot(q)
-	case "apply":
-		q, err := decode[ApplyReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.Apply(q)
-	case "list-extras":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.ListExtras(q)
-	case "export":
+		return struct{}{}, f(l, q)
+	}
+}
+
+// noArg serves an op that takes no argument.
+func noArg[R any](f func(*Local) (R, error)) handler {
+	return func(l *Local, _ []byte) (any, error) { return f(l) }
+}
+
+var ops = map[string]handler{
+	"info":           noArg((*Local).Info),
+	"agents":         noArg((*Local).Agents),
+	"record-list":    noArg((*Local).RecordList),
+	"find-session":   query((*Local).FindSession),
+	"liveness":       query((*Local).Liveness),
+	"git-hooks":      query((*Local).GitHooks),
+	"worktree":       query((*Local).Worktree),
+	"repo-state":     query((*Local).RepoState),
+	"snapshot":       query((*Local).Snapshot),
+	"apply":          query((*Local).Apply),
+	"list-extras":    query((*Local).ListExtras),
+	"stage-session":  query((*Local).StageSession),
+	"plan-extras":    query((*Local).PlanExtras),
+	"install-extras": query((*Local).InstallExtras),
+	"record-get":     query((*Local).RecordGet),
+	"hook-info":      query((*Local).HookInfo),
+	"run-hook":       query((*Local).RunHook),
+	"launch":         query((*Local).Launch),
+	"stop-agent":     command((*Local).StopAgent),
+	"init-repo":      command((*Local).InitRepo),
+	"finish-repo":    command((*Local).FinishRepo),
+	"place-session":  command((*Local).PlaceSession),
+	"park":           command((*Local).Park),
+	"record-put":     command((*Local).RecordPut),
+	"approve":        command((*Local).Approve),
+	"import":         command(func(l *Local, q ImportReq) error { return l.Import(q, os.Stdin) }),
+	"install-git-hooks": func(l *Local, raw []byte) (any, error) {
+		return struct{}{}, serveInstallGitHooks(l, raw, os.Stdin)
+	},
+	"export": func(l *Local, raw []byte) (any, error) {
 		q, err := decode[ExportReq](raw)
 		if err != nil {
 			return nil, err
 		}
 		return streamed, l.Export(q, os.Stdout)
-	case "import":
-		q, err := decode[ImportReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.Import(q, os.Stdin)
-	case "stage-session":
-		q, err := decode[InstallReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.StageSession(q)
-	case "place-session":
-		q, err := decode[PlaceReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.PlaceSession(q)
-	case "plan-extras":
-		q, err := decode[PlanReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.PlanExtras(q)
-	case "install-extras":
-		q, err := decode[InstallExtrasReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.InstallExtras(q)
-	case "park":
-		q, err := decode[ParkReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.Park(q)
-	case "record-get":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.RecordGet(q)
-	case "record-put":
-		q, err := decode[RecordPutReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.RecordPut(q)
-	case "record-list":
-		return l.RecordList()
-	case "hook-info":
-		q, err := decode[HookReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.HookInfo(q)
-	case "approve":
-		q, err := decode[string](raw)
-		if err != nil {
-			return nil, err
-		}
-		return none, l.Approve(q)
-	case "run-hook":
-		q, err := decode[HookReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.RunHook(q)
-	case "launch":
-		q, err := decode[LaunchReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return l.Launch(q)
+	},
+}
+
+func dispatch(l *Local, op string, raw []byte) (any, error) {
+	h, ok := ops[op]
+	if !ok {
+		return nil, errors.New("unknown remote operation " + op)
 	}
-	return nil, errors.New("unknown remote operation " + op)
+	return h(l, raw)
 }
 
 func lastLine(s string) string {
