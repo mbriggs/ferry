@@ -17,10 +17,15 @@ import (
 // transfer from its partial file, and checks every file against the sender's
 // checksum.
 //
-// The laptop's rsync must be 3.2.5 or newer: from then on the client checks
-// that a remote sender's file list holds only what was asked for, which is
-// what keeps kant from writing anywhere else on the laptop during a pull.
-// macOS's own /usr/bin/rsync is openrsync, which is older than that.
+// During a pull kant is the sender, and a modified rsync there could put
+// anything in the file list. The receiver confines writes to the destination
+// directory, and the laptop's rsync must be 3.2.5 or newer, which adds two
+// checks on a remote sender's list: no top-level items beyond the ones asked
+// for, and no names matching the client's filter rules. Every job excludes
+// .git, so the second check rejects a .git anywhere in the list. Extras jobs
+// don't recurse, so a sender can't turn a listed file into a directory and
+// fill it. PrepareExtras has already checked each listed path. macOS's own
+// /usr/bin/rsync is openrsync, which is older than 3.2.5.
 
 var minRsync = [3]int{3, 2, 5}
 
@@ -65,7 +70,11 @@ func checkRsync(machine, v string) error {
 type rsyncJob struct {
 	SrcRel, DstRel string
 	Files          []string
-	// Private makes new files 0600, for secrets.
+	// Dirs lets Files name directories, copied with everything in them.
+	// Without it rsync copies only the listed files.
+	Dirs bool
+	// Private makes new files 0600, for secrets. rsync keeps the mode of a
+	// file the receiver already has, so PrepareExtras sets those to 0600 first.
 	Private bool
 	// WorkDir, an absolute path on dst, holds partial and temp files, so a
 	// cut transfer leaves nothing in DstRel. Without it, partial files go in
@@ -84,7 +93,10 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 	}
 	// --8-bit-output keeps non-ASCII names as they are in --out-format;
 	// rsync still escapes control characters (see sendExtras).
-	args := []string{"--recursive", "--times", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--out-format=%n", "--8-bit-output"}
+	args := []string{"--times", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--out-format=%n", "--8-bit-output", "--exclude=.git"}
+	if j.Dirs {
+		args = append(args, "--recursive")
+	}
 	shell := ""
 	for _, m := range []Machine{src, dst} {
 		if r, ok := m.(*Remote); ok && r.Target != "" {

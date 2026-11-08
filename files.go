@@ -211,8 +211,10 @@ type PrepareExtrasReq struct {
 // extra lands inside the worktree. The worktree's tracked contents came from
 // the other machine, so no component of a path may be a symlink (a tracked
 // symlink could otherwise redirect a write anywhere in this home), and
-// nothing goes under .git. It also makes the private directory rsync keeps
-// its partial and temp files in.
+// nothing goes under .git. Extras are often secrets, and rsync keeps the
+// mode of a file it replaces, so each one already here is set to 0600; safeDest
+// has checked it's a regular file, not a symlink. It also makes the private
+// directory rsync keeps its partial and temp files in.
 func (l *Local) PrepareExtras(q PrepareExtrasReq) error {
 	if !taskPattern.MatchString(q.Task) {
 		return fmt.Errorf("bad task key %q", q.Task)
@@ -220,6 +222,11 @@ func (l *Local) PrepareExtras(q PrepareExtrasReq) error {
 	root := l.abs(q.WtRel)
 	for _, p := range q.Paths {
 		if err := safeDest(root, p); err != nil {
+			return err
+		}
+	}
+	for _, p := range q.Paths {
+		if err := os.Chmod(filepath.Join(root, p), 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}

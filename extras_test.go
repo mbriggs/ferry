@@ -50,4 +50,23 @@ func TestUnchangedExtrasAreNotSentAgain(t *testing.T) {
 	if w.read(wt, ".env") != "SECRET=1\n" {
 		t.Fatal(".env changed")
 	}
+	// The laptop's own copy was 0644; extras end 0600 even when not resent.
+	if st, err := os.Stat(filepath.Join(wt, ".env")); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("unchanged .env mode: %v %v", st.Mode().Perm(), err)
+	}
+}
+
+func TestReplacedExtrasEndPrivate(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask() // .env is 0644 on the laptop
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), ".env", "SECRET=2\n")
+	w.approve(w.kant, dehydrateScript)
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	if w.read(wt, ".env") != "SECRET=2\n" {
+		t.Fatal("kant's .env didn't come back")
+	}
+	if st, err := os.Stat(filepath.Join(wt, ".env")); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("replaced .env mode: %v %v", st.Mode().Perm(), err)
+	}
 }

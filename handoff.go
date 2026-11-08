@@ -514,7 +514,7 @@ func (m *move) stageSession(sess *Session) (*Session, *Session, error) {
 // in in/<task>/ready, with paths rewritten. Nothing live changes.
 func (m *move) sendSession(sess Session) (*Session, error) {
 	stage := filepath.Join(".local", "state", "ferry", "in", m.t.Key, "session")
-	if _, err := rsyncTo(m.src, m.dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Total: sess.Size}, false); err != nil {
+	if _, err := rsyncTo(m.src, m.dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Dirs: true, Total: sess.Size}, false); err != nil {
 		return nil, err
 	}
 	s, err := m.dst.StageSession(InstallReq{Session: sess, OldHome: m.si.Home, StageRel: stage, Task: m.t.Key})
