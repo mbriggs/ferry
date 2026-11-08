@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -47,9 +49,45 @@ func claudeConfig(dirs []string) map[string]string {
 }
 
 // hookFiles returns the files inside dir that hook commands in dir's Claude
-// settings name, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
-// "bin/check".
+// settings run, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
+// "bin/check", and the files those name in turn: a hook script that sources
+// lib/env.sh or runs scripts/lint runs them too. A name counts when it
+// resolves, against dir or the naming file's folder, to a regular file
+// inside dir; a path like "$HERE/lib/env.sh" or "$(dirname "$0")/lib.sh"
+// is tried without its prefix.
+// Code a hook reaches without naming a file (make's Makefile, a package
+// script) isn't found.
 func hookFiles(dir string) []string {
+	var out, queue []string
+	seen := map[string]bool{}
+	add := func(text, base string) {
+		for _, p := range fileRefs(text, dir, base) {
+			if !seen[p] && len(seen) < maxHookFiles {
+				seen[p] = true
+				out = append(out, p)
+				queue = append(queue, p)
+			}
+		}
+	}
+	for _, cmd := range hookCommands(dir) {
+		add(cmd, dir)
+	}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		if data, ok := scriptText(p); ok {
+			add(data, filepath.Dir(p))
+		}
+	}
+	return out
+}
+
+// maxHookFiles bounds the files hookFiles follows, so a script that names
+// half the repo doesn't make every start slow.
+const maxHookFiles = 200
+
+// hookCommands returns the command of every hook in dir's Claude settings.
+func hookCommands(dir string) []string {
 	var out []string
 	for _, name := range []string{"settings.json", "settings.local.json"} {
 		data, err := os.ReadFile(filepath.Join(dir, ".claude", name))
@@ -69,26 +107,60 @@ func hookFiles(dir string) []string {
 		for _, groups := range settings.Hooks {
 			for _, g := range groups {
 				for _, h := range g.Hooks {
-					cmd := strings.NewReplacer("${CLAUDE_PROJECT_DIR}", dir, "$CLAUDE_PROJECT_DIR", dir).Replace(h.Command)
-					for _, tok := range strings.Fields(cmd) {
-						tok = strings.Trim(tok, `"';&|()`)
-						if tok == "" {
-							continue
-						}
-						p := tok
-						if !filepath.IsAbs(p) {
-							p = filepath.Join(dir, p)
-						}
-						p = filepath.Clean(p)
-						if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && within(p, dir) {
-							out = append(out, p)
-						}
-					}
+					out = append(out, h.Command)
 				}
 			}
 		}
 	}
 	return out
+}
+
+var (
+	pathToken = regexp.MustCompile(`[A-Za-z0-9_.~/+@%-]+`)
+	// What a script puts in front of a path to find its own folder or the
+	// project: "$HERE/", "${BASH_SOURCE%/*}/", "$(dirname "$0")/".
+	varPrefix = regexp.MustCompile("(\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[^}]*\\}|\\$\\([^()]*\\)|`[^`]*`)/")
+)
+
+// fileRefs returns the regular files inside dir that text names, resolving
+// relative names against dir and against base.
+func fileRefs(text, dir, base string) []string {
+	// Quotes go first: "$CLAUDE_PROJECT_DIR"/bin/x is one path.
+	text = strings.NewReplacer(`"`, "", "'", "", "${CLAUDE_PROJECT_DIR}", dir, "$CLAUDE_PROJECT_DIR", dir).Replace(text)
+	text = varPrefix.ReplaceAllString(text, "")
+	var out []string
+	seen := map[string]bool{}
+	for _, tok := range pathToken.FindAllString(text, -1) {
+		cands := []string{tok}
+		if !filepath.IsAbs(tok) {
+			cands = []string{filepath.Join(dir, tok), filepath.Join(base, tok)}
+		}
+		for _, p := range cands {
+			p = filepath.Clean(p)
+			if seen[p] || !within(p, dir) {
+				continue
+			}
+			seen[p] = true
+			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// scriptText reads p to look for the files it names: text files up to 1 MB.
+// Binaries are fingerprinted but not read.
+func scriptText(p string) (string, bool) {
+	st, err := os.Stat(p)
+	if err != nil || st.Size() > 1<<20 {
+		return "", false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil || bytes.IndexByte(data, 0) >= 0 {
+		return "", false
+	}
+	return string(data), true
 }
 
 // configChanges lists, relative to home, the files that differ between two
