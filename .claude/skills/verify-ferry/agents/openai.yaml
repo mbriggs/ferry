@@ -1,0 +1,6 @@
+interface:
+  display_name: "Verify ferry"
+  short_description: "Drive ferry between two fake homes and capture evidence"
+  default_prompt: "Use $verify-ferry to prove the current ferry change works."
+policy:
+  allow_implicit_invocation: true
