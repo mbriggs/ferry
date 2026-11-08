@@ -8,7 +8,7 @@ import (
 )
 
 func TestGitOverSSHUsesFerrysOptions(t *testing.T) {
-	w := newWorld(t)
+	w := newSerialWorld(t)
 	wt := w.laptopTask()
 	bin := filepath.Join(w.root, "bin")
 	log := filepath.Join(w.root, "ssh.log")

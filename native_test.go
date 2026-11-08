@@ -93,7 +93,7 @@ func TestAgentsReportTheWorktreeTheyAreIn(t *testing.T) {
 		fmt.Sprintf(`{"pid":%d,"sessionId":%q,"cwd":%q,"status":"idle"}`, sleep.Process.Pid, kantSessionID, filepath.Join(w.kant, "src")))
 
 	cmd := exec.Command(ferryBin, "remote", "agents")
-	cmd.Env = append(os.Environ(), "HOME="+w.kant)
+	cmd.Env = w.env(w.kant)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)

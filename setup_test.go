@@ -99,13 +99,13 @@ func TestLsOnTheMachineThatKeepsTheRecords(t *testing.T) {
 	wt := w.laptopTask()
 	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
 	cmd := exec.Command(ferryBin, "ls", "kant")
-	cmd.Env = append(os.Environ(), "HOME="+w.kant)
+	cmd.Env = w.env(w.kant)
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "fix-auth") {
 		t.Fatalf("ls on kant: %v\n%s", err, out)
 	}
 	cmd = exec.Command(ferryBin, "to", "kant")
-	cmd.Env = append(os.Environ(), "HOME="+w.kant)
+	cmd.Env = w.env(w.kant)
 	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "this machine") {
 		t.Fatalf("ferry to itself should refuse: %v\n%s", err, out)
 	}
@@ -156,14 +156,16 @@ func TestPushRefusesAStaleCrossBuild(t *testing.T) {
 	if buildCommit(ferryBin) == "an unknown commit" {
 		t.Skip("the test binary has no commit recorded (not built in a git checkout)")
 	}
+	w := newWorld(t)
 	// Stands in for the other platform's build: it runs here, but records
-	// no commit, like a build from an older tree. Built before newWorld
-	// moves HOME, so go uses the real module cache.
+	// no commit, like a build from an older tree. It builds with the real
+	// HOME, so go uses the real build and module caches.
 	old := filepath.Join(t.TempDir(), "ferry-old")
-	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", old, ".").CombinedOutput(); err != nil {
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", old, ".")
+	build.Env = append(os.Environ(), "HOME="+realHome)
+	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatal(string(out))
 	}
-	w := newWorld(t)
 	w.fakeSSH(false)
 	w.write(w.laptop, ".config/ferry/hosts", "kant mbriggs@fakehost\n")
 	foreign, uname := "linux-amd64", "Linux x86_64"

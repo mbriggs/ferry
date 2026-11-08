@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,53 +30,127 @@ func TestMain(m *testing.M) {
 	if out, err := exec.Command("go", "build", "-o", ferryBin, ".").CombinedOutput(); err != nil {
 		panic(string(out))
 	}
+	// Tests run in parallel, so they can't each t.Setenv. The process env is
+	// set once instead: code that runs in the test process, not as a ferry
+	// subprocess, must never reach the real home (~/.claude/sessions,
+	// ~/.local/state/ferry), the real login profile, or the real rex and
+	// ssh. Each world hands its own HOME, PATH and stray-call log to the
+	// ferry it runs.
+	home := filepath.Join(dir, "home")
+	guard := filepath.Join(dir, "guard")
+	fakes = filepath.Join(dir, "fakes")
+	stray := filepath.Join(dir, "stray-calls")
+	os.MkdirAll(home, 0o755)
+	// Ferry must never run the real agents or read the real login profile:
+	// both depend on the machine running the tests (mise wrappers, slow with
+	// a strange HOME). Fake agents report a version. rex and ssh would reach
+	// the real Rex server and network, so a call that reaches their fakes is
+	// logged and fails the test, even if ferry handled the error. A test
+	// that needs more writes its own tools into its world's bin (fakeRex,
+	// paneRex, fakeSSH). Worlds share these fakes because macOS checks a new
+	// executable on its first exec, which cost every world about 150ms per
+	// tool when each wrote its own.
+	for tool, body := range map[string]string{
+		"claude": "echo '2.1.0 (Claude Code)'\n",
+		"codex":  "echo 'codex-cli 0.100.0'\n",
+		"rex":    strayScript("rex"),
+		"ssh":    strayScript("ssh"),
+	} {
+		writeFile(filepath.Join(fakes, tool), "#!/bin/sh\n"+body)
+		writeFile(filepath.Join(guard, tool), "#!/bin/sh\n"+strayScript(tool))
+	}
+	realHome = os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	os.Setenv("SHELL", "")
+	os.Setenv("FERRY_PLAIN", "1") // line prompts the pty tests can answer
+	os.Setenv("FERRY_TEST_STRAY", stray)
+	basePath = os.Getenv("PATH")
+	os.Setenv("PATH", guard+string(os.PathListSeparator)+basePath)
 	code := m.Run()
+	if data, err := os.ReadFile(stray); err == nil {
+		fmt.Fprintf(os.Stderr, "a test reached a real tool from the test process:\n%s", data)
+		code = 1
+	}
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
 
+// strayScript logs a call to tool in $FERRY_TEST_STRAY and fails it.
+func strayScript(tool string) string {
+	return "echo \"" + tool + " $*\" >> \"$FERRY_TEST_STRAY\"\necho 'unexpected " + tool + " call in a test' >&2\nexit 1\n"
+}
+
+func writeFile(p, script string) {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		panic(err)
+	}
+}
+
+var (
+	// realHome is HOME as go test started, for the go command's caches.
+	realHome string
+	// basePath is PATH as go test started, without the test process's guards.
+	basePath string
+	// fakes holds the tools a world's ferry finds unless the test writes its
+	// own: fake agents, and a rex and ssh that fail.
+	fakes string
+)
+
+var parallelTests sync.Map
+
 type world struct {
 	t                  *testing.T
 	root, laptop, kant string
-	path               string // PATH for ferry, when a test fakes rex
+	path               string // PATH for ferry; see env
 }
 
 const sessionID = "11111111-2222-3333-4444-555555555555"
 
+// newWorld makes a world for a test that runs in parallel with the others.
+// Its ferry runs only as a subprocess, with the world's HOME and PATH.
 func newWorld(t *testing.T) *world {
 	t.Helper()
+	if _, again := parallelTests.LoadOrStore(t, true); !again {
+		t.Parallel() // once per test, which may make several worlds
+	}
+	return makeWorld(t)
+}
+
+// newSerialWorld is newWorld for a test that changes the test process's own
+// environment (t.Setenv) to call ferry's code directly. Such a test can't
+// run in parallel.
+func newSerialWorld(t *testing.T) *world {
+	t.Helper()
+	return makeWorld(t)
+}
+
+func makeWorld(t *testing.T) *world {
+	t.Helper()
 	root := t.TempDir()
-	// Code that runs in the test process, not as a ferry subprocess, must
-	// never reach the real home (~/.claude/sessions, ~/.local/state/ferry).
-	t.Setenv("HOME", root)
 	w := &world{t: t, root: root, laptop: filepath.Join(root, "Users", "matt"), kant: filepath.Join(root, "home", "mbriggs")}
 	for name, home := range map[string]string{"laptop": w.laptop, "kant": w.kant} {
 		w.write(home, ".config/ferry/name", name+"\n")
 	}
 	w.write(w.laptop, ".config/ferry/hosts", "kant exec:"+w.kant+"\n")
-	// Ferry must never run the real agents or read the real login profile:
-	// both depend on the machine running the tests (mise wrappers, slow with
-	// a strange HOME). Fake agents report a version; tests that need more
-	// write over them in the same bin.
-	t.Setenv("SHELL", "")
-	t.Setenv("FERRY_PLAIN", "1") // line prompts the pty tests can answer
-	bin := filepath.Join(root, "bin")
-	writeExec(t, filepath.Join(bin, "claude"), "#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
-	writeExec(t, filepath.Join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.100.0'\n")
-	// rex and ssh would reach the real Rex server and network. A test that
-	// needs them writes its own over these (fakeRex, paneRex, fakeSSH); any
-	// call that reaches these fails the test, even if ferry handled the error.
 	stray := filepath.Join(root, "stray-calls")
-	for _, tool := range []string{"rex", "ssh"} {
-		writeExec(t, filepath.Join(bin, tool), "#!/bin/sh\necho \""+tool+" $*\" >> "+stray+"\necho 'unexpected "+tool+" call in a test' >&2\nexit 1\n")
-	}
 	t.Cleanup(func() {
 		if data, err := os.ReadFile(stray); err == nil {
 			t.Errorf("a test reached rex or ssh without a fake:\n%s", data)
 		}
 	})
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	w.path = strings.Join([]string{filepath.Join(root, "bin"), fakes, basePath}, string(os.PathListSeparator))
 	return w
+}
+
+// env is the environment for a ferry run as home's user: the world's PATH
+// (its own tools, then the shared fakes, then the real PATH) and its log of
+// stray calls.
+func (w *world) env(home string, extra ...string) []string {
+	env := append(os.Environ(), "HOME="+home, "PATH="+w.path, "FERRY_TEST_STRAY="+filepath.Join(w.root, "stray-calls"))
+	return append(env, extra...)
 }
 
 func (w *world) write(home, rel, content string) {
@@ -111,10 +186,7 @@ func (w *world) git(dir string, args ...string) string {
 func (w *world) ferry(dir string, args ...string) (string, error) {
 	cmd := exec.Command(ferryBin, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "HOME="+w.laptop)
-	if w.path != "" {
-		cmd.Env = append(cmd.Env, "PATH="+w.path)
-	}
+	cmd.Env = w.env(w.laptop)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()
@@ -128,6 +200,21 @@ func (w *world) mustFerry(dir string, args ...string) string {
 		w.t.Fatalf("ferry %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return out
+}
+
+// idleAppend adds a line to a transcript as an agent that has since gone
+// idle: the file is dated a minute ago, so ferry doesn't wait for it to
+// settle.
+func (w *world) idleAppend(transcript, line string) {
+	w.t.Helper()
+	f, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	fmt.Fprintln(f, line)
+	f.Close()
+	old := time.Now().Add(-time.Minute)
+	os.Chtimes(transcript, old, old)
 }
 
 func (w *world) approve(home, content string) {
@@ -243,6 +330,13 @@ func TestRoundTrip(t *testing.T) {
 	if strings.Contains(transcript, `"cwd":"`+wt) || !strings.Contains(transcript, `"cwd":"`+kwt+`"`) {
 		t.Fatalf("cwd not rewritten:\n%s", transcript)
 	}
+	// The transcript keeps the laptop's mtime: a copy dated when ferry wrote
+	// it would read as an agent still exiting, and the next handoff would
+	// wait for it to settle.
+	src, _ := os.Stat(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl"))
+	if dst, _ := os.Stat(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl")); !dst.ModTime().Equal(src.ModTime()) {
+		t.Fatalf("transcript mtime %v on kant, %v on the laptop", dst.ModTime(), src.ModTime())
+	}
 	if esc := strings.Repeat("\\u0026", 2); !strings.Contains(transcript, "cd "+wt+" "+esc+" ls") && !strings.Contains(transcript, "cd "+wt+" && ls") {
 		t.Fatalf("free text should keep the old path:\n%s", transcript)
 	}
@@ -267,9 +361,7 @@ func TestRoundTrip(t *testing.T) {
 	w.git(kwt, "add", "from-kant.txt")
 	w.git(kwt, "commit", "-qm", "kant commit")
 	w.write(kwt, "kant-untracked.txt", "wip\n")
-	f, _ := os.OpenFile(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl"), os.O_APPEND|os.O_WRONLY, 0)
-	fmt.Fprintf(f, `{"type":"assistant","cwd":%q,"message":"did kant work"}`+"\n", kwt)
-	f.Close()
+	w.idleAppend(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl"), fmt.Sprintf(`{"type":"assistant","cwd":%q,"message":"did kant work"}`, kwt))
 	kantFP, _ := fingerprint(kwt)
 
 	w.approve(w.laptop, restoreScript)

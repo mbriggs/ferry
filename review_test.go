@@ -36,7 +36,6 @@ case "$1 $2" in
 "block call") echo '{"records":[{"state":"idle","app":"claude-code"}]}' ;;
 esac
 `)
-	w.path = filepath.Join(w.root, "bin") + string(os.PathListSeparator) + os.Getenv("PATH")
 	return log
 }
 
@@ -211,9 +210,10 @@ func TestGitHooksTravel(t *testing.T) {
 // closed; a session with anything left in it stays.
 func TestEmptyRexSessionIsClosed(t *testing.T) {
 	for _, blocks := range []string{`[]`, `[{"block_id":"block:shell"}]`} {
-		w := newWorld(t)
+		w := newSerialWorld(t)
 		log := filepath.Join(w.root, "rex.log")
 		writeExec(t, filepath.Join(w.root, "bin", "rex"), "#!/bin/sh\necho \"$*\" >> "+log+"\ncase \"$1 $2\" in \"block ls\") echo '{\"blocks\":"+blocks+"}' ;; esac\n")
+		t.Setenv("PATH", w.path)
 		closeIfEmpty("session:launched")
 		data, _ := os.ReadFile(log)
 		killed := strings.Contains(string(data), "kill session:launched")

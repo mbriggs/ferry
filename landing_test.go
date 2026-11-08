@@ -28,8 +28,9 @@ new) n=$(grep -c '^new ' "`+log+`")
   if [ ! -e "$root/no-register" ] && [ -n "$id" ]; then
     mkdir -p "$HOME/.claude/sessions"
     entry="{\"pid\":`+fmt.Sprint(os.Getpid())+`,\"sessionId\":\"$id\",\"status\":\"idle\"}"
-    if grep -q 'No, exit' "$root/rex-screen"; then
-      # Claude registers only once the trust dialog is accepted.
+    if [ ! -e "$root/trusted" ] && grep -q 'No, exit' "$root/rex-screen"; then
+      # Claude registers only once the trust dialog is accepted, and shows
+      # none in a folder it trusts.
       echo "$entry" > "$root/pending"; echo "$HOME/.claude/sessions/fake-$n.json" > "$root/pending-path"
     else
       echo "$entry" > "$HOME/.claude/sessions/fake-$n.json"
@@ -50,7 +51,6 @@ ls) echo '{"sessions":[]}' ;;
 esac
 `)
 	os.Chmod(filepath.Join(bin, "rex"), 0o755)
-	w.path = bin + string(os.PathListSeparator) + os.Getenv("PATH")
 	return log
 }
 
@@ -152,6 +152,7 @@ func TestTrustIsAnsweredOnlyWhenKantDoesntTrustTheFolder(t *testing.T) {
 			w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
 			if kantTrusts {
 				w.write(w.kant, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, kwt))
+				w.write(w.root, "trusted", "")
 			}
 			w.mustFerry(wt, "to", "kant", "--yes")
 			answered := countLines(log, "send-key") > 0
@@ -195,7 +196,7 @@ func TestTrustIsNotAnsweredFromConversationText(t *testing.T) {
 // Liveness can't see it: a rerun would start a second agent, and a `ferry
 // from` would park the transcript under it.
 func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
-	w := newWorld(t)
+	w := newSerialWorld(t)
 	log := w.fakeRex("Accessing workspace\n ❯ No, exit\n   Yes, I trust this folder\n")
 	w.write(w.root, "no-register", "")
 	t.Setenv("PATH", w.path)
@@ -243,9 +244,7 @@ func TestLandingRerunSendsTurnsAddedOnTheSource(t *testing.T) {
 	}
 	sent := w.record(taskKey("src/app-wt/fix-auth")).Source.Size
 	src := filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")
-	f, _ := os.OpenFile(src, os.O_APPEND|os.O_WRONLY, 0)
-	fmt.Fprintf(f, `{"type":"user","cwd":%q,"message":"added on the laptop after the failed run"}`+"\n", wt)
-	f.Close()
+	w.idleAppend(src, fmt.Sprintf(`{"type":"user","cwd":%q,"message":"added on the laptop after the failed run"}`, wt))
 
 	// While an agent still has it open, the rerun waits for you to exit it.
 	w.liveAgent(w.laptop, sessionID)
@@ -272,7 +271,7 @@ func TestLandingRerunSendsTurnsAddedOnTheSource(t *testing.T) {
 // A Launch that a dead ferry left running must not start a second agent next
 // to one you opened in the meantime.
 func TestLaunchRefusesASessionAlreadyLoaded(t *testing.T) {
-	w := newWorld(t)
+	w := newSerialWorld(t)
 	log := w.fakeRex("auto mode on")
 	t.Setenv("PATH", w.path)
 	w.liveAgent(w.kant, kantSessionID)

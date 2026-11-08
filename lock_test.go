@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -20,7 +19,7 @@ func TestSecondHandoffOfTheSameTaskIsRefused(t *testing.T) {
 
 	first := exec.Command(ferryBin, "to", "kant", "--yes", "--no-launch")
 	first.Dir = wt
-	first.Env = append(os.Environ(), "HOME="+w.laptop)
+	first.Env = w.env(w.laptop)
 	var out bytes.Buffer
 	first.Stdout, first.Stderr = &out, &out
 	if err := first.Start(); err != nil {

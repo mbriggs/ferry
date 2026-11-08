@@ -26,7 +26,7 @@ func TestPullResumesInThisTerminal(t *testing.T) {
 	w.approve(w.kant, dehydrateScript)
 	cmd := inTerminal(t, ferryBin, "from", "kant", "fix-auth", "--yes")
 	cmd.Dir = w.laptop
-	cmd.Env = append(os.Environ(), "HOME="+w.laptop, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = w.env(w.laptop)
 	out, err := answer(cmd, "y") // restore on the laptop always asks
 	if err != nil {
 		t.Fatalf("from: %v\n%s", err, out)
@@ -61,7 +61,7 @@ func TestPullAsksBeforeResumingWithChangedClaudeConfig(t *testing.T) {
 	w.approve(w.kant, dehydrateScript)
 	cmd := inTerminal(t, ferryBin, "from", "kant", "fix-auth", "--yes")
 	cmd.Dir = w.laptop
-	cmd.Env = append(os.Environ(), "HOME="+w.laptop, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = w.env(w.laptop)
 	out, err := answer(cmd, "y", "n") // yes to restore, no to starting claude
 	if err != nil {
 		t.Fatalf("from: %v\n%s", err, out)
@@ -91,6 +91,22 @@ func inTerminal(t *testing.T, argv ...string) *exec.Cmd {
 	return exec.Command(script, append([]string{"-q", "/dev/null"}, argv...)...)
 }
 
+// termQuery is the background-color query termenv sends when ferry starts
+// on a terminal (bubbletea's init asks lipgloss for the background), followed
+// by a cursor-position request.
+const termQuery = "\x1b]11;?\x1b\\\x1b[6n"
+
+// answerTermQueries replies to each new termQuery in out the way a terminal
+// does. script's pty doesn't answer, so without this every ferry started in
+// it waits out termenv's 5-second timeout. It returns how many queries out
+// holds, all now answered.
+func answerTermQueries(out string, replied int, stdin io.Writer) int {
+	for c := strings.Count(out, termQuery); replied < c; replied++ {
+		io.WriteString(stdin, "\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[1;1R")
+	}
+	return replied
+}
+
 // answer runs cmd and types one answer each time a [y/N] prompt appears,
 // keeping stdin open until it exits, and returns everything it printed.
 func answer(cmd *exec.Cmd, answers ...string) ([]byte, error) {
@@ -108,10 +124,11 @@ func answer(cmd *exec.Cmd, answers ...string) ([]byte, error) {
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
-		asked := 0
+		asked, replied := 0, 0
 		for {
 			n, err := pr.Read(buf)
 			out.Write(buf[:n])
+			replied = answerTermQueries(out.String(), replied, stdin)
 			for c := strings.Count(out.String(), "[y/N]"); asked < c; asked++ {
 				if asked < len(answers) {
 					io.WriteString(stdin, answers[asked]+"\n")
@@ -146,7 +163,7 @@ func TestPullRerunDoesNotStartASecondAgentHere(t *testing.T) {
 	run := func() ([]byte, error) {
 		cmd := inTerminal(t, ferryBin, "from", "kant", "fix-auth", "--yes")
 		cmd.Dir = w.laptop
-		cmd.Env = append(os.Environ(), "HOME="+w.laptop, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		cmd.Env = w.env(w.laptop)
 		return answer(cmd, "y")
 	}
 	if out, err := run(); err == nil {
@@ -182,7 +199,7 @@ func TestRunPromptsNeedArrowAndEnter(t *testing.T) {
 		// script's terminal starts at 0x0, where huh has nowhere to draw.
 		cmd := inTerminal(t, "/bin/sh", "-c", "stty cols 120 rows 40; exec "+ferryBin+" from kant fix-auth --yes --no-launch")
 		cmd.Dir = w.laptop
-		cmd.Env = append(os.Environ(), "HOME="+w.laptop, "FERRY_PLAIN=", "TERM=xterm-256color")
+		cmd.Env = w.env(w.laptop, "FERRY_PLAIN=", "TERM=xterm-256color")
 		out, err := typeAt(cmd, "run this restore", tc.keys)
 		if err != nil {
 			t.Fatalf("%q: %v\n%s", tc.keys, err, out)
@@ -210,10 +227,11 @@ func typeAt(cmd *exec.Cmd, marker, keys string) ([]byte, error) {
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
-		typed := false
+		typed, replied := false, 0
 		for {
 			n, err := pr.Read(buf)
 			out.Write(buf[:n])
+			replied = answerTermQueries(out.String(), replied, stdin)
 			if !typed && strings.Contains(out.String(), marker) {
 				typed = true
 				time.Sleep(300 * time.Millisecond) // let the form take the terminal
