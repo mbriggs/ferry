@@ -129,3 +129,36 @@ func answer(cmd *exec.Cmd, answers ...string) ([]byte, error) {
 	stdin.Close()
 	return out.Bytes(), err
 }
+
+// A rerun that finishes a pull after you already resumed the session here
+// by hand doesn't start a second agent on it.
+func TestPullRerunDoesNotStartASecondAgentHere(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.approve(w.kant, dehydrateScript)
+	// The laptop's restore fails, so the pull stops after the commit point.
+	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), ".ferry/restore", "#!/bin/sh\ntest -f \"$HOME/allow-restore\" || exit 1\n")
+	bin := filepath.Join(w.root, "bin")
+	ran := filepath.Join(w.root, "claude-ran")
+	writeExec(t, filepath.Join(bin, "claude"), "#!/bin/sh\n[ \"$1\" = --resume ] || { echo '2.1.0 (Claude Code)'; exit 0; }\ntouch "+ran+"\n")
+	run := func() ([]byte, error) {
+		cmd := inTerminal(t, ferryBin, "from", "kant", "fix-auth", "--yes")
+		cmd.Dir = w.laptop
+		cmd.Env = append(os.Environ(), "HOME="+w.laptop, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		return answer(cmd, "y")
+	}
+	if out, err := run(); err == nil {
+		t.Fatalf("restore should have failed:\n%s", out)
+	}
+	// You resume it by hand, then rerun the pull to finish it.
+	w.liveAgent(w.laptop, sessionID)
+	w.write(w.laptop, "allow-restore", "")
+	out, err := run()
+	if err != nil {
+		t.Fatalf("rerun: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "already running here") || exists(ran) {
+		t.Fatalf("started a second agent on a loaded session:\n%s", out)
+	}
+}

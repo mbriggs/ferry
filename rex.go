@@ -138,6 +138,9 @@ func (l *Local) StopAgent(q StopReq) error {
 	// The agent's own environment names its pane exactly. The record's Rex
 	// session is the fallback, for where that can't be read. Either way /exit
 	// is only typed into a pane that Rex says is running this kind of agent.
+	// A session from the record is one ferry made, with the agent as its
+	// only command, so it's left empty once the agent exits.
+	recorded := q.RexSession
 	app := rexApp(q.Session.Agent)
 	block, state := "", ""
 	if sess, b := rexOfPID(agentPID(l, q.Session, live)); sess != "" && b != "" {
@@ -168,12 +171,34 @@ func (l *Local) StopAgent(q StopReq) error {
 		deadline := time.Now().Add(6 * time.Second)
 		for time.Now().Before(deadline) {
 			if live, err := l.Liveness(q.Session); err == nil && (!live.Live || live.Settling) {
-				return waitExit(pid)
+				if err := waitExit(pid); err != nil {
+					return err
+				}
+				if recorded != "" {
+					closeIfEmpty(recorded)
+				}
+				return nil
 			}
 			time.Sleep(300 * time.Millisecond)
 		}
 	}
 	return errors.New("sent /exit but the agent is still running; exit it by hand")
+}
+
+// closeIfEmpty kills a Rex session that has no blocks left, as one ferry
+// launched an agent in is once the agent exits. A session with anything
+// still in it is left alone.
+func closeIfEmpty(session string) {
+	out, err := rexRun("", "block", "ls", "-s", session, "--json")
+	if err != nil {
+		return
+	}
+	var ls struct {
+		Blocks []json.RawMessage `json:"blocks"`
+	}
+	if json.Unmarshal([]byte(out), &ls) == nil && len(ls.Blocks) == 0 {
+		rexRun("", "kill", session)
+	}
 }
 
 // waitExit waits for a process that has released its session to finish

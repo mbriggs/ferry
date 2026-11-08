@@ -575,11 +575,20 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 				step("claude", "config Claude loads here, changed by the handoff: %s", strings.Join(changed, ", "))
 			}
 		}
-		if dst.IsLocal() && !opts.NoLaunch && interactive() &&
-			(len(changed) == 0 || confirm("start claude here now? hooks in that config run as it starts")) {
-			here = argv
-			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv[:len(argv)-1]))
-			break
+		if dst.IsLocal() && !opts.NoLaunch && interactive() {
+			// A rerun can come after you resumed the session here by hand;
+			// starting it again would put two agents on one transcript.
+			if live, err := dst.Liveness(*installed); err != nil {
+				return err
+			} else if live.Live && !live.Settling {
+				step("resume", "%s is already running here (%s); not starting another", short(installed.ID), live.Detail)
+				break
+			}
+			if len(changed) == 0 || confirm("start claude here now? hooks in that config run as it starts") {
+				here = argv
+				step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv[:len(argv)-1]))
+				break
+			}
 		}
 		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
 			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv))

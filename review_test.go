@@ -201,3 +201,19 @@ func TestGitHooksTravel(t *testing.T) {
 		t.Fatalf("kant's hook was installed without a yes: %q", got)
 	}
 }
+
+// Once its agent exits, a Rex session ferry launched is empty and gets
+// closed; a session with anything left in it stays.
+func TestEmptyRexSessionIsClosed(t *testing.T) {
+	for _, blocks := range []string{`[]`, `[{"block_id":"block:shell"}]`} {
+		w := newWorld(t)
+		log := filepath.Join(w.root, "rex.log")
+		writeExec(t, filepath.Join(w.root, "bin", "rex"), "#!/bin/sh\necho \"$*\" >> "+log+"\ncase \"$1 $2\" in \"block ls\") echo '{\"blocks\":"+blocks+"}' ;; esac\n")
+		closeIfEmpty("session:launched")
+		data, _ := os.ReadFile(log)
+		killed := strings.Contains(string(data), "kill session:launched")
+		if killed != (blocks == `[]`) {
+			t.Fatalf("blocks %s: killed = %v\n%s", blocks, killed, data)
+		}
+	}
+}
