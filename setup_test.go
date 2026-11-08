@@ -46,6 +46,29 @@ func TestSetupWritesTheHostAndInstallsFerry(t *testing.T) {
 	}
 }
 
+// A dry run that would change the hosts entry writes nothing, and doesn't
+// end with doctor's checks, which would read the entry it didn't write.
+func TestSetupDryRunWritesNothingAndSkipsTheChecks(t *testing.T) {
+	w := newWorld(t)
+	w.fakeSSH(false)
+	before := w.read(w.laptop, ".config/ferry/hosts")
+	for _, args := range [][]string{
+		{"setup", "kant2", "exec:" + w.kant, "--dry-run"},
+		{"setup", "kant2", "mbriggs@fakehost", "--dry-run"},
+	} {
+		out := w.mustFerry(w.laptop, args...)
+		if !strings.Contains(out, "would set kant2") || !strings.Contains(out, "dry run, nothing written") || strings.Contains(out, "isn't in ~/.config/ferry/hosts") {
+			t.Fatalf("%v:\n%s", args, out)
+		}
+		if got := w.read(w.laptop, ".config/ferry/hosts"); got != before {
+			t.Fatalf("%v changed the hosts file: %q", args, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(w.kant, ".local/bin/ferry")); err == nil {
+		t.Fatal("a dry run installed ferry")
+	}
+}
+
 func TestDoctorPassesForAWorkingPair(t *testing.T) {
 	w := newWorld(t)
 	out := w.mustFerry(w.laptop, "doctor")

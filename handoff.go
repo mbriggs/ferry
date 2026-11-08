@@ -137,7 +137,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		if live, err := dst.Liveness(*sess); err != nil {
 			return err
 		} else if live.Live && !live.Settling {
-			return fmt.Errorf("%s: %s already has this session loaded", di.Name, live.Detail)
+			return fmt.Errorf("%s already has this session loaded (%s)", di.Name, live.Detail)
 		}
 		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
 		switch {

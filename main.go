@@ -12,9 +12,11 @@ import (
 
 const usage = `usage:
   ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]
-  ferry from HOST [NAME] [--yes] [--no-launch]
+               [--force] [--force-version]
+  ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version]
   ferry ls HOST
   ferry setup HOST [USER@HOST] [--dry-run]
+  ferry setup --claude-rules [--dry-run]
   ferry doctor [HOST...]
   ferry push [HOST...] [--dry-run]
   ferry version
@@ -22,7 +24,9 @@ const usage = `usage:
 HOST is a name in ~/.config/ferry/hosts ("kant mbriggs@kant" per line), or an
 ssh target. Run "ferry to" inside the worktree you want to hand off. "ferry
 from" with no NAME lists the agents running on HOST and asks which to pull;
-NAME can be a task name, a Rex session label, or a path like src/app.
+NAME can be a task name, a Rex session label, the first 8 or more characters
+of a running agent's session id, or a path like src/app. --force takes a task
+whose record names another owner; --force-version resumes on an older agent.
 `
 
 func main() {

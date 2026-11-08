@@ -516,7 +516,7 @@ func (l *Local) PlaceSession(q PlaceReq) error {
 	if live, err := l.Liveness(q.Session); err != nil {
 		return err
 	} else if live.Live && !live.Settling {
-		return fmt.Errorf("%s has session %s loaded here; exit it, then run this again", live.Detail, q.Session.ID)
+		return fmt.Errorf("session %s is loaded here (%s); exit it, then run this again", q.Session.ID, live.Detail)
 	}
 	proj := filepath.Join(".claude", "projects", claudeSlug(q.Session.Cwd))
 	replaced := l.stateDir("parked", q.Task+"-replaced-"+time.Now().Format("20060102-150405"))

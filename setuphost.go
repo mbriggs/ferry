@@ -25,6 +25,9 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 	if target == "" {
 		target = old
 	}
+	// A dry run that would change the entry skips doctor's checks at the
+	// end: they read the hosts file, which still has the old entry or none.
+	unwritten := dryRun && !(found && old == target)
 	switch {
 	case found && old == target:
 		step("hosts", "%s -> %s (already set)", name, target)
@@ -37,7 +40,7 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 		step("hosts", "%s -> %s, in ~/.config/ferry/hosts", name, target)
 	}
 	if strings.HasPrefix(target, "exec:") {
-		return finishSetup(l, name)
+		return finishSetup(l, name, unwritten)
 	}
 
 	took, err := sshCheck(target)
@@ -53,7 +56,7 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 	if err := pushFerry(name, target, ferryPath, dryRun); err != nil {
 		return fail(err)
 	}
-	return finishSetup(l, name)
+	return finishSetup(l, name, unwritten)
 }
 
 // pushFerry puts this build of ferry at ferryPath on target, unless it
@@ -97,7 +100,11 @@ func pushFerry(name, target, ferryPath string, dryRun bool) error {
 	return nil
 }
 
-func finishSetup(l *Local, name string) int {
+func finishSetup(l *Local, name string, unwritten bool) int {
+	if unwritten {
+		fmt.Println("dry run, nothing written")
+		return 0
+	}
 	fmt.Println()
 	r := doctorHost(l, name)
 	r.print(name)
