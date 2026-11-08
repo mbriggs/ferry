@@ -179,7 +179,10 @@ func (l *Local) lockRemoteCall(task string) (release func(), err error) {
 	return release, err
 }
 
-// remoteLockWait outlasts the longest call, a Launch waiting for its agent.
+// remoteLockWait is how long a call waits for one left running by a dead
+// ferry. It covers a Launch waiting for its agent (launchTimeout plus
+// answerTrust). A restore hook or a large Import can hold the lock longer;
+// then the rerun fails with the message above, and running it again works.
 const remoteLockWait = 3 * time.Minute
 
 var errLockHeld = errors.New("lock held")
