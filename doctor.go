@@ -150,7 +150,9 @@ func doctorHost(l *Local, name string) *report {
 		r.fail("ferry", fix, "%v", err)
 		return r
 	}
-	if info.Ferry == version {
+	if info.Protocol != protocol {
+		r.fail("ferry", "ferry setup "+name+" updates it", "%s there speaks protocol %d, this build speaks %d; handoffs will refuse", info.Ferry, info.Protocol, protocol)
+	} else if info.Ferry == version {
 		r.ok("ferry", "%s", info.Ferry)
 	} else {
 		r.warn("ferry", "ferry setup "+name+" updates it", "%s there, %s here; both sides should run the same build", info.Ferry, version)

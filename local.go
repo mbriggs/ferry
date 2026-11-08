@@ -49,13 +49,14 @@ func (l *Local) Info() (Info, error) {
 	}
 	_, rexErr := lookTool("rex")
 	return Info{
-		Name:   name,
-		Home:   l.Home,
-		OS:     runtime.GOOS,
-		Claude: toolVersion("claude", "--version"),
-		Codex:  toolVersion("codex", "--version"),
-		Rex:    rexErr == nil,
-		Ferry:  version,
+		Name:     name,
+		Protocol: protocol,
+		Home:     l.Home,
+		OS:       runtime.GOOS,
+		Claude:   toolVersion("claude", "--version"),
+		Codex:    toolVersion("codex", "--version"),
+		Rex:      rexErr == nil,
+		Ferry:    version,
 	}, nil
 }
 

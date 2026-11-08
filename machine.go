@@ -50,14 +50,22 @@ type Machine interface {
 	IsLocal() bool
 }
 
+// protocol is the version of the `ferry remote` protocol. Bump it when a
+// change means a peer built before it can't serve this one: an op removed or
+// renamed, a request or response it would misread, or an op this side now
+// needs. Adding an optional field doesn't need a bump. Both sides of a
+// handoff must agree; a peer that predates the field reports 0.
+const protocol = 1
+
 type Info struct {
-	Name   string `json:"name"`
-	Home   string `json:"home"`
-	OS     string `json:"os"`
-	Claude string `json:"claude"`
-	Codex  string `json:"codex"`
-	Rex    bool   `json:"rex"`
-	Ferry  string `json:"ferry"`
+	Name     string `json:"name"`
+	Protocol int    `json:"protocol"`
+	Home     string `json:"home"`
+	OS       string `json:"os"`
+	Claude   string `json:"claude"`
+	Codex    string `json:"codex"`
+	Rex      bool   `json:"rex"`
+	Ferry    string `json:"ferry"`
 }
 
 // --- remote transport ----------------------------------------------------
@@ -92,6 +100,7 @@ type Remote struct {
 	// binary; Target is "" for the exec: test transport.
 	Target    string
 	FerryPath string
+	checked   bool // the far side's protocol has been compared with ours
 	prefix    []string
 	env       []string
 	gitURL    func(rel string) string
@@ -133,6 +142,19 @@ func (r *Remote) String() string           { return r.Label }
 // survives the remote shell. stdin and stdout carry tar streams for Export
 // and Import; otherwise stdout carries the JSON response.
 func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.Writer) error {
+	// Before the first real call, make sure the far side speaks this
+	// protocol, so a stale binary fails with a fix instead of a decode error
+	// partway through a handoff.
+	if !r.checked && op != "info" {
+		r.checked = true
+		info, err := r.Info()
+		if err != nil {
+			return err
+		}
+		if info.Protocol != protocol {
+			return fmt.Errorf("%s runs ferry %s (protocol %d), this is %s (protocol %d); run `ferry setup %s` to update it", r.Label, info.Ferry, info.Protocol, version, protocol, r.Label)
+		}
+	}
 	arg, err := json.Marshal(req)
 	if err != nil {
 		return err

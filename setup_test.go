@@ -86,3 +86,25 @@ func TestLsOnTheMachineThatKeepsTheRecords(t *testing.T) {
 		t.Fatalf("ferry to itself should refuse: %v\n%s", err, out)
 	}
 }
+
+// A far side running a ferry from before the current protocol is refused
+// before any work, with the command that fixes it.
+func TestOlderProtocolIsRefusedUpFront(t *testing.T) {
+	w := newWorld(t)
+	log := filepath.Join(w.root, "ssh.log")
+	writeExec(t, filepath.Join(w.root, "bin", "ssh"), "#!/bin/sh\necho \"$*\" >> "+log+"\ncase \"$*\" in *' true') exit 0 ;; *' remote info'*) echo '{\"name\":\"kant\",\"ferry\":\"v0.0.1\"}' ;; *) exit 1 ;; esac\n")
+	w.write(w.laptop, ".config/ferry/hosts", "kant mbriggs@fakehost\n")
+	for _, args := range [][]string{{"ls", "kant"}, {"from", "kant"}} {
+		out, err := w.ferry(w.laptop, args...)
+		if err == nil || !strings.Contains(out, "protocol 0") || !strings.Contains(out, "ferry setup kant") {
+			t.Fatalf("ferry %v should refuse the old peer: %v\n%s", args, err, out)
+		}
+	}
+	if data, _ := os.ReadFile(log); strings.Contains(string(data), "record-list") || strings.Contains(string(data), "agents") {
+		t.Fatalf("called the old peer before checking:\n%s", data)
+	}
+	out, _ := w.ferry(w.laptop, "doctor", "kant")
+	if !strings.Contains(out, "speaks protocol 0") {
+		t.Fatalf("doctor should name the mismatch:\n%s", out)
+	}
+}

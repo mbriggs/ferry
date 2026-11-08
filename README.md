@@ -27,7 +27,7 @@ ferry ls kant
    ferry setup kant mbriggs@kant
    ```
 
-   This writes `~/.config/ferry/hosts`, checks ssh, installs this build of ferry on kant at `~/.local/bin/ferry` (from `dist/`, so run `make dist` first, or run setup from a release download), and checks the pair. Run it again after upgrading ferry to update kant's copy.
+   This writes `~/.config/ferry/hosts`, checks ssh, installs this build of ferry on kant at `~/.local/bin/ferry` (from `dist/`, so run `make dist` first, or run setup from a release download), and checks the pair. Run it again after upgrading ferry to update kant's copy. Both machines must speak the same `ferry remote` protocol; with an older ferry on kant, every command stops before doing anything and says to run `ferry setup kant`.
 
 4. `ferry doctor` rechecks everything any time: both machines' ferry builds, names, ssh, the agents each side can find (kant's through its login shell's PATH), Rex, and the task records. Each failure comes with a fix.
 
