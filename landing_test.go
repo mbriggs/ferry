@@ -197,7 +197,11 @@ func TestTrustIsNotAnsweredFromConversationText(t *testing.T) {
 // from` would park the transcript under it.
 func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
 	w := newSerialWorld(t)
-	log := w.fakeRex("Accessing workspace\n ❯ No, exit\n   Yes, I trust this folder\n")
+	// kant trusts the folder, so no trust dialog stands between the launch
+	// and the wait for registration.
+	log := w.fakeRex("auto mode on")
+	w.write(w.kant, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, w.kant))
+	w.write(w.root, "trusted", "")
 	w.write(w.root, "no-register", "")
 	t.Setenv("PATH", w.path)
 	t.Setenv("HOME", w.kant)
@@ -206,7 +210,7 @@ func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
 
 	l := &Local{Home: w.kant}
 	s := Session{Agent: agentClaude, ID: sessionID}
-	_, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: true})
+	_, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: false})
 	if err == nil || !strings.Contains(err.Error(), "didn't load the session") {
 		t.Fatalf("Launch = %v, want a timeout", err)
 	}
@@ -215,7 +219,7 @@ func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
 	}
 
 	os.Remove(filepath.Join(w.root, "no-register"))
-	if id, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: true}); err != nil || id != "session:fake-2" {
+	if id, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: false}); err != nil || id != "session:fake-2" {
 		t.Fatalf("Launch of an agent that registers = %q, %v", id, err)
 	}
 }
