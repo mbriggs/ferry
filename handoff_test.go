@@ -59,6 +59,18 @@ func newWorld(t *testing.T) *world {
 	bin := filepath.Join(root, "bin")
 	writeExec(t, filepath.Join(bin, "claude"), "#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
 	writeExec(t, filepath.Join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.100.0'\n")
+	// rex and ssh would reach the real Rex server and network. A test that
+	// needs them writes its own over these (fakeRex, paneRex, fakeSSH); any
+	// call that reaches these fails the test, even if ferry handled the error.
+	stray := filepath.Join(root, "stray-calls")
+	for _, tool := range []string{"rex", "ssh"} {
+		writeExec(t, filepath.Join(bin, tool), "#!/bin/sh\necho \""+tool+" $*\" >> "+stray+"\necho 'unexpected "+tool+" call in a test' >&2\nexit 1\n")
+	}
+	t.Cleanup(func() {
+		if data, err := os.ReadFile(stray); err == nil {
+			t.Errorf("a test reached rex or ssh without a fake:\n%s", data)
+		}
+	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return w
 }
