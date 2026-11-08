@@ -53,25 +53,36 @@ func taskHere(l *Local, dir string) (task, error) {
 	return task{Key: taskKey(wtRel), Name: filepath.Base(top), WtRel: wtRel, RepoRel: repoRel}, nil
 }
 
+// move is one handoff in progress: the machine giving the task up, the one
+// taking it, the hub that keeps the ownership record, and the record itself.
+type move struct {
+	src, dst, hub Machine
+	t             task
+	opts          handoffOpts
+	si, di        Info
+	direction     string // "to" or "from", as typed
+	rec           *Record
+}
+
 // handoff moves task t from src to dst. hub keeps the ownership record; it is
-// always the remote machine, because the laptop drives every handoff.
+// always the remote machine, because the laptop drives every handoff. Each
+// step below is a method on move, in the order they run.
 func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
-	direction := "to"
+	m := &move{src: src, dst: dst, hub: hub, t: t, opts: opts, direction: "to"}
 	if !src.IsLocal() {
-		direction = "from"
+		m.direction = "from"
 	}
-	si, err := src.Info()
-	if err != nil {
+	var err error
+	if m.si, err = src.Info(); err != nil {
 		return err
 	}
-	di, err := dst.Info()
-	if err != nil {
+	if m.di, err = dst.Info(); err != nil {
 		return err
 	}
-	if si.Name == di.Name {
-		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", si.Name)
+	if m.si.Name == m.di.Name {
+		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", m.si.Name)
 	}
-	for _, i := range []Info{si, di} {
+	for _, i := range []Info{m.si, m.di} {
 		if err := checkRsync(i.Name, i.Rsync); err != nil {
 			return err
 		}
@@ -80,45 +91,114 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	clock = newStopwatch()
 	defer clock.report()
 
-	rec, err := hub.RecordGet(t.Key)
-	if err != nil {
+	if m.rec, err = hub.RecordGet(t.Key); err != nil {
 		return err
 	}
 
 	// A rerun after the commit point only needs to finish the last steps, and
 	// it uses the sessions this handoff recorded rather than searching again.
-	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
-		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
-		if err := resendIfResumed(src, dst, hub, t, rec, si, di); err != nil {
+	if r := m.rec; r != nil && r.State == stateLanding && r.Owner == m.di.Name && r.From == m.si.Name {
+		step("owner", "%s owns %s (generation %d); finishing the handoff", m.di.Name, t.Name, r.Generation)
+		if err := m.resendIfResumed(); err != nil {
 			return err
 		}
-		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts, nil)
+		return m.finish(r.Source, r.Installed, nil)
 	}
 
-	// Whether this machine may hand the task off. It's decided before the
-	// session step, which may stop an agent on the other machine.
-	resuming := false
-	if rec != nil {
-		if rec.WtRel != t.WtRel || rec.RepoRel != t.RepoRel {
-			return fmt.Errorf("task record %s is for ~/%s, not ~/%s", t.Key, rec.WtRel, t.WtRel)
-		}
-		resuming = rec.State == stateHandingOff && rec.From == si.Name && rec.To == di.Name
-		switch {
-		case resuming:
-			step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
-		case rec.State == stateHandingOff && !opts.Force:
-			return fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
-		case rec.State == stateLanding && !opts.Force:
-			return fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
-		case rec.Owner != si.Name && !opts.Force:
-			return fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
-		}
+	resuming, err := m.mayHandOff()
+	if err != nil {
+		return err
+	}
+	sess, err := m.stopAgent()
+	if err != nil {
+		return err
+	}
+	if err := m.claim(sess, resuming); err != nil {
+		return err
+	}
+	clock.lap("preflight")
+
+	// What Claude will load here, before anything from the other machine
+	// lands, so finish() can tell what the handoff changed.
+	var cfgBefore map[string]string
+	if lm, ok := dst.(*Local); ok && sess != nil && sess.Agent == agentClaude {
+		cfgBefore = claudeConfig(claudeDirs(lm.abs(t.WtRel), lm.abs(mustRel(m.si.Home, sess.Cwd))))
 	}
 
-	// --- session -----------------------------------------------------------
-	find := FindSessionReq{Agent: opts.Agent, ID: opts.SessionID, CwdRel: t.WtRel}
+	if err := m.dehydrate(); err != nil {
+		return err
+	}
+	clock.lap("dehydrate")
+
+	snap, err := m.sendCode()
+	if err != nil {
+		return err
+	}
+	clock.lap("git")
+
+	extras, sentExtras, err := m.sendExtras()
+	if err != nil {
+		return err
+	}
+	clock.lap("extras")
+
+	if err := m.sendGitHooks(); err != nil {
+		return err
+	}
+
+	sess, installed, err := m.stageSession(sess)
+	if err != nil {
+		return err
+	}
+	clock.lap("session")
+
+	if err := m.commit(snap, sess, installed, extras, sentExtras); err != nil {
+		return err
+	}
+	return m.finish(sess, installed, cfgBefore)
+}
+
+// save writes the record as the next generation. It fails if anything else
+// wrote the record since this run read it.
+func (m *move) save() error {
+	expect := m.rec.Generation
+	m.rec.Generation = expect + 1
+	return m.hub.RecordPut(RecordPutReq{Expect: expect, Record: *m.rec})
+}
+
+// mayHandOff decides whether src may hand the task off, and reports whether
+// this run continues one src -> dst already started. It's decided before
+// stopAgent, which may stop an agent on the other machine.
+func (m *move) mayHandOff() (bool, error) {
+	rec, si, t := m.rec, m.si, m.t
+	if rec == nil {
+		return false, nil
+	}
+	if rec.WtRel != t.WtRel || rec.RepoRel != t.RepoRel {
+		return false, fmt.Errorf("task record %s is for ~/%s, not ~/%s", t.Key, rec.WtRel, t.WtRel)
+	}
+	resuming := rec.State == stateHandingOff && rec.From == si.Name && rec.To == m.di.Name
 	switch {
-	case opts.SessionID != "":
+	case resuming:
+		step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
+	case rec.State == stateHandingOff && !m.opts.Force:
+		return false, fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
+	case rec.State == stateLanding && !m.opts.Force:
+		return false, fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
+	case rec.Owner != si.Name && !m.opts.Force:
+		return false, fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
+	}
+	return resuming, nil
+}
+
+// stopAgent finds the session to move and makes sure no agent has it
+// loaded, stopping an idle one in Rex on kant. It returns nil when the
+// worktree has no session, and the code moves alone.
+func (m *move) stopAgent() (*Session, error) {
+	src, rec, si, di, t := m.src, m.rec, m.si, m.di, m.t
+	find := FindSessionReq{Agent: m.opts.Agent, ID: m.opts.SessionID, CwdRel: t.WtRel}
+	switch {
+	case m.opts.SessionID != "":
 	case rec != nil && rec.State == stateHandingOff && rec.From == si.Name && rec.Source != nil:
 		find = FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID}
 	case rec != nil && rec.Session != "":
@@ -129,114 +209,113 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 	sess, err := src.FindSession(find)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	if sess != nil {
-		if err := sessionFits(si.Home, *sess, t); err != nil {
-			return err
-		}
-		step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
-		// Everything that can refuse runs before the agent is stopped: once
-		// it's gone from the live registry, a rerun can't find it that way.
-		if live, err := dst.Liveness(*sess); err != nil {
-			return err
-		} else if live.Live && !live.Settling {
-			return fmt.Errorf("%s already has this session loaded (%s)", di.Name, live.Detail)
-		}
-		have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
-		switch {
-		case have == "" || want == "":
-			step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
-		case versionLess(want, have) && !opts.ForceVersion:
-			return fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
-		default:
-			step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
-		}
-		live, err := settle(src, *sess)
-		if err != nil {
-			return err
-		}
-		if live.Live {
-			if src.IsLocal() {
-				return fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
-			}
-			step("agent", "%s: stopping the idle agent in rex", si.Name)
-			stop := StopReq{Session: *sess}
-			if rec != nil && rec.Owner == si.Name {
-				stop.RexSession, stop.Name = rec.RexSession, t.Name
-			}
-			if err := src.StopAgent(stop); err != nil {
-				return err
-			}
-			// The agent writes its last lines on the way out; the record keeps
-			// the session as it is once that stops, since a rerun compares
-			// against it.
-			if _, err := settle(src, *sess); err != nil {
-				return err
-			}
-			if sess, err = src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID}); err != nil {
-				return err
-			} else if sess == nil {
-				return fmt.Errorf("%s: the session disappeared after stopping the agent", si.Name)
-			}
-		}
-	} else {
+	if sess == nil {
 		step("agent", "no Claude or Codex session found for this worktree; moving code only")
+		return nil, nil
 	}
+	if err := sessionFits(si.Home, *sess, t); err != nil {
+		return nil, err
+	}
+	step("agent", "%s %s, %s", sess.Agent, short(sess.ID), humanSize(sess.Size))
+	// Everything that can refuse runs before the agent is stopped: once
+	// it's gone from the live registry, a rerun can't find it that way.
+	if live, err := m.dst.Liveness(*sess); err != nil {
+		return nil, err
+	} else if live.Live && !live.Settling {
+		return nil, fmt.Errorf("%s already has this session loaded (%s)", di.Name, live.Detail)
+	}
+	have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
+	switch {
+	case have == "" || want == "":
+		step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
+	case versionLess(want, have) && !m.opts.ForceVersion:
+		return nil, fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
+	default:
+		step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
+	}
+	live, err := settle(src, *sess)
+	if err != nil {
+		return nil, err
+	}
+	if !live.Live {
+		return sess, nil
+	}
+	if src.IsLocal() {
+		return nil, fmt.Errorf("%s; exit the agent, then run this again", live.Detail)
+	}
+	step("agent", "%s: stopping the idle agent in rex", si.Name)
+	stop := StopReq{Session: *sess}
+	if rec != nil && rec.Owner == si.Name {
+		stop.RexSession, stop.Name = rec.RexSession, t.Name
+	}
+	if err := src.StopAgent(stop); err != nil {
+		return nil, err
+	}
+	// The agent writes its last lines on the way out; the record keeps the
+	// session as it is once that stops, since a rerun compares against it.
+	if _, err := settle(src, *sess); err != nil {
+		return nil, err
+	}
+	if sess, err = src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID}); err != nil {
+		return nil, err
+	} else if sess == nil {
+		return nil, fmt.Errorf("%s: the session disappeared after stopping the agent", si.Name)
+	}
+	return sess, nil
+}
 
-	// --- claim -------------------------------------------------------------
-	if rec == nil {
-		rec = &Record{Task: t.Key, Name: t.Name, WtRel: t.WtRel, RepoRel: t.RepoRel, Owner: si.Name, State: stateOwned}
+// claim records the handoff as under way, src -> dst, unless this run
+// continues one that already is.
+func (m *move) claim(sess *Session, resuming bool) error {
+	t := m.t
+	if m.rec == nil {
+		m.rec = &Record{Task: t.Key, Name: t.Name, WtRel: t.WtRel, RepoRel: t.RepoRel, Owner: m.si.Name, State: stateOwned}
 		step("owner", "new task")
 	}
-	if !resuming {
-		expect := rec.Generation
-		rec.State, rec.From, rec.To, rec.Generation = stateHandingOff, si.Name, di.Name, expect+1
-		rec.Source, rec.Installed = sess, nil
-		if sess != nil {
-			rec.Agent, rec.Session = sess.Agent, sess.ID
-		}
-		if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
-			return err
-		}
+	if resuming {
+		return nil
 	}
-
-	clock.lap("preflight")
-
-	// What Claude will load here, before anything from the other machine
-	// lands, so finish() can tell what the handoff changed.
-	var cfgBefore map[string]string
-	if lm, ok := dst.(*Local); ok && sess != nil && sess.Agent == agentClaude {
-		cfgBefore = claudeConfig(claudeDirs(lm.abs(t.WtRel), lm.abs(mustRel(si.Home, sess.Cwd))))
+	rec := m.rec
+	rec.State, rec.From, rec.To = stateHandingOff, m.si.Name, m.di.Name
+	rec.Source, rec.Installed = sess, nil
+	if sess != nil {
+		rec.Agent, rec.Session = sess.Agent, sess.ID
 	}
+	return m.save()
+}
 
-	// --- dehydrate ---------------------------------------------------------
-	// Once a task has been on kant, the laptop's worktree holds code kant
-	// wrote, and dehydrate may run it (bin/rails, docker compose).
-	askDehydrate, dehydrateChanges := false, ""
+// dehydrate runs .ferry/dehydrate on src. Once a task has been on kant, the
+// laptop's worktree holds code kant wrote, and dehydrate may run it
+// (bin/rails, docker compose), so on the laptop it asks every time.
+func (m *move) dehydrate() error {
+	src, t := m.src, m.t
+	ask, changes := false, ""
 	if src.IsLocal() {
 		if _, err := git(src.GitURL(t.WtRel), "rev-parse", "--verify", "-q", sentRef(t.Key)); err == nil {
-			askDehydrate, dehydrateChanges = true, changeSummary(src.GitURL(t.WtRel), t.Key, "")
+			ask, changes = true, changeSummary(src.GitURL(t.WtRel), t.Key, "")
 		}
 	}
-	if _, err := runHook(src, si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: direction}, askDehydrate, dehydrateChanges); err != nil {
-		return err
-	}
+	_, err := runHook(src, m.si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: m.direction}, ask, changes)
+	return err
+}
 
-	clock.lap("dehydrate")
-
-	// --- code --------------------------------------------------------------
+// sendCode creates the repo on dst if it's missing, snapshots src's
+// worktree into refs/ferry/<task>/*, moves those refs, and has dst check out
+// the snapshot and verify it.
+func (m *move) sendCode() (SnapshotResult, error) {
+	src, dst, t, di, rec := m.src, m.dst, m.t, m.di, m.rec
 	ss, err := src.RepoState(t.RepoRel)
 	if err != nil {
-		return err
+		return SnapshotResult{}, err
 	}
 	ds, err := dst.RepoState(t.RepoRel)
 	if err != nil {
-		return err
+		return SnapshotResult{}, err
 	}
 	if ds.Exists && len(ds.Roots) > 0 && !sharesRoot(ss.Roots, ds.Roots) {
-		return fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", di.Name, t.RepoRel)
+		return SnapshotResult{}, fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", di.Name, t.RepoRel)
 	}
 	// A repo still on the placeholder branch was created by an earlier,
 	// interrupted run; finish creating it the same way.
@@ -244,152 +323,46 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if fresh {
 		step("repo", "%s has no %s; creating it", di.Name, t.RepoRel)
 		if err := dst.InitRepo(t.RepoRel); err != nil {
-			return err
+			return SnapshotResult{}, err
 		}
 		if err := moveRefs(src, dst, t.RepoRel, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
-			return err
+			return SnapshotResult{}, err
 		}
 		if err := dst.FinishRepo(FinishRepoReq{RepoRel: t.RepoRel, Branch: ss.Branch, Origin: ss.Origin}); err != nil {
-			return err
+			return SnapshotResult{}, err
 		}
 	} else {
 		step("repo", "%s: %s exists, same history", di.Name, t.RepoRel)
 	}
 	snap, err := src.Snapshot(SnapshotReq{WtRel: t.WtRel, Task: t.Key})
 	if err != nil {
-		return err
+		return SnapshotResult{}, err
 	}
 	step("snapshot", "branch %s at %s, %d changed paths", snap.Branch, snap.Base[:7], snap.Dirty)
 	ref := "+refs/ferry/" + t.Key + "/*:refs/ferry/" + t.Key + "/*"
 	if err := moveRefs(src, dst, t.RepoRel, ref); err != nil {
-		return err
+		return SnapshotResult{}, err
 	}
 	step("git", "moved refs/ferry/%s/* to %s", t.Key, di.Name)
 	previous := []string{rec.LastSent[di.Name], rec.Attempt}
 	if rec.Attempt != snap.Fingerprint {
-		expect := rec.Generation
-		rec.Attempt, rec.Generation = snap.Fingerprint, expect+1
-		if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
-			return err
+		rec.Attempt = snap.Fingerprint
+		if err := m.save(); err != nil {
+			return SnapshotResult{}, err
 		}
 	}
-	_, err = dst.Apply(ApplyReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: snap.Branch, Task: t.Key, Expected: snap.Fingerprint, Previous: previous, Fresh: fresh, Force: opts.Force})
-	if err != nil {
-		return err
+	if _, err := dst.Apply(ApplyReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: snap.Branch, Task: t.Key, Expected: snap.Fingerprint, Previous: previous, Fresh: fresh, Force: m.opts.Force}); err != nil {
+		return SnapshotResult{}, err
 	}
 	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
-	clock.lap("git")
-
-	extras, sentExtras, err := sendExtras(src, dst, t, rec, si, di, opts.Yes)
-	if err != nil {
-		return err
-	}
-	clock.lap("extras")
-
-	// --- git hooks -----------------------------------------------------------
-	// A hook runs on the next git command in the repo, so hooks coming to
-	// this machine from the other one are installed only with a yes on this
-	// run, like restore. Going the other way they're installed as they are.
-	srcHooks, err := src.GitHooks(t.RepoRel)
-	if err != nil {
-		return err
-	}
-	dstHooks, err := dst.GitHooks(t.RepoRel)
-	if err != nil {
-		return err
-	}
-	if send := hooksToSend(srcHooks, dstHooks); len(send) > 0 {
-		var names []string
-		for _, h := range send {
-			names = append(names, h.Name)
-		}
-		step("hooks", "git hooks from %s: %s", si.Name, strings.Join(names, ", "))
-		if !dst.IsLocal() || confirmRun("install these git hooks here? they run on git commands in this repo") {
-			if err := dst.InstallGitHooks(InstallGitHooksReq{RepoRel: t.RepoRel, Hooks: send}); err != nil {
-				return err
-			}
-		} else {
-			step("hooks", "skipped; %s's hooks stay as they were", di.Name)
-		}
-	}
-
-	// --- session -----------------------------------------------------------
-	// The session is staged on the receiver, with paths rewritten, but nothing
-	// live moves until after the commit point. A failure before then leaves
-	// the source exactly as it was.
-	var installed *Session
-	if sess != nil {
-		// Measure the session again just before sending it. finish() compares
-		// the source against this, so it must describe what was sent, not
-		// what was found before the steps above.
-		cur, err := src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID})
-		if err != nil {
-			return err
-		} else if cur == nil {
-			return fmt.Errorf("%s: session %s disappeared before it was sent", si.Name, short(sess.ID))
-		}
-		sess = cur
-		if installed, err = sendSession(src, dst, t, *sess, si, di); err != nil {
-			return err
-		}
-	}
-
-	clock.lap("session")
-
-	// --- commit ------------------------------------------------------------
-	expect := rec.Generation
-	if rec.LastSent == nil {
-		rec.LastSent = map[string]string{}
-	}
-	rec.LastSent[si.Name] = snap.Fingerprint
-	rec.Attempt = ""
-	// A resumed claim kept the Source it recorded; a rerun of finish()
-	// compares against the copy this run sent.
-	rec.Source, rec.Installed = sess, installed
-	delete(rec.LastSent, di.Name)
-	if rec.Extras == nil {
-		rec.Extras = map[string][]FileEntry{}
-	}
-	delete(rec.Extras, di.Name)
-	delete(rec.Extras, si.Name)
-	if sentExtras && len(extras) > 0 {
-		rec.Extras[si.Name] = extras
-	}
-	rec.State, rec.Owner, rec.Generation, rec.Branch, rec.RexSession = stateLanding, di.Name, expect+1, snap.Branch, ""
-	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
-		return err
-	}
-	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
-	if src.IsLocal() {
-		// What this machine sent, kept here where the other machine can't
-		// change it, for the change summary when the task comes back.
-		if _, err := git(src.GitURL(t.WtRel), "update-ref", sentRef(t.Key), taskRef(t.Key, "wip")); err != nil {
-			return err
-		}
-	}
-
-	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts, cfgBefore)
-}
-
-// sendSession copies a session into in/<task>/session on dst and stages it
-// in in/<task>/ready, with paths rewritten. Nothing live changes.
-func sendSession(src, dst Machine, t task, sess Session, si, di Info) (*Session, error) {
-	stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-	if _, err := rsyncTo(src, dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Total: sess.Size}, false); err != nil {
-		return nil, err
-	}
-	s, err := dst.StageSession(InstallReq{Session: sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
-	if err != nil {
-		return nil, err
-	}
-	step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
-	return &s, nil
+	return snap, nil
 }
 
 // sendExtras sends the ignored files that differ on dst, after a yes, and
-// removes there the ones si deleted since dst sent them. It returns the
-// extras si listed, and whether dst now has them.
-func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([]FileEntry, bool, error) {
+// removes there the ones src deleted since dst sent them. It returns the
+// extras src listed, and whether dst now has them.
+func (m *move) sendExtras() ([]FileEntry, bool, error) {
+	src, dst, t, si, di := m.src, m.dst, m.t, m.si, m.di
 	found, err := src.ListExtras(t.WtRel)
 	if err != nil {
 		return nil, false, err
@@ -411,7 +384,7 @@ func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([
 	}
 	var gone []FileEntry
 	var goneNames []string
-	for _, e := range rec.Extras[di.Name] {
+	for _, e := range m.rec.Extras[di.Name] {
 		if !incoming[e.Path] {
 			gone = append(gone, e)
 			goneNames = append(goneNames, e.Path)
@@ -460,7 +433,7 @@ func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([
 	switch {
 	case len(send) == 0 && len(gone) == 0:
 		return extras, true, nil
-	case !yes && !confirm(prompt):
+	case !m.opts.Yes && !confirm(prompt):
 		step("extras", "skipped")
 		return extras, false, nil
 	}
@@ -484,6 +457,111 @@ func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([
 	return extras, true, nil
 }
 
+// sendGitHooks copies the hooks in src's .git/hooks that dst lacks or has
+// different. A hook runs on the next git command in the repo, so hooks
+// coming to the laptop install only with a yes on this run, like restore.
+// Going to kant they install as they are.
+func (m *move) sendGitHooks() error {
+	srcHooks, err := m.src.GitHooks(m.t.RepoRel)
+	if err != nil {
+		return err
+	}
+	dstHooks, err := m.dst.GitHooks(m.t.RepoRel)
+	if err != nil {
+		return err
+	}
+	send := hooksToSend(srcHooks, dstHooks)
+	if len(send) == 0 {
+		return nil
+	}
+	var names []string
+	for _, h := range send {
+		names = append(names, h.Name)
+	}
+	step("hooks", "git hooks from %s: %s", m.si.Name, strings.Join(names, ", "))
+	if m.dst.IsLocal() && !confirmRun("install these git hooks here? they run on git commands in this repo") {
+		step("hooks", "skipped; %s's hooks stay as they were", m.di.Name)
+		return nil
+	}
+	return m.dst.InstallGitHooks(InstallGitHooksReq{RepoRel: m.t.RepoRel, Hooks: send})
+}
+
+// stageSession sends the session to dst and stages it there, with paths
+// rewritten, but nothing live moves until after the commit point. A failure
+// before then leaves the source exactly as it was. It returns the session as
+// sent and as staged.
+func (m *move) stageSession(sess *Session) (*Session, *Session, error) {
+	if sess == nil {
+		return nil, nil, nil
+	}
+	// Measure the session again just before sending it. finish() compares
+	// the source against this, so it must describe what was sent, not what
+	// was found before the steps above.
+	cur, err := m.src.FindSession(FindSessionReq{Agent: sess.Agent, ID: sess.ID})
+	if err != nil {
+		return nil, nil, err
+	} else if cur == nil {
+		return nil, nil, fmt.Errorf("%s: session %s disappeared before it was sent", m.si.Name, short(sess.ID))
+	}
+	installed, err := m.sendSession(*cur)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cur, installed, nil
+}
+
+// sendSession copies a session into in/<task>/session on dst and stages it
+// in in/<task>/ready, with paths rewritten. Nothing live changes.
+func (m *move) sendSession(sess Session) (*Session, error) {
+	stage := filepath.Join(".local", "state", "ferry", "in", m.t.Key, "session")
+	if _, err := rsyncTo(m.src, m.dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Total: sess.Size}, false); err != nil {
+		return nil, err
+	}
+	s, err := m.dst.StageSession(InstallReq{Session: sess, OldHome: m.si.Home, StageRel: stage, Task: m.t.Key})
+	if err != nil {
+		return nil, err
+	}
+	step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), m.di.Name, m.si.Home, m.di.Home)
+	return &s, nil
+}
+
+// commit records dst as the owner. This is the commit point: before it, a
+// failure leaves src owning the task untouched; after it, dst owns it and a
+// rerun finishes the handoff.
+func (m *move) commit(snap SnapshotResult, sess, installed *Session, extras []FileEntry, sentExtras bool) error {
+	rec, si, di, t := m.rec, m.si, m.di, m.t
+	if rec.LastSent == nil {
+		rec.LastSent = map[string]string{}
+	}
+	rec.LastSent[si.Name] = snap.Fingerprint
+	rec.Attempt = ""
+	// A resumed claim kept the Source it recorded; a rerun of finish()
+	// compares against the copy this run sent.
+	rec.Source, rec.Installed = sess, installed
+	delete(rec.LastSent, di.Name)
+	if rec.Extras == nil {
+		rec.Extras = map[string][]FileEntry{}
+	}
+	delete(rec.Extras, di.Name)
+	delete(rec.Extras, si.Name)
+	if sentExtras && len(extras) > 0 {
+		rec.Extras[si.Name] = extras
+	}
+	rec.State, rec.Owner, rec.Branch, rec.RexSession = stateLanding, di.Name, snap.Branch, ""
+	if err := m.save(); err != nil {
+		return err
+	}
+	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+	if m.src.IsLocal() {
+		// What this machine sent, kept here where the other machine can't
+		// change it, for the change summary when the task comes back.
+		if _, err := git(m.src.GitURL(t.WtRel), "update-ref", sentRef(t.Key), taskRef(t.Key, "wip")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // resendIfResumed runs on a rerun that finishes a landing handoff. If the
 // source's copy has grown since the commit recorded it, someone resumed it
 // there, most likely because the failed run looked like it hadn't handed
@@ -491,33 +569,33 @@ func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([
 // back would park those turns. So the newer copy is sent and staged in its
 // place, and the record is updated to say so. An agent still running it on
 // the source would keep writing, so that refuses.
-func resendIfResumed(src, dst, hub Machine, t task, rec *Record, si, di Info) error {
+func (m *move) resendIfResumed() error {
+	rec, si := m.rec, m.si
 	if rec.Source == nil || rec.Installed == nil {
 		return nil
 	}
-	cur, err := src.FindSession(FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID})
+	cur, err := m.src.FindSession(FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID})
 	if err != nil {
 		return err
 	}
 	if cur == nil || cur.Size == rec.Source.Size {
 		return nil
 	}
-	if live, err := src.Liveness(*cur); err != nil {
+	if live, err := m.src.Liveness(*cur); err != nil {
 		return err
 	} else if live.Live && !live.Settling {
 		return fmt.Errorf("%s: session %s has turns added since it was handed off, and %s; exit it, then run this again to send them", si.Name, short(cur.ID), live.Detail)
 	}
 	step("session", "%s: %s grew since the handoff (%s, was %s); sending it again", si.Name, short(cur.ID), humanSize(cur.Size), humanSize(rec.Source.Size))
-	installed, err := sendSession(src, dst, t, *cur, si, di)
+	installed, err := m.sendSession(*cur)
 	if err != nil {
 		return err
 	}
-	expect := rec.Generation
-	rec.Source, rec.Installed, rec.Generation = cur, installed, expect+1
-	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+	rec.Source, rec.Installed = cur, installed
+	if err := m.save(); err != nil {
 		return err
 	}
-	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+	step("commit", "%s owns %s (generation %d)", m.di.Name, m.t.Name, rec.Generation)
 	return nil
 }
 
@@ -598,7 +676,8 @@ func settle(m Machine, s Session) (Liveness, error) {
 // cfgBefore is what Claude would load here before the handoff (see
 // claudeConfig); nil when this machine isn't receiving a Claude session, or
 // on a rerun, which can't know.
-func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts, cfgBefore map[string]string) error {
+func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) error {
+	dst, t, rec, si, di, direction, opts := m.dst, m.t, m.rec, m.si, m.di, m.direction, m.opts
 	if installed != nil {
 		if err := dst.PlaceSession(PlaceReq{Session: *installed, Task: t.Key}); err != nil {
 			return err
@@ -674,9 +753,8 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 	if installed != nil && rexSession != "" {
 		clock.lap("launch")
 	}
-	expect := rec.Generation
-	rec.State, rec.RexSession, rec.Generation = stateOwned, rexSession, expect+1
-	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+	rec.State, rec.RexSession = stateOwned, rexSession
+	if err := m.save(); err != nil {
 		return err
 	}
 	if here != nil {
