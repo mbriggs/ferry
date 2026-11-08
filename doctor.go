@@ -67,7 +67,7 @@ func cmdDoctor(l *Local, args []string) int {
 	if len(hosts) == 0 {
 		hosts = l.hostNames()
 		if len(hosts) == 0 {
-			fmt.Println("\nno hosts in ~/.config/ferry/hosts; add one with `ferry setup HOST [USER@HOST]`")
+			fmt.Println("\nno hosts in ~/.config/ferry/hosts. That's normal on the machine that only receives handoffs (kant); on the laptop, add one with `ferry setup HOST [USER@HOST]`")
 		}
 	}
 	for _, h := range hosts {
