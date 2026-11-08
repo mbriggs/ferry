@@ -458,6 +458,9 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 		return Session{}, err
 	}
 	err = filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() && d.Name() == ".rsync-partial" {
+			return filepath.SkipDir // left by a cut transfer; not part of the copy
+		}
 		if err != nil || d.IsDir() {
 			return err
 		}

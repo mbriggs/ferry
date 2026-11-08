@@ -99,6 +99,11 @@ func doctorLocal(l *Local) *report {
 	} else {
 		r.ok("git", "found")
 	}
+	if err := checkRsync("this machine", info.Rsync); err != nil {
+		r.fail("rsync", "", "%v", err)
+	} else {
+		r.ok("rsync", "%s", info.Rsync)
+	}
 	switch {
 	case info.Claude == "" && info.Codex == "":
 		r.warn("agents", "install Claude Code or Codex, or put it on PATH", "neither claude nor codex found; ferry will move code only")
@@ -162,6 +167,11 @@ func doctorHost(l *Local, name string) *report {
 		r.fail("names", "set a different name in ~/.config/ferry/name on one of them", "both machines are named %q", info.Name)
 	} else {
 		r.ok("names", "%s and %s", mine.Name, info.Name)
+	}
+	if err := checkRsync(name, info.Rsync); err != nil {
+		r.fail("rsync", "", "%v; ssh runs it with a plain PATH, not the login shell's", err)
+	} else {
+		r.ok("rsync", "%s", info.Rsync)
 	}
 	switch {
 	case info.Claude == "" && info.Codex == "":

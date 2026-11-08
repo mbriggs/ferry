@@ -31,12 +31,10 @@ type Machine interface {
 	ListExtras(wtRel string) (ExtrasList, error)
 	GitHooks(repoRel string) ([]GitHook, error)
 	InstallGitHooks(InstallGitHooksReq) error
-	Export(req ExportReq, w io.Writer) error
-	Import(req ImportReq, r io.Reader) error
 	StageSession(InstallReq) (Session, error)
 	PlaceSession(PlaceReq) error
-	PlanExtras(PlanReq) (ExtrasPlan, error)
-	InstallExtras(InstallExtrasReq) (InstallExtrasResult, error)
+	PrepareExtras(PrepareExtrasReq) error
+	RemoveExtras(RemoveExtrasReq) (RemoveExtrasResult, error)
 	Park(ParkReq) error
 	RecordGet(task string) (*Record, error)
 	RecordPut(RecordPutReq) error
@@ -45,8 +43,8 @@ type Machine interface {
 	Approve(sha string) error
 	RunHook(HookReq) (HookResult, error)
 	Launch(LaunchReq) (string, error)
-	// GitURL is how the other machine's git reaches repoRel on this machine.
-	GitURL(repoRel string) string
+	// GitURL is how git and rsync on the other machine reach rel on this one.
+	GitURL(rel string) string
 	IsLocal() bool
 }
 
@@ -55,7 +53,7 @@ type Machine interface {
 // renamed, a request or response it would misread, or an op this side now
 // needs. Adding an optional field doesn't need a bump. Both sides of a
 // handoff must agree; a peer that predates the field reports 0.
-const protocol = 1
+const protocol = 2
 
 type Info struct {
 	Name     string `json:"name"`
@@ -65,6 +63,7 @@ type Info struct {
 	Claude   string `json:"claude"`
 	Codex    string `json:"codex"`
 	Rex      bool   `json:"rex"`
+	Rsync    string `json:"rsync"` // version, "" if missing or not rsync 3
 	Ferry    string `json:"ferry"`
 }
 
@@ -139,9 +138,9 @@ func (r *Remote) GitURL(rel string) string { return r.gitURL(rel) }
 func (r *Remote) String() string           { return r.Label }
 
 // call runs one remote operation. req is sent as base64 JSON in argv so it
-// survives the remote shell. stdin and stdout carry tar streams for Export
-// and Import; otherwise stdout carries the JSON response.
-func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.Writer) error {
+// survives the remote shell. stdin, when set, carries a request body too big
+// for argv; stdout carries the JSON response.
+func (r *Remote) call(op string, req any, resp any, stdin io.Reader) error {
 	// Before the first real call, make sure the far side speaks this
 	// protocol, so a stale binary fails with a fix instead of a decode error
 	// partway through a handoff.
@@ -167,12 +166,7 @@ func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.W
 	cmd.Env = append(os.Environ(), r.env...)
 	cmd.Stdin = stdin
 	var out, errb bytes.Buffer
-	if stdout != nil {
-		cmd.Stdout = stdout
-	} else {
-		cmd.Stdout = &out
-	}
-	cmd.Stderr = &errb
+	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(errb.String())
 		if m, ok := strings.CutPrefix(lastLine(msg), "ferry-error: "); ok {
@@ -183,7 +177,7 @@ func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.W
 		}
 		return fmt.Errorf("%s: %s %s: %s", r.Label, "remote", op, msg)
 	}
-	if resp != nil && stdout == nil {
+	if resp != nil {
 		if err := json.Unmarshal(out.Bytes(), resp); err != nil {
 			return fmt.Errorf("%s: bad response to %s: %v", r.Label, op, err)
 		}
@@ -193,7 +187,7 @@ func (r *Remote) call(op string, req any, resp any, stdin io.Reader, stdout io.W
 
 func rpc[T any](r *Remote, op string, req any) (T, error) {
 	var v T
-	err := r.call(op, req, &v, nil, nil)
+	err := r.call(op, req, &v, nil)
 	return v, err
 }
 
@@ -223,20 +217,13 @@ func (r *Remote) Apply(q ApplyReq) (string, error) { return rpc[string](r, "appl
 func (r *Remote) ListExtras(rel string) (ExtrasList, error) {
 	return rpc[ExtrasList](r, "list-extras", rel)
 }
-func (r *Remote) Export(q ExportReq, w io.Writer) error { return r.call("export", q, nil, nil, w) }
-func (r *Remote) Import(q ImportReq, rd io.Reader) error {
-	var v struct{}
-	return r.call("import", q, &v, rd, nil)
-}
 func (r *Remote) StageSession(q InstallReq) (Session, error) {
 	return rpc[Session](r, "stage-session", q)
 }
-func (r *Remote) PlaceSession(q PlaceReq) error { return do(r, "place-session", q) }
-func (r *Remote) PlanExtras(q PlanReq) (ExtrasPlan, error) {
-	return rpc[ExtrasPlan](r, "plan-extras", q)
-}
-func (r *Remote) InstallExtras(q InstallExtrasReq) (InstallExtrasResult, error) {
-	return rpc[InstallExtrasResult](r, "install-extras", q)
+func (r *Remote) PlaceSession(q PlaceReq) error          { return do(r, "place-session", q) }
+func (r *Remote) PrepareExtras(q PrepareExtrasReq) error { return do(r, "prepare-extras", q) }
+func (r *Remote) RemoveExtras(q RemoveExtrasReq) (RemoveExtrasResult, error) {
+	return rpc[RemoveExtrasResult](r, "remove-extras", q)
 }
 func (r *Remote) Park(q ParkReq) error                   { return do(r, "park", q) }
 func (r *Remote) RecordGet(task string) (*Record, error) { return rpc[*Record](r, "record-get", task) }
@@ -285,16 +272,12 @@ func serveRemote(args []string) int {
 		fmt.Fprintln(os.Stderr, "ferry-error: "+oneLine(err.Error()))
 		return 1
 	}
-	if resp != streamed {
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
-			fmt.Fprintln(os.Stderr, "ferry-error:", err)
-			return 1
-		}
+	if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		fmt.Fprintln(os.Stderr, "ferry-error:", err)
+		return 1
 	}
 	return 0
 }
-
-var streamed = &struct{}{}
 
 func decode[T any](raw []byte) (T, error) {
 	var v T
@@ -348,8 +331,8 @@ var ops = map[string]handler{
 	"apply":          query((*Local).Apply),
 	"list-extras":    query((*Local).ListExtras),
 	"stage-session":  query((*Local).StageSession),
-	"plan-extras":    query((*Local).PlanExtras),
-	"install-extras": query((*Local).InstallExtras),
+	"remove-extras":  query((*Local).RemoveExtras),
+	"prepare-extras": command((*Local).PrepareExtras),
 	"record-get":     query((*Local).RecordGet),
 	"hook-info":      query((*Local).HookInfo),
 	"run-hook":       query((*Local).RunHook),
@@ -361,16 +344,8 @@ var ops = map[string]handler{
 	"park":           command((*Local).Park),
 	"record-put":     command((*Local).RecordPut),
 	"approve":        command((*Local).Approve),
-	"import":         command(func(l *Local, q ImportReq) error { return l.Import(q, os.Stdin) }),
 	"install-git-hooks": func(l *Local, raw []byte) (any, error) {
 		return struct{}{}, serveInstallGitHooks(l, raw, os.Stdin)
-	},
-	"export": func(l *Local, raw []byte) (any, error) {
-		q, err := decode[ExportReq](raw)
-		if err != nil {
-			return nil, err
-		}
-		return streamed, l.Export(q, os.Stdout)
 	},
 }
 

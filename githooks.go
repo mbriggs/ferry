@@ -135,7 +135,7 @@ func (r *Remote) InstallGitHooks(q InstallGitHooksReq) error {
 		return err
 	}
 	var v struct{}
-	return r.call("install-git-hooks", InstallGitHooksReq{RepoRel: q.RepoRel}, &v, bytes.NewReader(body), nil)
+	return r.call("install-git-hooks", InstallGitHooksReq{RepoRel: q.RepoRel}, &v, bytes.NewReader(body))
 }
 
 func serveInstallGitHooks(l *Local, raw []byte, stdin io.Reader) error {

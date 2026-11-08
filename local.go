@@ -56,6 +56,7 @@ func (l *Local) Info() (Info, error) {
 		Claude:   toolVersion("claude", "--version"),
 		Codex:    toolVersion("codex", "--version"),
 		Rex:      rexErr == nil,
+		Rsync:    rsyncVersion(),
 		Ferry:    version,
 	}, nil
 }

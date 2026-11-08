@@ -248,8 +248,8 @@ Work ==
     /\ UNCHANGED <<world, rec, pending>>
     /\ Fork
 
-\* src.FindSession again, so sess is what is sent, then transfer(src Export,
-\* dst Import, Clean) into in/<task>/session.
+\* src.FindSession again, so sess is what is sent, then rsync it into
+\* in/<task>/session on dst, replacing whatever an earlier run staged.
 Transfer ==
     /\ pc = "transfer"
     /\ \/ /\ copy[src] > 0                      \* "disappeared before it was sent"

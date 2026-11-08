@@ -71,6 +71,11 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if si.Name == di.Name {
 		return fmt.Errorf("both machines are named %q; set one in ~/.config/ferry/name", si.Name)
 	}
+	for _, i := range []Info{si, di} {
+		if err := checkRsync(i.Name, i.Rsync); err != nil {
+			return err
+		}
+	}
 	step("task", "%s  (%s, repo %s)", t.Name, t.WtRel, t.RepoRel)
 	clock = newStopwatch()
 	defer clock.report()
@@ -275,97 +280,10 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
 	clock.lap("git")
 
-	found, err := src.ListExtras(t.WtRel)
+	extras, sentExtras, err := sendExtras(src, dst, t, rec, si, di, opts.Yes)
 	if err != nil {
 		return err
 	}
-	extras := found.Files
-	if len(found.LeftBehind) > 0 {
-		left := found.LeftBehind
-		if len(left) > 8 {
-			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
-		}
-		step("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
-	}
-	// Extras di sent last time that si no longer has were deleted here.
-	incoming := map[string]bool{}
-	for _, e := range extras {
-		incoming[e.Path] = true
-	}
-	var gone []FileEntry
-	for _, e := range rec.Extras[di.Name] {
-		if !incoming[e.Path] {
-			gone = append(gone, e)
-		}
-	}
-	sentExtras := false
-	if len(extras) > 0 || len(gone) > 0 {
-		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "extras")
-		plan, err := dst.PlanExtras(PlanReq{WtRel: t.WtRel, StageRel: stage, Files: extras})
-		if err != nil {
-			return err
-		}
-		have := map[string]bool{}
-		for _, p := range plan.Have {
-			have[p] = true
-		}
-		var send, unchanged []FileEntry
-		var paths, goneNames []string
-		shas := map[string]string{}
-		for _, e := range extras {
-			if have[e.Path] {
-				unchanged = append(unchanged, e)
-				continue
-			}
-			send = append(send, e)
-			paths = append(paths, e.Path)
-			shas[filepath.ToSlash(e.Path)] = e.SHA
-		}
-		names := describeFiles(send, plan.Partial)
-		same := describeFiles(unchanged, nil)
-		for _, e := range gone {
-			goneNames = append(goneNames, e.Path)
-		}
-		if len(names) > 0 {
-			step("extras", "%s", strings.Join(names, ", "))
-		}
-		if len(same) > 0 {
-			step("extras", "already on %s, not sent: %s", di.Name, strings.Join(same, ", "))
-		}
-		prompt := "send these ignored files to " + di.Name + "?"
-		if len(gone) > 0 {
-			step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, strings.Join(goneNames, ", "))
-			prompt = "send these ignored files to " + di.Name + " and remove the deleted ones there?"
-		}
-		switch {
-		case len(send) == 0 && len(gone) == 0:
-			sentExtras = true
-		case opts.Yes || confirm(prompt):
-			if len(paths) > 0 {
-				var total int64
-				for _, e := range send {
-					total += e.Size - plan.Partial[filepath.ToSlash(e.Path)]
-				}
-				if err := transfer(src, ExportReq{BaseRel: t.WtRel, Paths: paths, SHAs: shas, Offsets: plan.Partial}, dst, ImportReq{BaseRel: stage, Private: true}, "sending", total); err != nil {
-					return err
-				}
-			}
-			res, err := dst.InstallExtras(InstallExtrasReq{WtRel: t.WtRel, StageRel: stage, Task: t.Key, Files: send, Remove: gone})
-			if err != nil {
-				return err
-			}
-			if len(res.Removed) > 0 {
-				step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, strings.Join(res.Removed, ", "))
-			}
-			if len(res.Kept) > 0 {
-				step("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
-			}
-			sentExtras = true
-		default:
-			step("extras", "skipped")
-		}
-	}
-
 	clock.lap("extras")
 
 	// --- git hooks -----------------------------------------------------------
@@ -457,7 +375,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 // in in/<task>/ready, with paths rewritten. Nothing live changes.
 func sendSession(src, dst Machine, t task, sess Session, si, di Info) (*Session, error) {
 	stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-	if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}, "session", sess.Size); err != nil {
+	if _, err := rsyncTo(src, dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Total: sess.Size}, false); err != nil {
 		return nil, err
 	}
 	s, err := dst.StageSession(InstallReq{Session: sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
@@ -466,6 +384,104 @@ func sendSession(src, dst Machine, t task, sess Session, si, di Info) (*Session,
 	}
 	step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
 	return &s, nil
+}
+
+// sendExtras sends the ignored files that differ on dst, after a yes, and
+// removes there the ones si deleted since dst sent them. It returns the
+// extras si listed, and whether dst now has them.
+func sendExtras(src, dst Machine, t task, rec *Record, si, di Info, yes bool) ([]FileEntry, bool, error) {
+	found, err := src.ListExtras(t.WtRel)
+	if err != nil {
+		return nil, false, err
+	}
+	extras := found.Files
+	if len(found.LeftBehind) > 0 {
+		left := found.LeftBehind
+		if len(left) > 8 {
+			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
+		}
+		step("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
+	}
+	// Extras di sent last time that si no longer has were deleted here.
+	incoming := map[string]bool{}
+	var paths []string
+	for _, e := range extras {
+		incoming[e.Path] = true
+		paths = append(paths, e.Path)
+	}
+	var gone []FileEntry
+	var goneNames []string
+	for _, e := range rec.Extras[di.Name] {
+		if !incoming[e.Path] {
+			gone = append(gone, e)
+			goneNames = append(goneNames, e.Path)
+		}
+	}
+	if len(extras) == 0 && len(gone) == 0 {
+		return extras, true, nil
+	}
+
+	if err := dst.PrepareExtras(PrepareExtrasReq{WtRel: t.WtRel, Task: t.Key, Paths: paths}); err != nil {
+		return nil, false, err
+	}
+	job := rsyncJob{SrcRel: t.WtRel, DstRel: t.WtRel, Files: paths, Private: true, WorkDir: filepath.Join(di.Home, extrasWork(t.Key))}
+	differ, err := rsyncTo(src, dst, job, true)
+	if err != nil {
+		return nil, false, err
+	}
+	changed := map[string]bool{}
+	sendAll := false
+	for _, p := range differ {
+		changed[p] = true
+		// rsync escapes control characters in the names it prints, so a name
+		// that matches no extra can't be tied to one; send them all.
+		sendAll = sendAll || !incoming[filepath.FromSlash(p)]
+	}
+	var send, same []FileEntry
+	for _, e := range extras {
+		if sendAll || changed[filepath.ToSlash(e.Path)] {
+			send = append(send, e)
+			job.Total += e.Size
+		} else {
+			same = append(same, e)
+		}
+	}
+	if names := describeFiles(send); len(names) > 0 {
+		step("extras", "%s", strings.Join(names, ", "))
+	}
+	if names := describeFiles(same); len(names) > 0 {
+		step("extras", "already on %s, not sent: %s", di.Name, strings.Join(names, ", "))
+	}
+	prompt := "send these ignored files to " + di.Name + "?"
+	if len(gone) > 0 {
+		step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, strings.Join(goneNames, ", "))
+		prompt = "send these ignored files to " + di.Name + " and remove the deleted ones there?"
+	}
+	switch {
+	case len(send) == 0 && len(gone) == 0:
+		return extras, true, nil
+	case !yes && !confirm(prompt):
+		step("extras", "skipped")
+		return extras, false, nil
+	}
+	job.Files = nil
+	for _, e := range send {
+		job.Files = append(job.Files, e.Path)
+	}
+	if _, err := rsyncTo(src, dst, job, false); err != nil {
+		return nil, false, err
+	}
+	res, err := dst.RemoveExtras(RemoveExtrasReq{WtRel: t.WtRel, Task: t.Key, Files: gone})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(res.Removed) > 0 {
+		step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, strings.Join(res.Removed, ", "))
+	}
+	if len(res.Kept) > 0 {
+		step("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
+	}
+	return extras, true, nil
 }
 
 // resendIfResumed runs on a rerun that finishes a landing handoff. If the
@@ -521,15 +537,11 @@ func sessionFits(home string, s Session, t task) error {
 
 // describeFiles lists files with their sizes for the output. A long list is
 // folded into one line per top-level folder.
-func describeFiles(files []FileEntry, partial map[string]int64) []string {
+func describeFiles(files []FileEntry) []string {
 	if len(files) <= 8 {
 		var out []string
 		for _, e := range files {
-			label := fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size))
-			if off := partial[filepath.ToSlash(e.Path)]; off > 0 {
-				label = fmt.Sprintf("%s (%s, resuming at %s)", e.Path, humanSize(e.Size), humanSize(off))
-			}
-			out = append(out, label)
+			out = append(out, fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size)))
 		}
 		return out
 	}

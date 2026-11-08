@@ -75,7 +75,7 @@ func TestFromRefusesATamperedRecord(t *testing.T) {
 	}
 }
 
-func TestInstallExtrasRefusesSymlinks(t *testing.T) {
+func TestPrepareExtrasRefusesSymlinks(t *testing.T) {
 	cases := map[string]func(root, outside string){
 		"symlinked directory": func(root, outside string) {
 			os.Symlink(outside, filepath.Join(root, "cfg"))
@@ -93,35 +93,21 @@ func TestInstallExtrasRefusesSymlinks(t *testing.T) {
 			outside := filepath.Join(home, "outside")
 			os.MkdirAll(root, 0o755)
 			os.MkdirAll(outside, 0o755)
-			os.WriteFile(filepath.Join(outside, ".env"), []byte("original\n"), 0o600)
 			setup(root, outside)
-			stage := filepath.Join(home, ".local/state/ferry/in/t/extras/cfg")
-			os.MkdirAll(stage, 0o755)
-			os.WriteFile(filepath.Join(stage, ".env"), []byte("payload\n"), 0o600)
-
-			_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras", Files: []FileEntry{{Path: "cfg/.env"}}})
+			err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{"cfg/.env"}})
 			if err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("want a symlink refusal, got %v", err)
-			}
-			if got, _ := os.ReadFile(filepath.Join(outside, ".env")); string(got) != "original\n" {
-				t.Fatalf("file outside the worktree changed to %q", got)
 			}
 		})
 	}
 }
 
-func TestInstallExtrasRefusesGitDir(t *testing.T) {
+func TestPrepareExtrasRefusesGitDir(t *testing.T) {
 	home := t.TempDir()
 	l := &Local{Home: home}
 	os.MkdirAll(filepath.Join(home, "src/app/.git/hooks"), 0o755)
-	stage := filepath.Join(home, ".local/state/ferry/in/t/extras/.git/hooks")
-	os.MkdirAll(stage, 0o755)
-	os.WriteFile(filepath.Join(stage, "post-checkout"), []byte("#!/bin/sh\nevil\n"), 0o700)
-	_, err := l.InstallExtras(InstallExtrasReq{WtRel: "src/app", StageRel: ".local/state/ferry/in/t/extras", Files: []FileEntry{{Path: ".git/hooks/post-checkout"}}})
+	err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{".git/hooks/post-checkout"}})
 	if err == nil || !strings.Contains(err.Error(), ".git") {
 		t.Fatalf("want a .git refusal, got %v", err)
-	}
-	if exists(filepath.Join(home, "src/app/.git/hooks/post-checkout")) {
-		t.Fatal("hook was written")
 	}
 }

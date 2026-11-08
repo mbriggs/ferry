@@ -4,13 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
@@ -21,7 +17,7 @@ import (
 
 // Ferry's output is one step per line: a label column and what happened.
 // On a terminal the labels are colored, long lines wrap under the text
-// column, prompts are huh forms, and big transfers show progress. Piped,
+// column, prompts are huh forms, and big transfers show rsync's progress. Piped,
 // in tests, or with FERRY_PLAIN=1, it's plain text and line prompts, so the
 // output stays easy to grep and script.
 
@@ -46,9 +42,6 @@ func interactive() bool {
 
 // step prints one line of a handoff.
 func step(label, format string, a ...any) {
-	progressMu.Lock()
-	defer progressMu.Unlock()
-	clearProgress()
 	text := fmt.Sprintf(format, a...)
 	if plain {
 		fmt.Printf("%-*s %s\n", labelWidth, label, text)
@@ -181,65 +174,4 @@ func pick(title string, lines []string) (int, error) {
 		return 0, errors.New("nothing picked")
 	}
 	return choice, nil
-}
-
-// --- progress ---------------------------------------------------------------
-
-var (
-	progressMu    sync.Mutex
-	progressShown bool
-)
-
-// clearProgress erases the progress line; progressMu must be held.
-func clearProgress() {
-	if progressShown {
-		fmt.Print("\r\x1b[2K")
-		progressShown = false
-	}
-}
-
-// progress counts bytes written through it and shows "label 45 MB / 149 MB,
-// 21 MB/s" on the terminal until done is called. Without a terminal it only
-// counts.
-func progress(label string, total int64, w io.Writer) (io.Writer, func()) {
-	c := &counter{w: w}
-	if plain || total < 8<<20 {
-		return c, func() {}
-	}
-	start := time.Now()
-	stop := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		t := time.NewTicker(250 * time.Millisecond)
-		defer t.Stop()
-		for {
-			select {
-			case <-stop:
-				progressMu.Lock()
-				clearProgress()
-				progressMu.Unlock()
-				return
-			case <-t.C:
-				n := c.n.Load()
-				rate := float64(n) / time.Since(start).Seconds()
-				progressMu.Lock()
-				fmt.Printf("\r\x1b[2K%s %s / %s, %s/s", styleLabel.Render(fmt.Sprintf("%-*s", labelWidth, label)), humanSize(n), humanSize(total), humanSize(int64(rate)))
-				progressShown = true
-				progressMu.Unlock()
-			}
-		}
-	}()
-	return c, func() { close(stop); <-finished }
-}
-
-type counter struct {
-	w io.Writer
-	n atomic.Int64
-}
-
-func (c *counter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n.Add(int64(n))
-	return n, err
 }

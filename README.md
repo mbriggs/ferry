@@ -19,7 +19,7 @@ ferry ls kant
 
    Then give the tailnet policy an ssh rule that lets your laptop in as your kant user with `"action": "accept"`. A `"check"` rule waits for a browser login, which ferry's non-interactive ssh can't do. If kant has tags, the rule's `dst` must name the tag; `autogroup:self` only matches untagged devices.
 
-2. Install ferry on the laptop: `make install` in this repo (or copy the release binary to `~/.local/bin/ferry`).
+2. Install ferry on the laptop: `make install` in this repo (or copy the release binary to `~/.local/bin/ferry`). Both machines need rsync 3.2.5 or newer on PATH. macOS's `/usr/bin/rsync` is openrsync, so on the Mac run `brew install rsync`. On kant, ssh runs rsync with a plain PATH, so it has to be in `/usr/bin` or `/usr/local/bin`.
 
 3. From the laptop, connect it to kant. Your Mac username differs from kant's, so name the user:
 
@@ -33,7 +33,7 @@ ferry ls kant
 
 4. `ferry doctor` rechecks everything any time: both machines' ferry builds, names, ssh, the agents each side can find (kant's through its login shell's PATH), Rex, and the task records. Each failure comes with a fix.
 
-Every ssh ferry starts, git's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
+Every ssh ferry starts, git's and rsync's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
 
 On a terminal, ferry colors its step labels, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts. A single `y` or `n` answers most of them; a prompt that would run code (a hook, or Claude after its config changed) ignores letters and takes an arrow key and Enter, so text typed ahead can only answer No. Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
 
