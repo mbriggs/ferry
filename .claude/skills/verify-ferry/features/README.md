@@ -9,9 +9,10 @@ This directory is the maintained list of what to verify in ferry, from the user'
 | [list.md](list.md) | List tasks on a host | `ferry ls kant` |
 | [hooks.md](hooks.md) | Dehydrate and restore hooks with approval | `.ferry/dehydrate`, `.ferry/restore` |
 | [setup.md](setup.md) | Add Claude permission rules | `ferry setup --claude-rules [--dry-run]` |
-| [connect.md](connect.md) | Connect a host and check it | `ferry setup HOST [USER@HOST]`, `ferry doctor [HOST...]` |
+| [connect.md](connect.md) | Connect a host, check it, push builds | `ferry setup HOST [USER@HOST]`, `ferry doctor [HOST...]`, `ferry push [HOST...]` |
+| [refusals.md](refusals.md) | Refusals and interrupted handoffs | `ferry to`/`from` with `--force`, `--force-version` |
 
-Not mapped here because a world can't reach it: launching the resumed agent in Rex, picking a task by its Rex label, a real agent continuing the conversation, and `ferry setup HOST` installing ferry over ssh. `test/e2e-local.sh` covers that on kant. Codex sessions (`--agent codex`) aren't seeded by `world.sh new` yet; `test/codex-roundtrip.sh` covers them.
+Not mapped here because a world can't reach it: launching the resumed agent in Rex, picking a task by its Rex label, a real agent continuing the conversation, and `ferry setup HOST` or `ferry push` installing ferry over ssh. `test/e2e-local.sh` covers that on kant. Codex sessions (`--agent codex`) aren't seeded by `world.sh new` yet; `test/codex-roundtrip.sh` covers them.
 
 ## Conventions
 

@@ -96,12 +96,12 @@ cmd_new() {
   load "$root"
   mkdir -p "$root/bin" "$ev"
   # claude and codex answer --version (ferry's doctor and version check read
-  # it) and block everything else.
+  # it) with $HOME/.stub-version, or 0.0.0, and block everything else.
   for stub in ssh rex claude codex; do
     {
       echo '#!/bin/sh'
       [[ $stub == claude || $stub == codex ]] &&
-        echo '[ "$*" = --version ] && { echo "0.0.0 (world.sh stub)"; exit 0; }'
+        echo '[ "$*" = --version ] && { echo "$(cat "$HOME/.stub-version" 2>/dev/null || echo 0.0.0) (world.sh stub)"; exit 0; }'
       printf 'echo "world.sh: blocked %s $*" >&2\nexit 1\n' "$stub"
     } > "$root/bin/$stub"
     chmod +x "$root/bin/$stub"

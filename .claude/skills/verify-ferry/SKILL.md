@@ -13,8 +13,8 @@ The feature map in `features/README.md` lists what to drive. Read it, then every
 
 ## Hard rules
 
-- Run ferry only through `world.sh ferry` or `world.sh tty`. They set `HOME` to the fake home and put stub `ssh`, `rex`, `claude`, and `codex` first on PATH. The claude and codex stubs answer `--version` with `0.0.0`; every other stub call fails with `world.sh: blocked ...`. A bare `ferry` call uses the real `~`, the real kant, real Rex, and a real agent.
-- Pass `--no-launch` to `ferry to kant`, and to `ferry from` in the tmux pane. Without it, `to` tries Rex, hits the stub, and prints `launch failed: ... world.sh: blocked rex ...` before the `resume` line. A `from` with a terminal replaces itself with `claude --resume` in that terminal, hits the stub, and exits 1 with `world.sh: blocked claude ...`. Only bring-back.md's `from-exec` step wants that.
+- Run ferry only through `world.sh ferry` or `world.sh tty`. They set `HOME` to the fake home and put stub `ssh`, `rex`, `claude`, and `codex` first on PATH. The claude and codex stubs answer `--version` with `0.0.0`, or the contents of `$HOME/.stub-version` when that file exists; every other stub call fails with `world.sh: blocked ...`. A bare `ferry` call uses the real `~`, the real kant, real Rex, and a real agent.
+- Pass `--no-launch` to `ferry to kant`, and to `ferry from` in the tmux pane. Without it, `to` tries Rex, hits the stub, and prints `launch failed: ... world.sh: blocked rex ...` before the `resume` line. A `from` with a terminal replaces itself with `claude --resume` in that terminal, hits the stub, and exits 1 with `world.sh: blocked claude ...`. Only bring-back.md's `from-exec` and `from-config` steps want that.
 - Use only the host names `kant`, and `laptop` when running `--as kant`. ferry sends any other name to ssh, and the stub fails it with `world.sh: blocked ssh ...`. connect.md uses `kant2` on purpose to reach that failure.
 
 ## Launch
