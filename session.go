@@ -530,7 +530,17 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 			if q.Session.Agent == agentClaude && r == transcript {
 				got = leaveClaudeWorktree(got, q.Session.ID)
 			}
+			// rsync kept the sender's mtime; the rewrite mustn't replace it
+			// with ferry's own, which Liveness would read as an agent still
+			// writing.
+			st, err := os.Stat(p)
+			if err != nil {
+				return err
+			}
 			if err := writeAtomic(p, got, 0o600); err != nil {
+				return err
+			}
+			if err := os.Chtimes(p, time.Time{}, st.ModTime()); err != nil {
 				return err
 			}
 		}
