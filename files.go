@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -101,12 +102,7 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 		case strings.HasSuffix(rel, "/"):
 			// git collapsed an ignored directory; take the files inside,
 			// skipping dependency and build trees and excluded paths.
-			walkIgnored(filepath.Join(root, dir), func(p string) {
-				r, _ := filepath.Rel(root, p)
-				if !stays(r) {
-					add(r)
-				}
-			})
+			walkIgnored(root, dir, stays, add, func(r string) { left = append(left, r) })
 		default:
 			add(rel)
 		}
@@ -121,14 +117,28 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 }
 
 // inHeavyDir reports whether any directory in rel is a dependency or build
-// tree.
+// tree (see heavyDir).
 func inHeavyDir(rel string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		if heavyDirs[part] {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	for i := range parts {
+		if heavyDir(strings.Join(parts[:i+1], "/")) {
 			return true
 		}
 	}
 	return false
+}
+
+// heavyDir reports whether the directory rel is a dependency or build tree,
+// rebuilt rather than moved. The names are guesses, so they don't apply in
+// the agent's and ferry's own folders, where a skill can be called "build":
+// only .git is skipped there.
+func heavyDir(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	name := path.Base(rel)
+	if name == ".git" {
+		return true
+	}
+	return heavyDirs[name] && !within(rel, ".claude") && !within(rel, ".ferry")
 }
 
 func neverExtra(rel string) bool {
@@ -166,19 +176,29 @@ var heavyDirs = map[string]bool{
 	".elixir_ls": true, ".expo": true, "elm-stuff": true, "coverage": true,
 }
 
-func walkIgnored(dir string, fn func(string)) {
-	if heavyDirs[filepath.Base(dir)] {
-		return
-	}
-	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+// walkIgnored walks the ignored directory dir (relative to root) and calls
+// add for each file that travels. Directories that stay, dependency trees
+// and paths .ferry/exclude names, go to left with a trailing slash, as do
+// excluded files, so the output lists everything that stays. Claude's own
+// worktrees stay without a mention.
+func walkIgnored(root, dir string, stays func(string) bool, add, left func(string)) {
+	filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && p != dir && (heavyDirs[d.Name()] || (d.Name() == "worktrees" && filepath.Base(filepath.Dir(p)) == ".claude")) {
+		rel, _ := filepath.Rel(root, p)
+		switch {
+		case d.IsDir() && neverExtra(rel):
 			return filepath.SkipDir
-		}
-		if d.Type().IsRegular() {
-			fn(p)
+		case neverExtra(rel):
+			return nil
+		case d.IsDir() && rel != dir && (heavyDir(rel) || stays(rel)):
+			left(filepath.ToSlash(rel) + "/")
+			return filepath.SkipDir
+		case d.Type().IsRegular() && stays(rel):
+			left(filepath.ToSlash(rel))
+		case d.Type().IsRegular():
+			add(rel)
 		}
 		return nil
 	})

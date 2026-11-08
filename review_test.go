@@ -135,6 +135,11 @@ func TestIgnoredFilesTravelAndLeftoversAreListed(t *testing.T) {
 	w.write(wt, ".claude/worktrees/side/README", "a whole checkout\n")
 	w.write(wt, "formal/out/run.out", "generated\n")
 	w.write(wt, "dist/ferry-linux", "binary\n")
+	// Dependency-folder names are guesses that don't apply in the agent's
+	// folder; deeper ones elsewhere stay, and are listed.
+	w.write(wt, ".claude/skills/build/SKILL.md", "a skill named build\n")
+	w.write(wt, "formal/out/deps/x", "nested dependency tree\n")
+	w.write(wt, "formal/out/.DS_Store", "junk\n")
 
 	got, err := (&Local{Home: w.laptop}).ListExtras("src/app-wt/fix-auth")
 	if err != nil {
@@ -145,16 +150,16 @@ func TestIgnoredFilesTravelAndLeftoversAreListed(t *testing.T) {
 		names = append(names, e.Path)
 	}
 	list := strings.Join(names, ",")
-	for _, want := range []string{".claude/skills/verify/SKILL.md", "formal/out/run.out", ".env"} {
+	for _, want := range []string{".claude/skills/verify/SKILL.md", ".claude/skills/build/SKILL.md", "formal/out/run.out", ".env"} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("%s should travel: %s", want, list)
 		}
 	}
-	if strings.Contains(list, "worktrees") || strings.Contains(list, "dist/") || strings.Contains(list, "node_modules") {
+	if strings.Contains(list, "worktrees") || strings.Contains(list, "dist/") || strings.Contains(list, "node_modules") || strings.Contains(list, "deps/") || strings.Contains(list, ".DS_Store") {
 		t.Fatalf("sent something that should stay: %s", list)
 	}
 	left := strings.Join(got.LeftBehind, ",")
-	if !strings.Contains(left, "dist/") || !strings.Contains(left, "node_modules/") || strings.Contains(left, ".claude") {
+	if !strings.Contains(left, "dist/") || !strings.Contains(left, "node_modules/") || !strings.Contains(left, "formal/out/deps/") || strings.Contains(left, ".claude") || strings.Contains(left, ".DS_Store") {
 		t.Fatalf("left behind = %s", left)
 	}
 }
