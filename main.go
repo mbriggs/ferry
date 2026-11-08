@@ -74,7 +74,7 @@ func run1(args []string) int {
 
 func fail(err error) int {
 	if !plain {
-		fmt.Fprintln(os.Stderr, tones[toneBad].style.Render("✗ ferry:"), err)
+		fmt.Fprintln(os.Stderr, styleBad.Render("✗ ferry:"), err)
 		return 1
 	}
 	fmt.Fprintln(os.Stderr, "ferry:", err)

@@ -52,20 +52,29 @@ const (
 	toneBad                // failed
 	toneAsk                // shows something a prompt is about to ask about
 	toneCommit             // the receiver owns the task now
-	toneQuiet              // bookkeeping, like the timings
 )
 
+var (
+	styleWarn = lipgloss.NewStyle().Bold(true).Foreground(colorWarn)
+	styleBad  = lipgloss.NewStyle().Bold(true).Foreground(colorBad)
+	styleAsk  = lipgloss.NewStyle().Bold(true).Foreground(colorAsk)
+	styleOwns = lipgloss.NewStyle().Bold(true).Foreground(colorOK)
+)
+
+// tones gives each tone its glyph, the glyph's style, and the label's style.
+// Labels of steps that need nothing from you are faint, so the ones that do
+// stand out.
 var tones = map[tone]struct {
 	glyph string
 	style lipgloss.Style
+	label lipgloss.Style
 }{
-	toneOK:     {"✓", lipgloss.NewStyle().Foreground(colorOK)},
-	toneNote:   {"·", styleFaint},
-	toneWarn:   {"!", lipgloss.NewStyle().Bold(true).Foreground(colorWarn)},
-	toneBad:    {"✗", lipgloss.NewStyle().Bold(true).Foreground(colorBad)},
-	toneAsk:    {"?", lipgloss.NewStyle().Bold(true).Foreground(colorAsk)},
-	toneCommit: {"◆", lipgloss.NewStyle().Bold(true).Foreground(colorOK)},
-	toneQuiet:  {" ", styleFaint},
+	toneOK:     {"✓", lipgloss.NewStyle().Foreground(colorOK), styleFaint},
+	toneNote:   {"·", styleFaint, styleFaint},
+	toneWarn:   {"!", styleWarn, styleWarn},
+	toneBad:    {"✗", styleBad, styleBad},
+	toneAsk:    {"?", styleAsk, styleFaint},
+	toneCommit: {"◆", styleOwns, styleOwns},
 }
 
 // interactive reports whether there's someone at a terminal to run an agent
@@ -89,9 +98,6 @@ func bad(label, format string, a ...any) { say(toneBad, label, format, a...) }
 // review prints what the next prompt asks about.
 func review(label, format string, a ...any) { say(toneAsk, label, format, a...) }
 
-// quiet prints bookkeeping, like the timings, dim on a terminal.
-func quiet(label, format string, a ...any) { say(toneQuiet, label, format, a...) }
-
 // commitPoint prints the step where the receiver takes ownership. On a
 // terminal a rule runs to the edge, since nothing before it is undone after.
 func commitPoint(label, format string, a ...any) { say(toneCommit, label, format, a...) }
@@ -103,16 +109,7 @@ func say(t tone, label, format string, a ...any) {
 		return
 	}
 	look := tones[t]
-	lbl := fmt.Sprintf("%-*s", labelWidth, label)
-	switch t {
-	case toneOK, toneNote, toneAsk:
-		lbl = styleFaint.Render(lbl)
-	case toneQuiet:
-		text = styleFaint.Render(text)
-		lbl = styleFaint.Render(lbl)
-	default:
-		lbl = look.style.Render(lbl)
-	}
+	lbl := look.label.Render(fmt.Sprintf("%-*s", labelWidth, label))
 	if t == toneCommit {
 		text = styleBold.Render(text)
 		if width := min(termWidth(), 100); width > 0 {
@@ -210,10 +207,14 @@ func formTheme() *huh.Theme {
 	return t
 }
 
-// promptTitle puts a question in the step layout, after a ? glyph.
-func promptTitle(q string) string {
-	return "  " + tones[toneAsk].style.Render("?") + strings.Repeat(" ", textColumn-3) + q
+// promptLine puts a question at the text column, after a glyph where a
+// step's glyph goes.
+func promptLine(glyph, q string) string {
+	return "  " + glyph + strings.Repeat(" ", textColumn-3) + q
 }
+
+// promptTitle puts a question in the step layout, after a ? glyph.
+func promptTitle(q string) string { return promptLine(styleAsk.Render("?"), q) }
 
 // answered leaves a one-line record of a prompt and its answer, in place of
 // the form, which clears itself.
@@ -222,7 +223,7 @@ func answered(q, answer string, ok bool) {
 	if ok {
 		a = lipgloss.NewStyle().Foreground(colorOK).Render(answer)
 	}
-	fmt.Println("  " + styleFaint.Render("?") + strings.Repeat(" ", textColumn-3) + styleFaint.Render(q) + "  " + a)
+	fmt.Println(promptLine(styleFaint.Render("?"), styleFaint.Render(q)) + "  " + a)
 }
 
 // openTTY opens the controlling terminal for a prompt, so prompts work even
@@ -272,7 +273,11 @@ func askYesNo(prompt string, km *huh.KeyMap) bool {
 		form = form.WithKeyMap(km)
 	}
 	ok := form.Run() == nil && yes
-	answered(prompt, map[bool]string{true: "yes", false: "no"}[ok], ok)
+	answer := "no"
+	if ok {
+		answer = "yes"
+	}
+	answered(prompt, answer, ok)
 	return ok
 }
 

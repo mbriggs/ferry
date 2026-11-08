@@ -56,7 +56,7 @@ func (r *report) print(title string) {
 			}
 			say(t, c.name, "%s", c.detail)
 			if c.fix != "" {
-				fmt.Println(strings.Repeat(" ", textColumn) + wrapHanging(tones[toneWarn].style.Render("fix")+" "+c.fix))
+				fmt.Println(strings.Repeat(" ", textColumn) + wrapHanging(styleWarn.Render("fix")+" "+c.fix))
 			}
 		}
 		return

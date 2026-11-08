@@ -825,7 +825,7 @@ func (s *stopwatch) report() {
 	if s.waited > time.Second {
 		line += " (plus " + roundDuration(s.waited) + " at prompts)"
 	}
-	quiet("time", "%s", line)
+	note("time", "%s", dim(line))
 }
 
 func roundDuration(d time.Duration) string {
