@@ -42,6 +42,13 @@ func (l *Local) Launch(q LaunchReq) (string, error) {
 	} else if !q.AcceptTrust {
 		return "", fmt.Errorf("%s isn't trusted here and wasn't on the sending machine; not starting an agent that would wait at the trust prompt", cwd)
 	}
+	// finish() checks this too, but a Launch left running by a ferry that
+	// died can reach here after you opened the session yourself.
+	if live, err := l.Liveness(q.Session); err != nil {
+		return "", err
+	} else if live.Live && !live.Settling {
+		return "", fmt.Errorf("%s is already running here (%s); not starting another", short(q.Session.ID), live.Detail)
+	}
 	args := append([]string{"new", q.Name, "-c", l.abs(q.CwdRel), "--window", q.Agent, "--json", "--"}, q.Argv...)
 	out, err := rexRun(l.Home, args...)
 	if err != nil {

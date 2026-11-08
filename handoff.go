@@ -84,6 +84,9 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// it uses the sessions this handoff recorded rather than searching again.
 	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
 		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
+		if err := resendIfResumed(src, dst, hub, t, rec, si, di); err != nil {
+			return err
+		}
 		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts, nil)
 	}
 
@@ -408,16 +411,9 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return fmt.Errorf("%s: session %s disappeared before it was sent", si.Name, short(sess.ID))
 		}
 		sess = cur
-		stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
-		if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}, "session", sess.Size); err != nil {
+		if installed, err = sendSession(src, dst, t, *sess, si, di); err != nil {
 			return err
 		}
-		s, err := dst.StageSession(InstallReq{Session: *sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
-		if err != nil {
-			return err
-		}
-		installed = &s
-		step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
 	}
 
 	clock.lap("session")
@@ -455,6 +451,58 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts, cfgBefore)
+}
+
+// sendSession copies a session into in/<task>/session on dst and stages it
+// in in/<task>/ready, with paths rewritten. Nothing live changes.
+func sendSession(src, dst Machine, t task, sess Session, si, di Info) (*Session, error) {
+	stage := filepath.Join(".local", "state", "ferry", "in", t.Key, "session")
+	if err := transfer(src, ExportReq{Paths: sess.Files}, dst, ImportReq{BaseRel: stage, Clean: true}, "session", sess.Size); err != nil {
+		return nil, err
+	}
+	s, err := dst.StageSession(InstallReq{Session: sess, OldHome: si.Home, StageRel: stage, Task: t.Key})
+	if err != nil {
+		return nil, err
+	}
+	step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), di.Name, si.Home, di.Home)
+	return &s, nil
+}
+
+// resendIfResumed runs on a rerun that finishes a landing handoff. If the
+// source's copy has grown since the commit recorded it, someone resumed it
+// there, most likely because the failed run looked like it hadn't handed
+// off. The receiver would otherwise get the older copy, and the next handoff
+// back would park those turns. So the newer copy is sent and staged in its
+// place, and the record is updated to say so. An agent still running it on
+// the source would keep writing, so that refuses.
+func resendIfResumed(src, dst, hub Machine, t task, rec *Record, si, di Info) error {
+	if rec.Source == nil || rec.Installed == nil {
+		return nil
+	}
+	cur, err := src.FindSession(FindSessionReq{Agent: rec.Source.Agent, ID: rec.Source.ID})
+	if err != nil {
+		return err
+	}
+	if cur == nil || cur.Size == rec.Source.Size {
+		return nil
+	}
+	if live, err := src.Liveness(*cur); err != nil {
+		return err
+	} else if live.Live && !live.Settling {
+		return fmt.Errorf("%s: session %s has turns added since it was handed off, and %s; exit it, then run this again to send them", si.Name, short(cur.ID), live.Detail)
+	}
+	step("session", "%s: %s grew since the handoff (%s, was %s); sending it again", si.Name, short(cur.ID), humanSize(cur.Size), humanSize(rec.Source.Size))
+	installed, err := sendSession(src, dst, t, *cur, si, di)
+	if err != nil {
+		return err
+	}
+	expect := rec.Generation
+	rec.Source, rec.Installed, rec.Generation = cur, installed, expect+1
+	if err := hub.RecordPut(RecordPutReq{Expect: expect, Record: *rec}); err != nil {
+		return err
+	}
+	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+	return nil
 }
 
 // sessionFits checks that a session belongs to the worktree being moved: it

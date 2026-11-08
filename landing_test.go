@@ -231,3 +231,58 @@ func TestNoLaunchIntoAFolderNeitherMachineTrusts(t *testing.T) {
 		t.Fatalf("expected the resume command instead:\n%s", out)
 	}
 }
+
+// Turns added on the source before a rerun finishes the handoff go to the
+// receiver with it, instead of staying behind for the next pull to park.
+func TestLandingRerunSendsTurnsAddedOnTheSource(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.failingRestore(wt)
+	if out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch"); err == nil {
+		t.Fatalf("first run should fail in restore:\n%s", out)
+	}
+	sent := w.record(taskKey("src/app-wt/fix-auth")).Source.Size
+	src := filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")
+	f, _ := os.OpenFile(src, os.O_APPEND|os.O_WRONLY, 0)
+	fmt.Fprintf(f, `{"type":"user","cwd":%q,"message":"added on the laptop after the failed run"}`+"\n", wt)
+	f.Close()
+
+	// While an agent still has it open, the rerun waits for you to exit it.
+	w.liveAgent(w.laptop, sessionID)
+	if out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch"); err == nil || !strings.Contains(out, "exit it, then run this again") {
+		t.Fatalf("rerun with the source agent open: err %v\n%s", err, out)
+	}
+	os.RemoveAll(filepath.Join(w.laptop, ".claude/sessions"))
+
+	w.write(w.kant, "allow-restore", "")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if !strings.Contains(out, "sending it again") {
+		t.Fatalf("the rerun didn't notice the new turns:\n%s", out)
+	}
+	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
+	if got := w.read(w.kant, ".claude/projects/"+claudeSlug(kwt)+"/"+sessionID+".jsonl"); !strings.Contains(got, "added on the laptop after the failed run") {
+		t.Fatalf("kant's copy lacks the new turns:\n%s", got)
+	}
+	r := w.record(taskKey("src/app-wt/fix-auth"))
+	if r.State != stateOwned || r.Source == nil || r.Source.Size <= sent {
+		t.Fatalf("record after the rerun: state %s, source %+v, first sent %d bytes", r.State, r.Source, sent)
+	}
+}
+
+// A Launch that a dead ferry left running must not start a second agent next
+// to one you opened in the meantime.
+func TestLaunchRefusesASessionAlreadyLoaded(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("auto mode on")
+	t.Setenv("PATH", w.path)
+	w.liveAgent(w.kant, kantSessionID)
+	l := &Local{Home: w.kant}
+	_, err := l.Launch(LaunchReq{Name: "tool", CwdRel: "src", Agent: agentClaude, AcceptTrust: true,
+		Argv: []string{"claude", "--resume", kantSessionID}, Session: Session{Agent: agentClaude, ID: kantSessionID, Cwd: filepath.Join(w.kant, "src")}})
+	if err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("Launch = %v, want a refusal", err)
+	}
+	if n := countLines(log, "new "); n != 0 {
+		t.Fatalf("started %d agents", n)
+	}
+}
