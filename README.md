@@ -33,7 +33,7 @@ ferry ls kant
 
 Every ssh ferry starts, git's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
 
-On a terminal, ferry colors its step labels, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts (a single `y` or `n` answers). Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
+On a terminal, ferry colors its step labels, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts. A single `y` or `n` answers most of them; a prompt that would run code (a hook, or Claude after its config changed) ignores letters and takes an arrow key and Enter, so text typed ahead can only answer No. Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
 
 ## First real test
 

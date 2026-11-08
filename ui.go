@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -99,8 +100,24 @@ func openTTY() (*os.File, error) {
 }
 
 // confirm asks a yes/no question, defaulting to no. With no terminal the
-// answer is no.
-func confirm(prompt string) bool {
+// answer is no. A single y or n answers it.
+func confirm(prompt string) bool { return ask(prompt, nil) }
+
+// confirmRun asks before running code: a hook, or an agent whose config
+// changed. A keypress mustn't approve it by accident (text typed ahead of
+// the prompt, as in "ferry", holds a y), so y/n, the h/l toggles and Tab
+// are off: Yes takes an arrow key and then Enter, and anything else typed
+// can only submit the default, No.
+func confirmRun(prompt string) bool {
+	km := huh.NewDefaultKeyMap()
+	km.Confirm.Accept = key.NewBinding(key.WithDisabled())
+	km.Confirm.Reject = key.NewBinding(key.WithDisabled())
+	km.Confirm.Toggle = key.NewBinding(key.WithKeys("left", "right"), key.WithHelp("←/→", "toggle"))
+	km.Confirm.Next = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next"))
+	return ask(prompt, km)
+}
+
+func ask(prompt string, km *huh.KeyMap) bool {
 	defer clock.pause()()
 	tty, err := openTTY()
 	if err != nil {
@@ -113,11 +130,17 @@ func confirm(prompt string) bool {
 		line = strings.ToLower(strings.TrimSpace(line))
 		return line == "y" || line == "yes"
 	}
+	if km != nil {
+		prompt += " (←/→ then Enter)"
+	}
 	yes := false
-	err = huh.NewForm(huh.NewGroup(
+	form := huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Title(prompt).Affirmative("Yes").Negative("No").Value(&yes),
-	)).WithInput(tty).WithOutput(tty).WithShowHelp(false).Run()
-	return err == nil && yes
+	)).WithInput(tty).WithOutput(tty).WithShowHelp(false)
+	if km != nil {
+		form = form.WithKeyMap(km)
+	}
+	return form.Run() == nil && yes
 }
 
 // pick asks the user to choose one of lines.

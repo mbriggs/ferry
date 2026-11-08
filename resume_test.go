@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A pull run from a terminal ends in the agent, started in this terminal in
@@ -161,4 +162,73 @@ func TestPullRerunDoesNotStartASecondAgentHere(t *testing.T) {
 	if !strings.Contains(string(out), "already running here") || exists(ran) {
 		t.Fatalf("started a second agent on a loaded session:\n%s", out)
 	}
+}
+
+// On a terminal, a prompt that approves running code ignores a typed y:
+// text typed ahead must not run a hook. An arrow key and Enter do.
+func TestRunPromptsNeedArrowAndEnter(t *testing.T) {
+	for _, tc := range []struct {
+		keys string
+		ran  bool
+	}{
+		{"y\r", false},
+		{"\x1b[D\r", true}, // left arrow onto Yes, then Enter
+	} {
+		w := newWorld(t)
+		wt := w.laptopTask()
+		w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+		w.approve(w.kant, dehydrateScript)
+		os.Remove(filepath.Join(w.kant, "src/app-wt/fix-auth/.restored"))
+		// script's terminal starts at 0x0, where huh has nowhere to draw.
+		cmd := inTerminal(t, "/bin/sh", "-c", "stty cols 120 rows 40; exec "+ferryBin+" from kant fix-auth --yes --no-launch")
+		cmd.Dir = w.laptop
+		cmd.Env = append(os.Environ(), "HOME="+w.laptop, "FERRY_PLAIN=", "TERM=xterm-256color")
+		out, err := typeAt(cmd, "run this restore", tc.keys)
+		if err != nil {
+			t.Fatalf("%q: %v\n%s", tc.keys, err, out)
+		}
+		if ran := exists(filepath.Join(wt, ".restored")); ran != tc.ran {
+			t.Fatalf("keys %q: restore ran = %v, want %v\n%s", tc.keys, ran, tc.ran, out)
+		}
+	}
+}
+
+// typeAt runs cmd and types keys once its output shows marker, keeping
+// stdin open until it exits.
+func typeAt(cmd *exec.Cmd, marker, keys string) ([]byte, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	pr, pw := io.Pipe()
+	cmd.Stdout, cmd.Stderr = pw, pw
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		typed := false
+		for {
+			n, err := pr.Read(buf)
+			out.Write(buf[:n])
+			if !typed && strings.Contains(out.String(), marker) {
+				typed = true
+				time.Sleep(300 * time.Millisecond) // let the form take the terminal
+				io.WriteString(stdin, keys)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	timer := time.AfterFunc(30*time.Second, func() { cmd.Process.Kill() })
+	err = cmd.Wait()
+	timer.Stop()
+	pw.Close()
+	<-done
+	stdin.Close()
+	return out.Bytes(), err
 }

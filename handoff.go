@@ -383,7 +383,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			names = append(names, h.Name)
 		}
 		step("hooks", "git hooks from %s: %s", si.Name, strings.Join(names, ", "))
-		if !dst.IsLocal() || confirm("install these git hooks here? they run on git commands in this repo") {
+		if !dst.IsLocal() || confirmRun("install these git hooks here? they run on git commands in this repo") {
 			if err := dst.InstallGitHooks(InstallGitHooksReq{RepoRel: t.RepoRel, Hooks: send}); err != nil {
 				return err
 			}
@@ -584,7 +584,7 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 				step("resume", "%s is already running here (%s); not starting another", short(installed.ID), live.Detail)
 				break
 			}
-			if len(changed) == 0 || confirm("start claude here now? hooks in that config run as it starts") {
+			if len(changed) == 0 || confirmRun("start claude here now? hooks in that config run as it starts") {
 				here = argv
 				step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv[:len(argv)-1]))
 				break
@@ -741,7 +741,7 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		if everyRun {
 			prompt = fmt.Sprintf("run this %s on %s now?", q.Name, where)
 		}
-		if !confirm(prompt) {
+		if !confirmRun(prompt) {
 			step(q.Name, "skipped")
 			return "", nil
 		}
