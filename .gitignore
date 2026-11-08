@@ -1,12 +1,15 @@
 /ferry
 /dist/
 /worktree.env
-/.claude/worktrees/
 /tmp/
-# The global gitignore drops .claude; keep the verify-handoff skill, which
-# formal/check.sh reads for its sync commit.
+# The global gitignore drops .claude. Commit the lane hooks and their settings,
+# the worktree skill, and the verify-handoff skill, which formal/check.sh reads
+# for its sync commit. Worktrees and everything else in .claude stay out.
 !/.claude/
 /.claude/*
+!/.claude/settings.json
+!/.claude/hooks/
 !/.claude/skills/
 /.claude/skills/*
+!/.claude/skills/worktree/
 !/.claude/skills/verify-handoff/

@@ -81,11 +81,24 @@ check "setup again keeps lane 98" '[[ $(ls "$p/tmp/worktrees") == 98 ]]'
 rmdir /tmp/ferry-live-lane-97
 b=$(wt b); (cd "$b" && bin/worktree setup >/dev/null)
 check "a second worktree takes 97" '[[ $(cat "$p/tmp/worktrees/97") == "$b" ]]'
+check "guard judges the checkout that holds it, not the working directory" '(cd "$p" && "$b/bin/worktree" guard --deny x 2>/dev/null); [[ $? == 3 ]]'
+check "make -f a lane's Makefile from the primary still asks" \
+  '! (cd "$p" && perl -MPOSIX -e "POSIX::setsid(); exec @ARGV" make -s -f "$b/Makefile" install BIN="$root/installed" </dev/null >/dev/null 2>&1) && [[ ! -e $root/installed/ferry ]]'
 check "info names lane 97" '(cd "$b" && bin/worktree info) | grep "/tmp/ferry-git-lane-97" >/dev/null'
 d=$(wt d)
 check "the range can't widen past 99" '! (cd "$d" && WORKTREE_LANE_RANGE=97-150 bin/worktree setup) 2>/dev/null && [[ ! -f $d/worktree.env ]]'
 check "a full range refuses" '! (cd "$d" && WORKTREE_LANE_RANGE=97-98 bin/worktree setup) 2>/dev/null && [[ $(ls "$p/tmp/worktrees") == "97 98" || $(ls "$p/tmp/worktrees" | xargs) == "97 98" ]]'
 g -C "$p" worktree remove "$d"; g -C "$p" branch -q -D d
+
+echo "concurrency"
+e=$(wt e)
+(cd "$e" && bin/worktree setup >"$root/e1.log" 2>&1) & (cd "$e" && bin/worktree setup >"$root/e2.log" 2>&1) & wait
+check "two setups racing in one worktree both succeed with one lane" '[[ $(grep -l "$e" "$p"/tmp/worktrees/* | wc -l) -eq 1 ]] && grep -q "already provisioned" "$root/e1.log" "$root/e2.log"'
+g -C "$p" worktree remove --force "$e"; (cd "$p" && bin/worktree teardown --stale >/dev/null)
+check "the racing lane is swept" '! grep -qs "$e" "$p"/tmp/worktrees/*'
+perl -MFcntl=:flock -e 'open(my $l, ">>", shift); flock($l, LOCK_EX); sleep 60' "$p/tmp/worktrees.lock" & holder=$!
+sleep 0.3; kill -9 "$holder"; wait "$holder" 2>/dev/null || true
+check "a lock whose holder died doesn't block" '(cd "$p" && bin/worktree teardown --stale >/dev/null)'
 
 echo "teardown --stale"
 echo "x" > "$p/tmp/worktrees/150"
@@ -109,10 +122,13 @@ echo change > "$a/change.txt"; g -C "$a" add change.txt; g -C "$a" commit -qm "l
 check "teardown refuses a lane that isn't on main" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
 echo main-change > "$p/main.txt"; g -C "$p" add main.txt; g -C "$p" commit -qm "main moved"
 echo wip > "$p/wip.txt"
-check "land refuses a dirty primary" '! (cd "$p" && bin/worktree land a) 2>/dev/null'
-rm "$p/wip.txt"
+g -C "$p" add wip.txt
+check "land refuses tracked changes in the primary" '! (cd "$p" && bin/worktree land a) 2>/dev/null'
+g -C "$p" rm -q --cached wip.txt
 check "land refuses from inside the lane" '! (cd "$a" && bin/worktree land a) 2>/dev/null'
 (cd "$p" && bin/worktree land a >/dev/null 2>&1)
+check "an untracked file in the primary didn't block land" '[[ -f $p/wip.txt ]]'
+rm "$p/wip.txt"
 check "main fast-forwarded to the rebased lane" '[[ $(g -C "$p" rev-parse main) == $(g -C "$a" rev-parse HEAD) && -f $p/change.txt && -f $a/main.txt ]]'
 check "the lane's commit kept its message" '[[ $(g -C "$p" log -1 --format=%s) == "lane change" ]]'
 check "nothing was pushed" '[[ $(g -C "$root/origin.git" rev-parse main) != $(g -C "$p" rev-parse main) ]]'

@@ -1,6 +1,8 @@
 # Build ferry for this machine, install it where `ferry remote` is expected
 # (~/.local/bin/ferry), or cross-build for the other machine.
 BIN := $(HOME)/.local/bin
+# This Makefile's checkout, so `make -f <lane>/Makefile install` from elsewhere still guards the lane.
+ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 
@@ -10,7 +12,7 @@ build:
 	$(GOBUILD) -o ferry .
 
 install: build
-	bin/worktree guard --confirm "make install"
+	$(ROOT)/bin/worktree guard --confirm "make install"
 	mkdir -p $(BIN)
 	install -m 0755 ferry $(BIN)/ferry
 

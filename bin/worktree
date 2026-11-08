@@ -19,6 +19,10 @@ set -eu
 die() { echo "bin/worktree: $*" >&2; exit 1; }
 MAX=99
 
+self=$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")
+# A production script calls guard by its own checkout's path, and may run from
+# another directory, so guard judges the checkout that holds this file.
+[ "${1:-}" = guard ] && cd "$(dirname "$self")"
 top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git checkout"
 common=$(git rev-parse --path-format=absolute --git-common-dir)
 primary=$(dirname "$common")
@@ -56,20 +60,19 @@ in_use() { # in_use N: true if anything named for lane N exists
 
 # --- the registry: tmp/worktrees/<n> in the primary holds the worktree's path
 
-lock() {
-  mkdir -p "$reg"
-  i=0
-  until mkdir "$reg/.lock" 2>/dev/null; do
-    pid=$(cat "$reg/.lock/pid" 2>/dev/null || true)
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then rm -rf "$reg/.lock"; continue; fi
-    i=$((i + 1)); [ $i -lt 300 ] || die "timed out waiting for $reg/.lock"
-    sleep 0.1
-  done
-  echo $$ > "$reg/.lock/pid"
-  trap 'rm -rf "$reg/.lock"' EXIT
-  trap 'exit 1' INT TERM HUP
+# locked FILE ARGS...: rerun this script with ARGS while holding an exclusive
+# lock on FILE. macOS has no flock(1), so perl takes it; the kernel releases it
+# when the holder dies, so a crashed run never leaves a stale lock behind.
+locked() {
+  f=$1; shift
+  mkdir -p "$(dirname "$f")"
+  perl -MFcntl=:flock -e '
+    open(my $l, ">>", shift) or die "bin/worktree: $!\n";
+    flock($l, LOCK_EX) or die "bin/worktree: $!\n";
+    system(@ARGV);
+    exit($? == -1 || $? & 127 ? 1 : $? >> 8);' "$f" "$self" "$@"
 }
-unlock() { rm -rf "$reg/.lock"; trap - EXIT INT TERM HUP; }
+reglock=$primary/tmp/worktrees.lock
 
 valid_index() { case $1 in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -le $MAX ]; }
 entries() { # entries: registered lane indexes
@@ -94,7 +97,7 @@ drop_lane() {
   echo "dropped lane $1"
 }
 
-sweep() { # under the lock: drop lanes whose directory is gone
+sweep() { # under reglock: drop lanes whose directory is gone
   for n in $(entries); do
     p=$(cat "$reg/$n")
     [ -d "$p" ] && continue
@@ -130,16 +133,18 @@ allocate() {
 
 cmd_setup() {
   is_lane || die "setup runs in a linked worktree; this is the primary checkout"
-  lock
-  sweep
-  n=$(lane_of "$top") || { n=$(allocate); printf '%s\n' "$top" > "$reg/$n"; }
-  unlock
+  # Parallel first commands each fire the hook; the second waits, then finds worktree.env.
+  locked "$top/tmp/worktree-setup.lock" _setup
+}
+
+_setup() {
+  if [ -f "$top/worktree.env" ]; then echo "lane already provisioned in $top"; return 0; fi
+  n=$(locked "$reglock" _claim)
 
   # Build the lane's own binary; scripts in test/ run ./ferry.
   command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
   (cd "$top" && make -s build) || die "make build failed in $top"
 
-  mkdir -p "$top/tmp"
   tmpf=$top/worktree.env.tmp.$$
   {
     echo "# Written by bin/worktree setup. Loaded by .claude/hooks/worktree-env.sh and test/lib/lane.sh."
@@ -150,6 +155,13 @@ cmd_setup() {
   mv "$tmpf" "$top/worktree.env"
   rm -f "$top/tmp/worktree-setup.failed"
   echo "lane $n ready in $top"
+}
+
+_claim() { # under reglock: sweep, then print this worktree's lane, registering one if needed
+  mkdir -p "$reg"
+  sweep >&2
+  n=$(lane_of "$top") || { n=$(allocate); printf '%s\n' "$top" > "$reg/$n"; }
+  echo "$n"
 }
 
 cmd_info() {
@@ -182,7 +194,11 @@ in_primary_on_main() {
   [ "$top" = "$primary" ] || die "$1 runs in the primary checkout ($primary)"
   [ "$(git symbolic-ref --short HEAD 2>/dev/null)" = main ] || die "$1 needs the primary on main"
 }
+# Teardown counts untracked files, since removing the worktree deletes them.
+# land counts only tracked changes: a fast-forward leaves untracked files alone,
+# and git refuses one that would overwrite them.
 dirty() { [ -n "$(git -C "$1" status --porcelain)" ]; }
+dirty_tracked() { [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; }
 registered_path() { # the path as the registry and git record it
   for p in "$1" "$(git -C "$1" rev-parse --show-toplevel)"; do
     lane_of "$p" >/dev/null && { echo "$p"; return 0; }
@@ -191,7 +207,7 @@ registered_path() { # the path as the registry and git record it
 }
 
 cmd_teardown() {
-  if [ "${1:-}" = --stale ]; then lock; sweep; unlock; return 0; fi
+  if [ "${1:-}" = --stale ]; then locked "$reglock" _sweep; return; fi
   name=${1:?usage: bin/worktree teardown NAME [--discard] | --stale}
   discard=${2:-}
   [ -z "$discard" ] || [ "$discard" = --discard ] || die "unknown flag $discard"
@@ -210,9 +226,11 @@ cmd_teardown() {
   if [ -n "$branch" ]; then
     if [ -n "$discard" ]; then git branch -D "$branch"; else git branch -d "$branch"; fi
   fi
-  lock
-  if n=$(lane_of "$path"); then drop_lane "$n"; else echo "no lane was registered for $wt"; fi
-  unlock
+  locked "$reglock" _drop "$path"
+}
+
+_drop() { # under reglock: drop the lane registered for PATH
+  if n=$(lane_of "$1"); then drop_lane "$n"; else echo "no lane was registered for $1"; fi
 }
 
 cmd_land() {
@@ -220,8 +238,8 @@ cmd_land() {
   in_primary_on_main land
   wt=$(resolve "$name")
   [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
-  dirty "$primary" && die "the primary checkout has uncommitted changes; commit or stash them first"
-  dirty "$wt" && die "$wt has uncommitted changes; commit them first"
+  dirty_tracked "$primary" && die "the primary checkout has uncommitted changes; commit or stash them first"
+  dirty_tracked "$wt" && die "$wt has uncommitted changes; commit them first"
   branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
   git -C "$wt" rebase main || die "rebase of $branch onto main stopped; resolve it in $wt, then land again"
   git merge --ff-only "$branch"
@@ -254,5 +272,7 @@ case $cmd in
   teardown) cmd_teardown "$@" ;;
   land) cmd_land "$@" ;;
   guard) cmd_guard "$@" ;;
+  _setup|_claim|_drop) "$cmd" "$@" ;;
+  _sweep) sweep ;;
   *) sed -n '/^#   bin/s/^#   //p' "$0" >&2; exit 2 ;;
 esac
