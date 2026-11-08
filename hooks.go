@@ -161,10 +161,8 @@ func (l *Local) RunHook(q HookReq) (HookResult, error) {
 		return HookResult{}, err
 	}
 	root := l.abs(q.WtRel)
-	cmd := exec.Command(copy.Name())
-	if !bytes.HasPrefix(data, []byte("#!")) {
-		cmd = exec.Command("/bin/sh", copy.Name())
-	}
+	argv := hookArgv(data, copy.Name())
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = root
 	cmd.Env = append(toolEnv(),
 		"FERRY_DIRECTION="+q.Direction,
@@ -190,4 +188,29 @@ func tail(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// hookArgv is the command that runs the hook at path: its #! interpreter
+// and the line's one optional argument, split as the kernel splits them, or
+// /bin/sh when there's no #! line. Ferry runs the interpreter itself because
+// path is a fresh copy, and macOS checks a file the first time it's exec'd,
+// which adds about 150ms to every hook run.
+func hookArgv(data []byte, path string) []string {
+	line, _, _ := bytes.Cut(data, []byte("\n"))
+	shebang, ok := bytes.CutPrefix(line, []byte("#!"))
+	if !ok {
+		return []string{"/bin/sh", path}
+	}
+	s := strings.TrimLeft(string(shebang), " \t")
+	interp, arg := s, ""
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		interp, arg = s[:i], strings.Trim(s[i:], " \t")
+	}
+	switch {
+	case interp == "":
+		return []string{path} // exec reports the bad #! line
+	case arg == "":
+		return []string{interp, path}
+	}
+	return []string{interp, arg, path}
 }
