@@ -50,6 +50,15 @@ func newWorld(t *testing.T) *world {
 		w.write(home, ".config/ferry/name", name+"\n")
 	}
 	w.write(w.laptop, ".config/ferry/hosts", "kant exec:"+w.kant+"\n")
+	// Ferry must never run the real agents or read the real login profile:
+	// both depend on the machine running the tests (mise wrappers, slow with
+	// a strange HOME). Fake agents report a version; tests that need more
+	// write over them in the same bin.
+	t.Setenv("SHELL", "")
+	bin := filepath.Join(root, "bin")
+	writeExec(t, filepath.Join(bin, "claude"), "#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
+	writeExec(t, filepath.Join(bin, "codex"), "#!/bin/sh\necho 'codex-cli 0.100.0'\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return w
 }
 

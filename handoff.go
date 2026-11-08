@@ -89,7 +89,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// it uses the sessions this handoff recorded rather than searching again.
 	if rec != nil && rec.State == stateLanding && rec.Owner == di.Name && rec.From == si.Name {
 		step("owner", "%s owns %s (generation %d); finishing the handoff", di.Name, t.Name, rec.Generation)
-		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts)
+		return finish(src, dst, hub, t, rec, rec.Source, rec.Installed, si, di, direction, opts, nil)
 	}
 
 	// Whether this machine may hand the task off. It's decided before the
@@ -200,6 +200,13 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	}
 
 	clock.lap("preflight")
+
+	// What Claude will load here, before anything from the other machine
+	// lands, so finish() can tell what the handoff changed.
+	var cfgBefore map[string]string
+	if lm, ok := dst.(*Local); ok && sess != nil && sess.Agent == agentClaude {
+		cfgBefore = claudeConfig(claudeDirs(lm.abs(t.WtRel), lm.abs(mustRel(si.Home, sess.Cwd))))
+	}
 
 	// --- dehydrate ---------------------------------------------------------
 	// Once a task has been on kant, the laptop's worktree holds code kant
@@ -448,7 +455,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 		}
 	}
 
-	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts)
+	return finish(src, dst, hub, t, rec, sess, installed, si, di, direction, opts, cfgBefore)
 }
 
 // sessionFits checks that a session belongs to the worktree being moved: it
@@ -528,7 +535,11 @@ func settle(m Machine, s Session) (Liveness, error) {
 // place, run restore, and start the agent. Each is safe to repeat. The
 // sending machine keeps its copy of the session, so either side can resume
 // it; a copy the receiver already had is parked before it's replaced.
-func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts) error {
+//
+// cfgBefore is what Claude would load here before the handoff (see
+// claudeConfig); nil when this machine isn't receiving a Claude session, or
+// on a rerun, which can't know.
+func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session, si, di Info, direction string, opts handoffOpts, cfgBefore map[string]string) error {
 	if installed != nil {
 		if err := dst.PlaceSession(PlaceReq{Session: *installed, Task: t.Key}); err != nil {
 			return err
@@ -556,7 +567,17 @@ func finish(src, dst, hub Machine, t task, rec *Record, sess, installed *Session
 		note := resumeNote(si, di, t, *installed, summary)
 		argv := resumeArgv(*installed, note)
 		cwdRel, _ := filepath.Rel(di.Home, installed.Cwd)
-		if dst.IsLocal() && !opts.NoLaunch && interactive() {
+		// Claude runs project hooks the moment it starts, so if the handoff
+		// changed what it loads here, starting it needs a yes on this run.
+		var changed []string
+		if lm, ok := dst.(*Local); ok && installed.Agent == agentClaude {
+			changed = configChanges(lm.Home, cfgBefore, claudeConfig(claudeDirs(lm.abs(t.WtRel), installed.Cwd)))
+			if len(changed) > 0 {
+				step("claude", "config Claude loads here, changed by the handoff: %s", strings.Join(changed, ", "))
+			}
+		}
+		if dst.IsLocal() && !opts.NoLaunch && interactive() &&
+			(len(changed) == 0 || confirm("start claude here now? hooks in that config run as it starts")) {
 			here = argv
 			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv[:len(argv)-1]))
 			break
