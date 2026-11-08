@@ -161,10 +161,7 @@ func (l *Local) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 			return SnapshotResult{}, err
 		}
 	}
-	fp, err := fingerprint(dir)
-	if err != nil {
-		return SnapshotResult{}, err
-	}
+	fp := fingerprintOf(base, idxTree, wipTree)
 	status, _ := git(dir, "status", "--porcelain")
 	dirty := 0
 	if status != "" {
@@ -228,7 +225,11 @@ func fingerprint(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "head=" + head + " index=" + idx + " tree=" + tree, nil
+	return fingerprintOf(head, idx, tree), nil
+}
+
+func fingerprintOf(head, indexTree, worktreeTree string) string {
+	return "head=" + head + " index=" + indexTree + " tree=" + worktreeTree
 }
 
 type ApplyReq struct {
