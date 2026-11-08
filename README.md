@@ -1,6 +1,6 @@
 # ferry
 
-Hand a coding task, meaning a git worktree under `~/src` plus its Claude Code or Codex session, from the laptop to kant and back. The agent resumes the full conversation on the other side. See [PROPOSAL.md](PROPOSAL.md) for the design.
+Hand a coding task, meaning a git worktree under `~/src` plus its Claude Code or Codex session, from the laptop to kant and back. The agent resumes the full conversation on the other side.
 
 ```
 ferry to kant                 # in the worktree, after exiting the agent
@@ -36,6 +36,26 @@ ferry ls kant
 Every ssh ferry starts, git's and rsync's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
 
 On a terminal, ferry colors its step labels, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts. A single `y` or `n` answers most of them; a prompt that would run code (a hook, or Claude after its config changed) ignores letters and takes an arrow key and Enter, so text typed ahead can only answer No. Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
+
+## How a handoff works
+
+The laptop drives every handoff, and kant keeps one record per task in `~/.local/state/ferry/tasks/`, naming the machine that owns it. Each write to the record is a compare-and-swap on its generation. The steps run in this order:
+
+1. Preflight. The agent must have exited. On the laptop you exit it yourself, and on kant ferry sends `/exit` to an idle agent in its Rex pane. It never stops a busy one. If the receiver's agent is older than the sender's, ferry refuses unless you pass `--force-version`.
+2. `.ferry/dehydrate` runs on the sender, if approved.
+3. Code moves through git. The sender commits HEAD, its index, and its working tree as three hidden commits under `refs/ferry/<task>/`, without touching your index, stash, or branch. The receiver checks them out and stops if the result doesn't match the sender's fingerprint, or if its copy changed since it last handed the task away. Nothing merges.
+4. Ignored files move with rsync: `.env` files, generated output, `.claude/`, and `.ferry/state/`, which never becomes a git object. Dependency and build trees (`node_modules`, `target`, `.venv` and the like) stay, as do Claude's worktrees under `.claude/worktrees/` and anything `.ferry/exclude` names. Ferry lists what stays, and asks before sending what changed (`--yes` answers). An ignored file the other side deleted is parked, not deleted, unless it changed here since it was sent. Git hooks travel too. Coming to the laptop, they install only with a yes on that run.
+5. The session and the agent's project memory are staged on the receiver with the home path rewritten, so nothing live has moved yet.
+6. The record names the receiver as owner. This is the commit point. A failure before it leaves the sender as it was, and a failure after it leaves the receiver owning the task. Rerunning the same command picks up where it stopped.
+7. The staged session moves into place, `.ferry/restore` runs on the receiver if approved, and the agent resumes. On kant it starts in a new Rex session. On the laptop it starts in your terminal, with one exception. Claude runs project hooks and `.mcp.json` servers as it starts, and `.claude/` travels, so before a pull touches anything ferry fingerprints what Claude would load: `.claude/`, `.mcp.json`, the project files their commands name, and the files those scripts name in turn. If the handoff changed any of it, ferry lists the files and starts Claude only with a yes on that run. The check finds files by name, so code a hook reaches without naming a file, like the Makefile behind `make check`, isn't covered.
+
+The sender keeps its copy of the session. Resuming both forks the conversation, and the two copies take the Remote Control link from each other. If the receiver already had a copy from an earlier trip, that copy goes to `~/.local/state/ferry/parked/` first, so turns you added there aren't lost. The record never expires on its own, because a closed laptop is the normal case.
+
+### Project scripts
+
+A project can have two optional executables. `.ferry/dehydrate` runs on the machine giving up the task, after the agent stops and before the snapshot. It saves state git doesn't hold into `.ferry/state/` and stops anything holding the tree. `.ferry/restore` runs on the machine taking the task, before the agent starts. It installs dependencies, loads what dehydrate saved, and starts services. Both get `FERRY_DIRECTION` (`to` or `from`), `FERRY_TASK`, `FERRY_ROOT` and `FERRY_STATE`, and both must be safe to run twice. If dehydrate fails, nothing moves. If restore fails, the task still moves but the agent doesn't start. The last line of stdout is a summary that goes into the agent's resume note.
+
+kant runs agents unattended, so code from kant is trusted less. A script runs only once you approve its hash, which ferry keeps in `~/.config/ferry/approved`, and ferry shows the whole script first. Scripts over 64 KB never run. On the laptop, a script that may run code kant wrote asks on every run, even if approved: restore during `ferry from`, and dehydrate once the task has been on kant. Before it asks, ferry lists what changed since the laptop last sent the task, worked out from the laptop's own `refs/ferry-sent/<task>`, and flags build files like `package.json`, lockfiles and `Makefile`. `--yes` never approves a script. ferry doesn't sandbox anything. Once you say yes, kant's changes run with your permissions.
 
 ## First real test
 

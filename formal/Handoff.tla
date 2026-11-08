@@ -13,8 +13,8 @@
 \* atomic step.
 \*
 \* Since 2b4274b the sending machine keeps its copy after a handoff, so
-\* either machine can resume it (PROPOSAL.md, "The sending machine keeps its
-\* copy"). The receiver parks a copy it already had before PlaceSession
+\* either machine can resume it (README.md, "The sender keeps its copy of
+\* the session"). The receiver parks a copy it already had before PlaceSession
 \* replaces it.
 \*
 \* The laptop drives every run, under a flock that the kernel drops the
@@ -148,10 +148,10 @@ Put(o, new, p) ==
 
 \* You have the session open where the design lets ferry leave it behind or
 \* replace it: on a machine the record doesn't name as owner, which forks it
-\* (PROPOSAL.md: "Resuming both does fork the conversation"), or on the
-\* receiver of a landing handoff whose staged copy will replace it
-\* (PROPOSAL.md: "the old one goes to parked/ first, so turns you added there
-\* by hand aren't lost"). forked stays set once this has happened.
+\* (README.md: "Resuming both forks the conversation"), or on the receiver
+\* of a landing handoff whose staged copy will replace it (README.md: that
+\* copy "goes to ~/.local/state/ferry/parked/ first, so turns you added there
+\* aren't lost"). forked stays set once this has happened.
 ForkedNow == \E m \in Machines :
     userOn[m] /\ (rec.owner # m \/ (rec.state = "landing" /\ ready[m] > 0))
 
@@ -472,7 +472,7 @@ Holds(v, S) == \E c \in S : v \in lin[c]
 
 \* Unless you forked the session, ferry never leaves agents running it on
 \* both machines. Both would take the Remote Control link from each other
-\* (PROPOSAL.md). This replaces NoFork: since 2b4274b both machines keep a
+\* (README.md). This replaces NoFork: since 2b4274b both machines keep a
 \* resumable copy on purpose, so only running agents are a fork ferry made.
 NoTwoAgents == forked \/ ~(running["laptop"] > 0 /\ running["kant"] > 0)
 
@@ -486,9 +486,9 @@ NoLostTurns ==
          \/ Holds(v, {copy[m] : m \in Machines} \ {0})
          \/ rec.state = "landing" /\ rec.instV > 0 /\ ready[rec.owner] > 0 /\ v \in lin[ready[rec.owner]]
 
-\* No turn is ever destroyed: it is live, staged, or parked. PROPOSAL.md: the
-\* receiver's old copy "goes to parked/ first, so turns you added there by
-\* hand aren't lost."
+\* No turn is ever destroyed: it is live, staged, or parked. README.md: the
+\* receiver's old copy "goes to ~/.local/state/ferry/parked/ first, so turns
+\* you added there aren't lost."
 NoDestroyedTurns == \A v \in 1..latest : Holds(v, Kept \cup parkedV)
 
 \* When no ferry is running and the record says owned, the owner has the
