@@ -25,19 +25,20 @@ The model covers this code, as of the sync commit below. Run `git diff <sync com
 | Model action | Code |
 |---|---|
 | `Start` | `main.go` `cmdTo`/`cmdFrom` (`l.lockTask`, `remote.Task`; `choosePull` can pick a task with no record), then `handoff()`: `hub.RecordGet` into this run's `rec` (`runRec`), the `stateLanding` rerun branch, and the refusals (unfinished handoff, other owner), which run before the session step. Waits for `pending`, because the first kant call waits on `lockRemoteCall` (`record.go`, taken in `serveRemote`) |
+| `RerunFind` | the rerun branch's `resendIfResumed`: `src.FindSession` for `rec.Source`. If the copy grew, `src.Liveness` refuses while an agent has it open, else `sendSession` (`Transfer`, `Stage`) and the `landing` RecordPut (`Commit`) record the newer copy |
 | `Find` | `handoff()`: `src.FindSession` (with `KnownID`, the session the task last moved with) |
 | `DstLive` | `dst.Liveness`: "already has this session loaded", before the agent is stopped |
 | `StopAgentStep` | `settle`, then on kant `src.StopAgent` (the pane comes from the agent's environment, so it needs no record; once the agent exits it closes the record's Rex session if no blocks are left, which the model leaves out), `settle`, and `FindSession` again. On the laptop: "exit the agent, then run this again" |
 | `Claim` | "--- claim ---": the `handing-off` RecordPut that records `Source`. A resumed claim skips it |
 | `Work` | dehydrate, repo, snapshot, `moveRefs`, the `Attempt` RecordPut, `Apply`, extras, git hooks |
-| `Transfer` | the second `src.FindSession` ("disappeared before it was sent"), then `transfer(...)` with `Clean: true` into `in/<task>/session` |
+| `Transfer` | the second `src.FindSession` ("disappeared before it was sent"), then `sendSession`: `transfer(...)` with `Clean: true` into `in/<task>/session` |
 | `Stage` | `dst.StageSession` into `in/<task>/ready`. `installed` is set only on success |
 | `Commit` | "--- commit ---": the `landing` RecordPut, which sets `rec.Source` to the session sent and returns err on failure |
 | `FinishPlace`, `PlaceEff` | `finish()`: `dst.PlaceSession`: nil if `ready` is gone, refuses while `Liveness` sees the session loaded, else parks the receiver's copy to `parked/<task>-replaced-*` and moves `ready` in. The source keeps its copy |
 | `FinishRestore` | the restore hook, then the branch: `Launch` on kant, exec here on the laptop (a terminal, no `--no-launch`), or print the resume command |
 | `ExecLive` | on the laptop, `dst.Liveness` ("already running here; not starting another"), then the confirm when the handoff changed Claude's config (`configChanges`). A no prints the resume command |
-| `FinishLive`, `FinishLaunch` | `dst.Liveness` ("already running"), then `dst.Launch` (`rex.go`: returns once `Liveness` sees the agent, or kills it and fails) |
-| `FinishPut`, `Exec` | the `owned` RecordPut, then `execHere` on the laptop |
+| `FinishLive`, `FinishLaunch` | `dst.Liveness` ("already running"), then `dst.Launch` (`rex.go`: refuses if `Liveness` sees the session loaded, then returns once `Liveness` sees the agent, or kills it and fails) |
+| `FinishPut`, `Exec`, `ExecEff` | the `owned` RecordPut, then `execHere` on the laptop |
 | `Put`, `PutEff` | `RecordPut`'s compare-and-swap against this run's generation |
 | `StageEff`, `PlaceEff`, `LaunchEff`, `StopEff` | what `session.go` and `rex.go` do when the call runs |
 | `running`, `userOn` | agents `Liveness` sees: `~/.claude/sessions/<pid>.json`, or Codex's thread lock. `userOn` marks one you opened |
@@ -47,7 +48,7 @@ The model covers this code, as of the sync commit below. Run `git diff <sync com
 
 If the diff changes the order of these calls, what a failure does (return, or print and continue), which machine a call runs on, what a call moves, what `Liveness` can see, when `Launch` returns, when ferry starts an agent, or what either lock excludes, the change touches the model. Changes to path rewriting, hook prompts, extras planning, git snapshots, transfer checksums, ssh options, session picking in `pick.go`, or step timing do not.
 
-**Sync commit: `5e2ccc698b152ceec9ffc50e7fe7defbf520c9a3`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
+**Sync commit: `0cd3ad697286baef6710302efedc82f265e81a96`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
 
 ## Run it
 
@@ -65,7 +66,7 @@ There are three modes:
 
 In each mode, a promise must hold, unless `formal/known-findings` lists it for that mode. A listed promise must fail as the code is, and must hold once the switches on its line remove its cause. That second run is what keeps a known finding from hiding a new one. A switch is `-KIND`, which drops one kind of dead call (`put`, `stop`, `import`, `stage`, `place`, `launch`). When a new finding needs a switch that this doesn't describe, add a model constant that defaults to what the code does, and teach `check()` in `check.sh` to set it.
 
-Each `Reach*` check must fail in its mode. A failing reach check shows that the model gets to a round trip, a launch on kant, an exec on the laptop, a stopped agent, a parked replaced copy, a rerun into `finish()`, a `PlaceSession` refusal, or a dead call. If one passes, the model can't get there, and every pass in that mode means less.
+Each `Reach*` check must fail in its mode. A failing reach check shows that the model gets to a round trip, a launch on kant, an exec on the laptop, a stopped agent, a parked replaced copy, a rerun that sends the session again, a rerun into `finish()`, a `PlaceSession` refusal, or a dead call. If one passes, the model can't get there, and every pass in that mode means less.
 
 Exit 0 means all of the above. The output lines mean:
 
@@ -90,10 +91,7 @@ Mirror the change in the matching action, keeping one action per call that can f
 
 ## Current findings
 
-Each item names its line in `known-findings`.
-
-1. **A dead `Launch` on kant can start a second agent** (overlap: OneAgent, `-launch`). The laptop's ferry dies while `Launch` runs on kant, and you open the session on kant before `rex new` starts its agent. `Launch` doesn't ask `Liveness` before it starts one. The window is the time between ferry dying and `rex new`, usually under a second. The model only found this once it kept your agent open between runs.
-2. **Turns added on the source after a failed `ferry to` can end up only in parked/** (overlap: NoLostTurns, `-put`). The laptop's ferry dies during the commit RecordPut, which still lands on kant. Before it lands, you resume the session on the laptop and add turns. The rerun sees `landing` and finishes with the copy staged before your turns. The next `ferry from kant` replaces the laptop's copy and parks your turns. If the commit's reply is lost instead, so the record already names kant when you resume, the model counts this as a fork, because 2b4274b dropped the check that refused it ("The rerun check that refused when the source had been resumed after the commit goes with the parking"). The two cases look the same to you. Whether the rerun should refuse again is a design question, not drift.
+None. `known-findings` lists no line.
 
 Fixed or gone since the first version of this model:
 
@@ -101,6 +99,8 @@ Fixed or gone since the first version of this model:
 - `finish()` compared the source against a stale session (`CompareStaged`). The size check is now gone entirely (2b4274b), and `SizeCheckFair` went with it.
 - A dead call on kant could land in the middle of a rerun. Now `ferry remote` holds `lockRemoteCall` for each call on a task.
 - A rerun of `ferry from` could exec a second agent on the laptop next to one you had opened there after the restore hook failed. `finish()` now asks `Liveness` before `execHere` (5e2ccc6), and the `+execlive` switch went with it.
+- A dead `Launch` on kant could start a second agent next to one you opened before `rex new` ran. `Launch` now asks `Liveness` first. Opening one in the milliseconds between that check and `rex new` is still possible, and the model leaves it out with the other opens during a run.
+- Turns you added on the source after a failed `ferry to`, while the dead commit RecordPut was still landing, stayed behind, and the next `ferry from kant` parked them. A rerun now sends the source's copy again when it has grown since the commit recorded it (`resendIfResumed`), and refuses while an agent still has it open.
 - A dead `Park` on kant could park turns you had just added. `finish()` no longer parks the source (2b4274b), so the call and its finding are gone.
 
 ## What it leaves out

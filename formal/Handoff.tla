@@ -124,12 +124,14 @@ PlaceEff(m) == IF ready[m] > 0 /\ ~PlaceRefuses(m)
                       /\ ready' = [ready EXCEPT ![m] = 0]
                       /\ parkedV' = IF copy[m] \notin {0, ready[m]} THEN parkedV \cup {copy[m]} ELSE parkedV
                  ELSE UNCHANGED <<copy, ready, parkedV>>
-\* Launch: `rex new` starts the agent with --resume, and Launch returns once
-\* Liveness sees it. An agent that doesn't register in time is killed, and
-\* Launch fails. Without a transcript it exits. execHere has the same effect.
-LaunchEff(m) ==
+\* execHere: the agent starts with --resume. Without a transcript it exits.
+ExecEff(m) ==
     IF copy[m] = 0 THEN UNCHANGED running
     ELSE running' = [running EXCEPT ![m] = @ + 1]
+\* Launch: Liveness first, refusing if the session is loaded. Then `rex new`
+\* starts the agent, and Launch returns once Liveness sees it. An agent that
+\* doesn't register in time is killed, and Launch fails.
+LaunchEff(m) == IF running[m] > 0 THEN UNCHANGED running ELSE ExecEff(m)
 \* StopAgent sends /exit to the agent's pane and waits until no registered
 \* process holds the session. A second one keeps it held.
 StopOK(m) == running[m] = 1
@@ -170,11 +172,24 @@ Start(s) ==
               refused  == rec.gen > 0 /\ ~resuming /\ (rec.state \in {"handing-off", "landing"} \/ rec.owner # s)
           IN IF ~isRerun /\ refused THEN Stop
              ELSE /\ src' = s /\ dst' = Other(s) /\ runRec' = rec
-                  /\ pc' = IF isRerun THEN "finishPlace" ELSE "find"
+                  /\ pc' = IF isRerun THEN "rerunFind" ELSE "find"
                   /\ rerun' = isRerun
                   \* finish() on a rerun uses rec.Source and rec.Installed.
                   /\ sessV' = IF isRerun THEN rec.srcV ELSE 0
                   /\ instV' = IF isRerun THEN rec.instV ELSE 0
+    /\ UNCHANGED <<world, rec, pending>>
+    /\ Fork
+
+\* resendIfResumed: on a rerun, src.FindSession for rec.Source. If the
+\* source's copy grew since the commit recorded it, src.Liveness: a running
+\* agent refuses, otherwise the copy is sent and staged again (Transfer,
+\* Stage), and the landing RecordPut records it (Commit).
+RerunFind ==
+    /\ pc = "rerunFind"
+    /\ \/ IF sessV = 0 \/ copy[src] \in {0, sessV} THEN Goto("finishPlace")
+          ELSE IF running[src] > 0 THEN Stop
+          ELSE Goto("transfer")
+       \/ Faults /\ Stop
     /\ UNCHANGED <<world, rec, pending>>
     /\ Fork
 
@@ -343,7 +358,7 @@ FinishPut ==
 \* with ferry's files. LookPath or Chdir can fail first.
 Exec ==
     /\ pc = "exec"
-    /\ \/ LaunchEff(dst)
+    /\ \/ ExecEff(dst)
        \/ UNCHANGED running
     /\ Stop
     /\ UNCHANGED <<copy, stageTmp, ready, parkedV, userOn, turns, rec, pending>>
@@ -425,7 +440,7 @@ AgentExit(m) ==
 
 Next ==
     \/ \E s \in Machines : Start(s)
-    \/ Find \/ DstLive \/ StopAgentStep \/ Claim \/ Work \/ Transfer \/ Stage \/ Commit
+    \/ RerunFind \/ Find \/ DstLive \/ StopAgentStep \/ Claim \/ Work \/ Transfer \/ Stage \/ Commit
     \/ FinishPlace \/ FinishRestore \/ FinishLive \/ ExecLive \/ FinishLaunch \/ FinishPut \/ Exec
     \/ Crash \/ CrashInFlight \/ Deliver
     \/ \E m \in Machines : Open(m) \/ AgentTurn(m) \/ AgentExit(m)
@@ -494,6 +509,7 @@ ReachRoundTrip == ~(rec.gen >= 6 /\ rec.owner = "laptop" /\ rec.state = "owned")
 ReachLaunch == ~(running["kant"] > 0)
 ReachExec == ~(pc = "exec" /\ copy[dst] > 0)
 ReachStopAgent == ~(pc = "stopAgent" /\ src = "kant")
+ReachResend == ~(pc = "transfer" /\ rerun)
 ReachRerunFinish == ~(pc = "finishPlace" /\ rerun /\ instV > 0)
 ReachPlaceRefusal == ~(pc = "finishPlace" /\ instV > 0 /\ PlaceRefuses(dst))
 ReachReplacedPark == parkedV = {}
