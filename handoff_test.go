@@ -45,6 +45,9 @@ const sessionID = "11111111-2222-3333-4444-555555555555"
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	root := t.TempDir()
+	// Code that runs in the test process, not as a ferry subprocess, must
+	// never reach the real home (~/.claude/sessions, ~/.local/state/ferry).
+	t.Setenv("HOME", root)
 	w := &world{t: t, root: root, laptop: filepath.Join(root, "Users", "matt"), kant: filepath.Join(root, "home", "mbriggs")}
 	for name, home := range map[string]string{"laptop": w.laptop, "kant": w.kant} {
 		w.write(home, ".config/ferry/name", name+"\n")
