@@ -6,7 +6,7 @@ ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: build install dist test
+.PHONY: build install dist push test
 
 build:
 	$(GOBUILD) -o ferry .
@@ -23,6 +23,11 @@ dist:
 	GOOS=linux GOARCH=amd64 $(GOBUILD) -o dist/ferry-linux-amd64 .
 	GOOS=linux GOARCH=arm64 $(GOBUILD) -o dist/ferry-linux-arm64 .
 	cd dist && shasum -a 256 ferry-* > SHA256SUMS
+
+# Rebuild for every platform and put this build on each host in
+# ~/.config/ferry/hosts that runs a different one.
+push: build dist
+	./ferry push
 
 test:
 	go test ./...

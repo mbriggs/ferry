@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -106,5 +107,62 @@ func TestOlderProtocolIsRefusedUpFront(t *testing.T) {
 	out, _ := w.ferry(w.laptop, "doctor", "kant")
 	if !strings.Contains(out, "speaks protocol 0") {
 		t.Fatalf("doctor should name the mismatch:\n%s", out)
+	}
+}
+
+// push installs this build on every host in the hosts file, and leaves a
+// host that already runs it alone.
+func TestPushUpdatesEveryHost(t *testing.T) {
+	w := newWorld(t)
+	w.fakeSSH(false)
+	w.write(w.laptop, ".config/ferry/hosts", "kant mbriggs@fakehost\nlaptop self@nowhere\n")
+	out := w.mustFerry(w.laptop, "push")
+	installed, err := os.ReadFile(filepath.Join(w.kant, ".local/bin/ferry"))
+	self, _ := os.ReadFile(ferryBin)
+	if err != nil || !bytes.Equal(installed, self) {
+		t.Fatalf("kant didn't get this build: %v\n%s", err, out)
+	}
+	if out := w.mustFerry(w.laptop, "push"); !strings.Contains(out, "kant already runs dev") {
+		t.Fatalf("a second push should change nothing:\n%s", out)
+	}
+}
+
+// A binary for the other machine's platform built from another commit is
+// refused, not installed; once it matches this build, it goes.
+func TestPushRefusesAStaleCrossBuild(t *testing.T) {
+	if buildCommit(ferryBin) == "an unknown commit" {
+		t.Skip("the test binary has no commit recorded (not built in a git checkout)")
+	}
+	// Stands in for the other platform's build: it runs here, but records
+	// no commit, like a build from an older tree. Built before newWorld
+	// moves HOME, so go uses the real module cache.
+	old := filepath.Join(t.TempDir(), "ferry-old")
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", old, ".").CombinedOutput(); err != nil {
+		t.Fatal(string(out))
+	}
+	w := newWorld(t)
+	w.fakeSSH(false)
+	w.write(w.laptop, ".config/ferry/hosts", "kant mbriggs@fakehost\n")
+	foreign, uname := "linux-amd64", "Linux x86_64"
+	if runtime.GOOS == "linux" {
+		foreign, uname = "darwin-arm64", "Darwin arm64"
+	}
+	writeExec(t, filepath.Join(w.root, "bin", "uname"), "#!/bin/sh\necho "+uname+"\n")
+	repo := filepath.Join(w.root, "repo")
+	dist := filepath.Join(repo, "dist", "ferry-"+foreign)
+	os.MkdirAll(filepath.Dir(dist), 0o755)
+	data, _ := os.ReadFile(old)
+	os.WriteFile(dist, data, 0o755)
+	out, err := w.ferry(repo, "push", "kant")
+	if err == nil || !strings.Contains(out, "make dist") {
+		t.Fatalf("push should refuse the stale build: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(w.kant, ".local/bin/ferry")); err == nil {
+		t.Fatal("installed the stale build")
+	}
+	self, _ := os.ReadFile(ferryBin)
+	os.WriteFile(dist, self, 0o755)
+	if out := w.mustFerry(repo, "push", "kant"); !strings.Contains(out, "installed dev ("+strings.Replace(foreign, "-", "/", 1)+")") {
+		t.Fatalf("push should install the matching build:\n%s", out)
 	}
 }

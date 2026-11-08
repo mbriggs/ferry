@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 )
 
@@ -48,25 +50,34 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 	}
 	step("ssh", "%s answered in %s", target, roundDuration(took))
 
+	if err := pushFerry(name, target, ferryPath, dryRun); err != nil {
+		return fail(err)
+	}
+	return finishSetup(l, name)
+}
+
+// pushFerry puts this build of ferry at ferryPath on target, unless it
+// already runs it, and checks that the installed copy answers as this build.
+func pushFerry(name, target, ferryPath string, dryRun bool) error {
 	if ferryPath == "" {
 		ferryPath = "~/.local/bin/ferry"
 	}
 	have, _ := sshOutput(target, ferryPath+" version 2>/dev/null")
 	if have == "ferry "+version {
 		step("ferry", "%s already runs %s", name, version)
-		return finishSetup(l, name)
+		return nil
 	}
 	uname, err := sshOutput(target, "uname -sm")
 	if err != nil {
-		return fail(fmt.Errorf("asking %s for its OS: %v", name, err))
+		return fmt.Errorf("asking %s for its OS: %v", name, err)
 	}
 	goos, goarch, err := platform(uname)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	bin, err := binaryFor(goos, goarch)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	was := strings.TrimPrefix(have, "ferry ")
 	if was == "" {
@@ -74,13 +85,16 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 	}
 	if dryRun {
 		step("ferry", "would install %s (%s/%s) at %s on %s, replacing %s", version, goos, goarch, ferryPath, name, was)
-		return 0
+		return nil
 	}
 	if err := installBinary(target, ferryPath, bin); err != nil {
-		return fail(fmt.Errorf("installing ferry on %s: %v", name, err))
+		return fmt.Errorf("installing ferry on %s: %v", name, err)
+	}
+	if got, err := sshOutput(target, ferryPath+" version"); err != nil || got != "ferry "+version {
+		return fmt.Errorf("installed %s at %s on %s, but it answers %q (%v)", bin, ferryPath, name, got, err)
 	}
 	step("ferry", "installed %s (%s/%s) at %s on %s, replacing %s", version, goos, goarch, ferryPath, name, was)
-	return finishSetup(l, name)
+	return nil
 }
 
 func finishSetup(l *Local, name string) int {
@@ -179,12 +193,63 @@ func binaryFor(goos, goarch string) (string, error) {
 		return self, nil
 	}
 	name := "ferry-" + goos + "-" + goarch
+	want := buildCommit("")
+	var stale error
 	for _, p := range []string{filepath.Join(filepath.Dir(self), name), filepath.Join("dist", name)} {
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
-			return p, nil
+		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+			continue
 		}
+		got := buildCommit(p)
+		if got != want {
+			stale = fmt.Errorf("%s was built from %s, this ferry from %s: run `make dist` in the ferry repo", p, got, want)
+			continue
+		}
+		if strings.HasSuffix(got, "+changes") {
+			step("note", "%s and this ferry were both built from %s; ferry can't tell whether they hold the same changes (`make push` rebuilds both)", p, got)
+		}
+		return p, nil
+	}
+	if stale != nil {
+		return "", stale
 	}
 	return "", fmt.Errorf("no ferry built for %s/%s here: run `make dist` in the ferry repo and run setup from there, or put %s next to this binary", goos, goarch, name)
+}
+
+// buildCommit is the commit a ferry binary was built from, with "+changes"
+// when the tree had uncommitted changes; "" means this binary. go build
+// records it (-trimpath drops -ldflags, so the version string isn't there).
+// Two builds of the same commit with different uncommitted changes look
+// alike, here and in the version string; binaryFor says so.
+func buildCommit(bin string) string {
+	var bi *debug.BuildInfo
+	var err error
+	if bin == "" {
+		var ok bool
+		if bi, ok = debug.ReadBuildInfo(); !ok {
+			return "an unknown commit"
+		}
+	} else if bi, err = buildinfo.ReadFile(bin); err != nil {
+		return "an unknown commit"
+	}
+	rev, modified := "", false
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return "an unknown commit"
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	if modified {
+		rev += "+changes"
+	}
+	return rev
 }
 
 var remotePath = regexp.MustCompile(`^[A-Za-z0-9_./~-]+$`)

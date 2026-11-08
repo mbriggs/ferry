@@ -27,7 +27,9 @@ ferry ls kant
    ferry setup kant mbriggs@kant
    ```
 
-   This writes `~/.config/ferry/hosts`, checks ssh, installs this build of ferry on kant at `~/.local/bin/ferry` (from `dist/`, so run `make dist` first, or run setup from a release download), and checks the pair. Run it again after upgrading ferry to update kant's copy. Both machines must speak the same `ferry remote` protocol; with an older ferry on kant, every command stops before doing anything and says to run `ferry setup kant`.
+   This writes `~/.config/ferry/hosts`, checks ssh, installs this build of ferry on kant at `~/.local/bin/ferry` (from `dist/`, so run `make dist` first, or run setup from a release download), and checks the pair. Both machines must speak the same `ferry remote` protocol; with an older ferry on kant, every command stops before doing anything and says to run `ferry setup kant`.
+
+   After changing or upgrading ferry, `ferry push` puts this build on every host in the hosts file that runs a different one (`ferry push kant` for one; `--dry-run` shows what would change). It refuses a binary in `dist/` built from a different commit than the running ferry, and checks that each installed copy answers with this version. In the ferry repo, `make push` rebuilds for every platform first, which also covers uncommitted changes, which the commit check can't see.
 
 4. `ferry doctor` rechecks everything any time: both machines' ferry builds, names, ssh, the agents each side can find (kant's through its login shell's PATH), Rex, and the task records. Each failure comes with a fix.
 

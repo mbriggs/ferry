@@ -29,6 +29,7 @@ ferry ls HOST                                                               task
 ferry setup HOST [USER@HOST]                                                connect to HOST: hosts file, ssh, install ferry there
 ferry doctor [HOST...]                                                      check this machine and each host, with fixes
 ferry setup --claude-rules                                                  add the Claude Code permission rules ferry's own tests need
+ferry push [HOST...] [--dry-run]                                            put this build on hosts that run a different one
 ```
 
 HOST is a name from `~/.config/ferry/hosts` (one `name ssh-target` pair per line, such as `kant mbriggs@kant`), or an SSH target used as is. The commands read as sentences on purpose: `ferry to kant` before you close the lid, `ferry from kant fix-auth` when you want a task back.

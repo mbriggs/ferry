@@ -16,6 +16,7 @@ const usage = `usage:
   ferry ls HOST
   ferry setup HOST [USER@HOST] [--dry-run]
   ferry doctor [HOST...]
+  ferry push [HOST...] [--dry-run]
   ferry version
 
 HOST is a name in ~/.config/ferry/hosts ("kant mbriggs@kant" per line), or an
@@ -53,6 +54,8 @@ func run1(args []string) int {
 		return cmdSetup(l, rest)
 	case "doctor":
 		return cmdDoctor(l, rest)
+	case "push":
+		return cmdPush(l, rest)
 	case "version", "--version":
 		fmt.Println("ferry", version)
 		return 0
