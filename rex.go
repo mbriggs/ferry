@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -87,17 +88,31 @@ func answerTrust(session, block, agent string) {
 		}
 		switch {
 		case agent == agentClaude && strings.Contains(screen, "Yes, I trust this folder") && strings.Contains(screen, "No, exit"):
-			rexRun("", "send-key", "-s", session, "-b", block, "down")
-			rexRun("", "send-key", "-s", session, "-b", block, "enter")
-			return
+			// Keys can arrive before the dialog takes input, so this goes by
+			// where the cursor is and looks again: down from "No, exit",
+			// Enter on "Yes". Pressing down blindly a second time could wrap
+			// back to "No, exit".
+			if cursorOn(screen, "Yes, I trust this folder") {
+				rexRun("", "send-key", "-s", session, "-b", block, "enter")
+			} else if cursorOn(screen, "No, exit") {
+				rexRun("", "send-key", "-s", session, "-b", block, "down")
+			}
+			time.Sleep(700 * time.Millisecond)
+			continue
 		case agent == agentCodex && strings.Contains(screen, "Trust and continue"):
 			rexRun("", "send-key", "-s", session, "-b", block, "enter")
-			return
+			time.Sleep(700 * time.Millisecond)
+			continue
 		case strings.Contains(screen, "Ask Codex") || strings.Contains(screen, "? for shortcuts") || strings.Contains(screen, "auto mode") || strings.Contains(screen, "for agents"):
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// cursorOn reports whether a dialog's selection cursor is on the option.
+func cursorOn(screen, option string) bool {
+	return regexp.MustCompile(`❯\s*` + regexp.QuoteMeta(option)).MatchString(screen)
 }
 
 type StopReq struct {

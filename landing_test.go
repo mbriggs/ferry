@@ -20,16 +20,32 @@ func (w *world) fakeRex(screen string) (log string) {
 	log = filepath.Join(w.root, "rex.log")
 	w.write(w.root, "rex-screen", screen)
 	w.write(w.root, "bin/rex", `#!/bin/sh
+root="`+w.root+`"
 echo "$*" >> "`+log+`"
 case "$1" in
 new) n=$(grep -c '^new ' "`+log+`")
   id=$(echo "$*" | sed -n 's/.* --resume \([^ ]*\).*/\1/p')
-  if [ ! -e "`+filepath.Join(w.root, "no-register")+`" ] && [ -n "$id" ]; then
+  if [ ! -e "$root/no-register" ] && [ -n "$id" ]; then
     mkdir -p "$HOME/.claude/sessions"
-    echo "{\"pid\":`+fmt.Sprint(os.Getpid())+`,\"sessionId\":\"$id\",\"status\":\"idle\"}" > "$HOME/.claude/sessions/fake-$n.json"
+    entry="{\"pid\":`+fmt.Sprint(os.Getpid())+`,\"sessionId\":\"$id\",\"status\":\"idle\"}"
+    if grep -q 'No, exit' "$root/rex-screen"; then
+      # Claude registers only once the trust dialog is accepted.
+      echo "$entry" > "$root/pending"; echo "$HOME/.claude/sessions/fake-$n.json" > "$root/pending-path"
+    else
+      echo "$entry" > "$HOME/.claude/sessions/fake-$n.json"
+    fi
   fi
   echo "{\"session_id\":\"session:fake-$n\",\"initial_windows\":[{\"block_ids\":[\"block:fake-$n\"]}]}" ;;
-capture) cat "`+filepath.Join(w.root, "rex-screen")+`" ;;
+capture) cat "$root/rex-screen" ;;
+send-key)
+  if [ -e "$root/drop-key" ]; then rm "$root/drop-key"; exit 0; fi
+  key=$(eval echo \${$#})
+  if grep -q '❯ No, exit' "$root/rex-screen" && [ "$key" = down ]; then
+    printf 'Accessing workspace\n   No, exit\n ❯ Yes, I trust this folder\n' > "$root/rex-screen"
+  elif grep -q '❯ Yes, I trust' "$root/rex-screen" && [ "$key" = enter ]; then
+    printf 'auto mode on\n' > "$root/rex-screen"
+    if [ -e "$root/pending" ]; then cp "$root/pending" "$(cat "$root/pending-path")"; rm "$root/pending"; fi
+  fi ;;
 ls) echo '{"sessions":[]}' ;;
 esac
 `)
@@ -143,6 +159,24 @@ func TestTrustIsAnsweredOnlyWhenKantDoesntTrustTheFolder(t *testing.T) {
 				t.Fatalf("answered the trust prompt = %v with kant trusting = %v\n%s", answered, kantTrusts, w.read(w.root, "rex.log"))
 			}
 		})
+	}
+}
+
+// The first key press can land before Claude's dialog takes input. The
+// answer goes by where the cursor is, so a dropped key is sent again, and a
+// key that did land is never repeated into "No, exit".
+func TestTrustAnswerSurvivesADroppedKey(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("Accessing workspace\n ❯ No, exit\n   Yes, I trust this folder\n")
+	w.write(w.root, "drop-key", "")
+	wt := w.laptopTask()
+	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
+	out := w.mustFerry(wt, "to", "kant", "--yes")
+	if !strings.Contains(out, "launch     kant: rex session") {
+		t.Fatalf("the agent didn't launch:\n%s\n%s", out, w.read(w.root, "rex.log"))
+	}
+	if n := countLines(log, "send-key"); n != 3 {
+		t.Fatalf("sent %d keys, want down (dropped), down, enter\n%s", n, w.read(w.root, "rex.log"))
 	}
 }
 
