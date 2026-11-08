@@ -47,7 +47,7 @@ Don't `/exit` a session whose worktree has no changes and no commits: that delet
 
 Every ssh ferry starts, git's and rsync's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
 
-On a terminal, ferry colors its step labels, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts. A single `y` or `n` answers most of them; a prompt that would run code (a hook, or Claude after its config changed) ignores letters and takes an arrow key and Enter, so text typed ahead can only answer No. Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
+On a terminal, ferry marks each step with a colored glyph (✓ done, · note, ! needs you, ✗ failed, ? asking, ◆ the commit point), dims details like shas and timings, wraps long lines, shows progress for big transfers, and asks with arrow-key prompts. A single `y` or `n` answers most of them; a prompt that would run code (a hook, or Claude after its config changed) ignores letters and takes an arrow key and Enter, so text typed ahead can only answer No. Piped output, or `FERRY_PLAIN=1` (or `NO_COLOR`), gives plain lines and `[y/N]` prompts for scripts and screen readers.
 
 ## How a handoff works
 

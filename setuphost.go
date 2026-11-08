@@ -45,9 +45,9 @@ func setupHost(l *Local, name, target string, dryRun bool) int {
 
 	took, err := sshCheck(target)
 	if err != nil {
-		step("ssh", "%s: %v", target, err)
+		bad("ssh", "%s: %v", target, err)
 		if fix := sshFix(err.Error()); fix != "" {
-			step("fix", "%s", fix)
+			bad("fix", "%s", fix)
 		}
 		return 1
 	}
@@ -212,7 +212,7 @@ func binaryFor(goos, goarch string) (string, error) {
 			continue
 		}
 		if strings.HasSuffix(got, "+changes") {
-			step("note", "%s and this ferry were both built from %s; ferry can't tell whether they hold the same changes (`make push` rebuilds both)", p, got)
+			note("note", "%s and this ferry were both built from %s; ferry can't tell whether they hold the same changes (`make push` rebuilds both)", p, got)
 		}
 		return p, nil
 	}

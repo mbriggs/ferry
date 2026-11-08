@@ -87,7 +87,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 			return err
 		}
 	}
-	step("task", "%s  (%s, repo %s)", t.Name, t.WtRel, t.RepoRel)
+	header(t, m.si.Name, m.di.Name)
 	clock = newStopwatch()
 	defer clock.report()
 
@@ -98,7 +98,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// A rerun after the commit point only needs to finish the last steps, and
 	// it uses the sessions this handoff recorded rather than searching again.
 	if r := m.rec; r != nil && r.State == stateLanding && r.Owner == m.di.Name && r.From == m.si.Name {
-		step("owner", "%s owns %s (generation %d); finishing the handoff", m.di.Name, t.Name, r.Generation)
+		warn("owner", "%s owns %s %s; finishing the handoff", m.di.Name, t.Name, dim(fmt.Sprintf("(generation %d)", r.Generation)))
 		if err := m.resendIfResumed(); err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func (m *move) mayHandOff() (bool, error) {
 	resuming := rec.State == stateHandingOff && rec.From == si.Name && rec.To == m.di.Name
 	switch {
 	case resuming:
-		step("owner", "continuing an interrupted handoff (generation %d)", rec.Generation)
+		warn("owner", "continuing an interrupted handoff %s", dim(fmt.Sprintf("(generation %d)", rec.Generation)))
 	case rec.State == stateHandingOff && !m.opts.Force:
 		return false, fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
 	case rec.State == stateLanding && !m.opts.Force:
@@ -212,7 +212,7 @@ func (m *move) stopAgent() (*Session, error) {
 		return nil, err
 	}
 	if sess == nil {
-		step("agent", "no Claude or Codex session found for this worktree; moving code only")
+		note("agent", "no Claude or Codex session found for this worktree; moving code only")
 		return nil, nil
 	}
 	if err := sessionFits(si.Home, *sess, t); err != nil {
@@ -229,7 +229,7 @@ func (m *move) stopAgent() (*Session, error) {
 	have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
 	switch {
 	case have == "" || want == "":
-		step("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
+		warn("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
 	case versionLess(want, have) && !m.opts.ForceVersion:
 		return nil, fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
 	default:
@@ -346,7 +346,7 @@ func (m *move) sendCode() (SnapshotResult, error) {
 	if err := moveRefs(src, dst, t.RepoRel, ref); err != nil {
 		return SnapshotResult{}, err
 	}
-	step("git", "moved refs/ferry/%s/* to %s", t.Key, di.Name)
+	step("git", "moved %s to %s", dim("refs/ferry/"+t.Key+"/*"), di.Name)
 	previous := []string{rec.LastSent[di.Name], rec.Attempt}
 	if rec.Attempt != snap.Fingerprint {
 		rec.Attempt = snap.Fingerprint
@@ -376,7 +376,7 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 		if len(left) > 8 {
 			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
 		}
-		step("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
+		note("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
 	}
 	// Extras di sent last time that si no longer has were deleted here.
 	incoming := map[string]bool{}
@@ -426,7 +426,7 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 		step("extras", "%s", strings.Join(names, ", "))
 	}
 	if names := describeFiles(same); len(names) > 0 {
-		step("extras", "already on %s, not sent: %s", di.Name, strings.Join(names, ", "))
+		note("extras", "already on %s, not sent: %s", di.Name, strings.Join(names, ", "))
 	}
 	prompt := "send these ignored files to " + di.Name + "?"
 	if len(gone) > 0 {
@@ -437,7 +437,7 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 	case len(send) == 0 && len(gone) == 0:
 		return extras, true, nil
 	case !m.opts.Yes && !confirm(prompt):
-		step("extras", "skipped")
+		warn("extras", "skipped")
 		return extras, false, nil
 	}
 	job.Files = nil
@@ -455,7 +455,7 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 		step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, strings.Join(res.Removed, ", "))
 	}
 	if len(res.Kept) > 0 {
-		step("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
+		note("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
 	}
 	return extras, true, nil
 }
@@ -483,7 +483,7 @@ func (m *move) sendGitHooks() error {
 	}
 	step("hooks", "git hooks from %s: %s", m.si.Name, strings.Join(names, ", "))
 	if m.dst.IsLocal() && !confirmRun("install these git hooks here? they run on git commands in this repo") {
-		step("hooks", "skipped; %s's hooks stay as they were", m.di.Name)
+		warn("hooks", "skipped; %s's hooks stay as they were", m.di.Name)
 		return nil
 	}
 	return m.dst.InstallGitHooks(InstallGitHooksReq{RepoRel: m.t.RepoRel, Hooks: send})
@@ -524,7 +524,7 @@ func (m *move) sendSession(sess Session) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	step("session", "%s staged on %s, paths %s -> %s", short(sess.ID), m.di.Name, m.si.Home, m.di.Home)
+	step("session", "%s staged on %s, %s", short(sess.ID), m.di.Name, dim(fmt.Sprintf("paths %s -> %s", m.si.Home, m.di.Home)))
 	return &s, nil
 }
 
@@ -554,7 +554,7 @@ func (m *move) commit(snap SnapshotResult, sess, installed *Session, extras []Fi
 	if err := m.save(); err != nil {
 		return err
 	}
-	step("commit", "%s owns %s (generation %d)", di.Name, t.Name, rec.Generation)
+	commitPoint("commit", "%s owns %s %s", di.Name, t.Name, dim(fmt.Sprintf("(generation %d)", rec.Generation)))
 	if m.src.IsLocal() {
 		// What this machine sent, kept here where the other machine can't
 		// change it, for the change summary when the task comes back.
@@ -598,7 +598,7 @@ func (m *move) resendIfResumed() error {
 	if err := m.save(); err != nil {
 		return err
 	}
-	step("commit", "%s owns %s (generation %d)", m.di.Name, m.t.Name, rec.Generation)
+	commitPoint("commit", "%s owns %s %s", m.di.Name, m.t.Name, dim(fmt.Sprintf("(generation %d)", rec.Generation)))
 	return nil
 }
 
@@ -663,7 +663,7 @@ func settle(m Machine, s Session) (Liveness, error) {
 	live, err := m.Liveness(s)
 	for i := 0; err == nil && live.Settling && i < 20; i++ {
 		if i == 0 {
-			step("agent", "%s; waiting for it to settle", live.Detail)
+			note("agent", "%s; waiting for it to settle", live.Detail)
 		}
 		time.Sleep(500 * time.Millisecond)
 		live, err = m.Liveness(s)
@@ -694,8 +694,8 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 	}
 	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, dst.IsLocal(), changes)
 	if err != nil {
-		step("restore", "failed: %v", err)
-		step("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
+		bad("restore", "failed: %v", err)
+		warn("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
 		return errors.New("restore failed; the task moved but the agent wasn't started")
 	}
 	clock.lap("restore")
@@ -705,8 +705,8 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 	case installed == nil:
 		step("done", "code is on %s at ~/%s", di.Name, t.WtRel)
 	default:
-		note := resumeNote(si, di, t, *installed, summary)
-		argv := resumeArgv(*installed, note)
+		msg := resumeNote(si, di, t, *installed, summary)
+		argv := resumeArgv(*installed, msg)
 		cwdRel, _ := filepath.Rel(di.Home, installed.Cwd)
 		// Claude runs project hooks the moment it starts, so if the handoff
 		// changed what it loads here, starting it needs a yes on this run.
@@ -714,7 +714,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 		if lm, ok := dst.(*Local); ok && installed.Agent == agentClaude {
 			changed = configChanges(lm.Home, cfgBefore, claudeConfig(claudeDirs(lm.abs(t.WtRel), installed.Cwd)))
 			if len(changed) > 0 {
-				step("claude", "config Claude loads here, changed by the handoff: %s", strings.Join(changed, ", "))
+				warn("claude", "config Claude loads here, changed by the handoff: %s", strings.Join(changed, ", "))
 			}
 		}
 		if dst.IsLocal() && !opts.NoLaunch && interactive() {
@@ -723,7 +723,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 			if live, err := dst.Liveness(*installed); err != nil {
 				return err
 			} else if live.Live && !live.Settling {
-				step("resume", "%s is already running here (%s); not starting another", short(installed.ID), live.Detail)
+				note("resume", "%s is already running here (%s); not starting another", short(installed.ID), live.Detail)
 				break
 			}
 			if len(changed) == 0 || confirmRun("start claude here now? hooks in that config run as it starts") {
@@ -733,21 +733,21 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 			}
 		}
 		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
-			step("resume", "cd ~/%s && %s", cwdRel, shellJoin(argv))
+			step("resume", "cd ~/%s && %s", cwdRel, resumeCommand(argv))
 			break
 		}
 		// A rerun may find the agent already started by the run it is finishing.
 		if live, err := dst.Liveness(*installed); err != nil {
 			return err
 		} else if live.Live && !live.Settling {
-			step("launch", "%s: %s is already running (%s); not starting another", di.Name, short(installed.ID), live.Detail)
+			note("launch", "%s: %s is already running (%s); not starting another", di.Name, short(installed.ID), live.Detail)
 			rexSession = rec.RexSession
 			break
 		}
 		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, Session: *installed, AcceptTrust: sess != nil && sess.Trusted})
 		if err != nil {
-			step("launch", "failed: %v", err)
-			step("resume", "on %s: cd ~/%s && %s", di.Name, cwdRel, shellJoin(argv))
+			bad("launch", "failed: %v", err)
+			warn("resume", "on %s: cd ~/%s && %s", di.Name, cwdRel, resumeCommand(argv))
 			break
 		}
 		rexSession = id
@@ -825,7 +825,7 @@ func (s *stopwatch) report() {
 	if s.waited > time.Second {
 		line += " (plus " + roundDuration(s.waited) + " at prompts)"
 	}
-	step("time", "%s", line)
+	quiet("time", "%s", line)
 }
 
 func roundDuration(d time.Duration) string {
@@ -866,7 +866,7 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		return "", err
 	}
 	if info.TooLarge {
-		step(q.Name, "%s: .ferry/%s is over %d KB, too large to review; not running it", where, q.Name, maxHookSize>>10)
+		warn(q.Name, "%s: .ferry/%s is over %d KB, too large to review; not running it", where, q.Name, maxHookSize>>10)
 		return "", nil
 	}
 	if !info.Approved || everyRun {
@@ -874,16 +874,16 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		if everyRun {
 			why = "may run code from the other machine; ferry asks before every run here"
 		}
-		step(q.Name, ".ferry/%s %s (sha %s):\n%s", q.Name, why, info.SHA[:12], indent(forTerminal(info.Content)))
+		review(q.Name, ".ferry/%s %s %s:\n%s", q.Name, why, dim("(sha "+info.SHA[:12]+")"), gutter(forTerminal(info.Content)))
 		if changes != "" {
-			step("", "changed since this machine last sent the task:\n%s", indent(forTerminal(changes)))
+			review("", "changed since this machine last sent the task:\n%s", gutter(forTerminal(changes)))
 		}
 		prompt := fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)
 		if everyRun {
 			prompt = fmt.Sprintf("run this %s on %s now?", q.Name, where)
 		}
 		if !confirmRun(prompt) {
-			step(q.Name, "skipped")
+			warn(q.Name, "skipped")
 			return "", nil
 		}
 		if err := m.Approve(info.SHA); err != nil {
@@ -896,7 +896,7 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		return "", err
 	}
 	if !res.OK {
-		fmt.Println(indent(res.Output))
+		fmt.Println(gutter(res.Output))
 		return "", fmt.Errorf("%s failed on %s", q.Name, where)
 	}
 	step(q.Name, "%s: %s", where, res.Summary)
@@ -977,6 +977,13 @@ func mustRel(base, p string) string {
 		return p
 	}
 	return r
+}
+
+// resumeCommand is the command that resumes the agent. The note at its end
+// is long and the same every time, so it's dim on a terminal.
+func resumeCommand(argv []string) string {
+	n := len(argv) - 1
+	return shellJoin(argv[:n]) + " " + dim(shellJoin(argv[n:]))
 }
 
 func shellJoin(argv []string) string {

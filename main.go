@@ -73,6 +73,10 @@ func run1(args []string) int {
 }
 
 func fail(err error) int {
+	if !plain {
+		fmt.Fprintln(os.Stderr, tones[toneBad].style.Render("✗ ferry:"), err)
+		return 1
+	}
 	fmt.Fprintln(os.Stderr, "ferry:", err)
 	return 1
 }
@@ -207,9 +211,24 @@ func cmdLs(l *Local, args []string) int {
 		fmt.Println("no tasks")
 		return 0
 	}
-	fmt.Printf("%-20s %-10s %-12s %-4s %-8s %s\n", "NAME", "OWNER", "STATE", "GEN", "AGENT", "PATH")
+	if plain {
+		fmt.Printf("%-20s %-10s %-12s %-4s %-8s %s\n", "NAME", "OWNER", "STATE", "GEN", "AGENT", "PATH")
+		for _, r := range recs {
+			fmt.Printf("%-20s %-10s %-12s %-4d %-8s ~/%s\n", r.Name, r.Owner, r.State, r.Generation, r.Agent, r.WtRel)
+		}
+		return 0
+	}
+	fmt.Println(styleFaint.Render(fmt.Sprintf("    %-20s %-10s %-12s %-8s %s", "NAME", "OWNER", "STATE", "AGENT", "PATH")))
 	for _, r := range recs {
-		fmt.Printf("%-20s %-10s %-12s %-4d %-8s ~/%s\n", r.Name, r.Owner, r.State, r.Generation, r.Agent, r.WtRel)
+		// Only a settled task gets a check. One mid-handoff is the one to
+		// look at (a rerun finishes it), and so is a state this build
+		// doesn't know, from a record another ferry wrote.
+		look := tones[toneWarn]
+		if r.State == stateOwned {
+			look = tones[toneOK]
+		}
+		fmt.Printf("  %s %s %-10s %s %-8s %s %s\n", look.style.Render(look.glyph), styleBold.Render(fmt.Sprintf("%-20s", r.Name)), r.Owner,
+			look.style.Render(fmt.Sprintf("%-12s", r.State)), r.Agent, "~/"+r.WtRel, dim(fmt.Sprintf("gen %d", r.Generation)))
 	}
 	return 0
 }

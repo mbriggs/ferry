@@ -44,6 +44,23 @@ func (r *report) failed() bool {
 }
 
 func (r *report) print(title string) {
+	if !plain {
+		fmt.Println(styleBold.Render(title))
+		for _, c := range r.checks {
+			t := toneBad
+			switch c.status {
+			case "ok":
+				t = toneOK
+			case "warn":
+				t = toneWarn
+			}
+			say(t, c.name, "%s", c.detail)
+			if c.fix != "" {
+				fmt.Println(strings.Repeat(" ", textColumn) + wrapHanging(tones[toneWarn].style.Render("fix")+" "+c.fix))
+			}
+		}
+		return
+	}
 	fmt.Println(title)
 	for _, c := range r.checks {
 		fmt.Printf("  %-4s  %-10s %s\n", c.status, c.name, c.detail)
