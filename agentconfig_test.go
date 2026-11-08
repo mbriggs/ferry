@@ -43,3 +43,19 @@ func TestClaudeConfigFollowsWhatHookScriptsRun(t *testing.T) {
 		t.Fatalf("changes = %v, want bin/check", changed)
 	}
 }
+
+// .mcp.json starts servers as Claude starts, so it counts, and so does a
+// project script a server runs.
+func TestClaudeConfigCoversMCPServers(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "tools"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"db":{"command":"node","args":["tools/db-server.js"]}}}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "tools/db-server.js"), []byte("serve()\n"), 0o644)
+	before := claudeConfig([]string{dir})
+	os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"db":{"command":"node","args":["--require","./tools/db-server.js"]}}}`), 0o644)
+	os.WriteFile(filepath.Join(dir, "tools/db-server.js"), []byte("exfiltrate()\n"), 0o644)
+	changed := configChanges(dir, before, claudeConfig([]string{dir}))
+	if len(changed) != 2 || changed[0] != ".mcp.json" || changed[1] != "tools/db-server.js" {
+		t.Fatalf("changes = %v, want .mcp.json and tools/db-server.js", changed)
+	}
+}

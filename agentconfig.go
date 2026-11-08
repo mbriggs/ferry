@@ -12,14 +12,14 @@ import (
 )
 
 // Claude reads its project config as it starts: .claude/settings*.json,
-// skills and commands, and hooks that run commands at once (SessionStart
-// runs on resume). Those travel from the other machine, so before ferry
+// skills and commands, hooks that run commands at once (SessionStart runs
+// on resume), and .mcp.json, whose servers it starts. Those travel from the other machine, so before ferry
 // starts Claude in this terminal it checks whether any of it changed during
 // the handoff, and asks if so.
 //
 // claudeConfig fingerprints that config for the project folders in dirs:
-// every file under <dir>/.claude except Claude's own worktrees, plus each
-// file a hook command in the settings names. Keys are absolute paths, values
+// every file under <dir>/.claude except Claude's own worktrees,
+// <dir>/.mcp.json, and the files hooks and MCP servers run (hookFiles). Keys are absolute paths, values
 // sha256.
 func claudeConfig(dirs []string) map[string]string {
 	out := map[string]string{}
@@ -39,6 +39,9 @@ func claudeConfig(dirs []string) map[string]string {
 			}
 			return nil
 		})
+		if sum, err := fileSHA(filepath.Join(dir, ".mcp.json")); err == nil {
+			out[filepath.Join(dir, ".mcp.json")] = sum
+		}
 		for _, f := range hookFiles(dir) {
 			if sum, err := fileSHA(f); err == nil {
 				out[f] = sum
@@ -49,7 +52,7 @@ func claudeConfig(dirs []string) map[string]string {
 }
 
 // hookFiles returns the files inside dir that hook commands in dir's Claude
-// settings run, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
+// settings, or MCP servers in its .mcp.json, run, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
 // "bin/check", and the files those name in turn: a hook script that sources
 // lib/env.sh or runs scripts/lint runs them too. A name counts when it
 // resolves, against dir or the naming file's folder, to a regular file
@@ -71,6 +74,10 @@ func hookFiles(dir string) []string {
 	}
 	for _, cmd := range hookCommands(dir) {
 		add(cmd, dir)
+	}
+	// An MCP server's command and args can name a project script too.
+	if text, ok := scriptText(filepath.Join(dir, ".mcp.json")); ok {
+		add(text, dir)
 	}
 	for len(queue) > 0 {
 		p := queue[0]
@@ -165,6 +172,7 @@ func scriptText(p string) (string, bool) {
 
 // configChanges lists, relative to home, the files that differ between two
 // fingerprints. With no earlier fingerprint (a rerun), everything counts.
+// A file that left the fingerprint counts only if it's gone.
 func configChanges(home string, before, after map[string]string) []string {
 	var out []string
 	for p, sum := range after {
@@ -174,7 +182,9 @@ func configChanges(home string, before, after map[string]string) []string {
 	}
 	if before != nil {
 		for p := range before {
-			if _, ok := after[p]; !ok {
+			// A file that's still there but no longer named by any hook or
+			// server doesn't run; the change that dropped it is listed.
+			if _, ok := after[p]; !ok && !exists(p) {
 				out = append(out, mustRel(home, p)+" (removed)")
 			}
 		}
