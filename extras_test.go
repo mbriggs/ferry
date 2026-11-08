@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtrasDeletedOnKantAreRemovedOnReturn(t *testing.T) {
@@ -60,7 +61,19 @@ func TestReplacedExtrasEndPrivate(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask() // .env is 0644 on the laptop
 	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), ".env", "SECRET=2\n")
+	// The same size and the same whole second as the laptop's copy: rsync's
+	// default quick check would call the two files equal and skip it.
+	kenv := filepath.Join(w.kant, "src/app-wt/fix-auth", ".env")
+	w.write(filepath.Dir(kenv), ".env", "SECRET=2\n")
+	st, err := os.Stat(filepath.Join(wt, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameSecond := st.ModTime().Truncate(time.Second).Add(time.Nanosecond)
+	if sameSecond.Equal(st.ModTime()) {
+		sameSecond = sameSecond.Add(time.Nanosecond)
+	}
+	os.Chtimes(kenv, sameSecond, sameSecond)
 	w.approve(w.kant, dehydrateScript)
 	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
 	if w.read(wt, ".env") != "SECRET=2\n" {

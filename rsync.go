@@ -93,7 +93,10 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 	}
 	// --8-bit-output keeps non-ASCII names as they are in --out-format;
 	// rsync still escapes control characters (see sendExtras).
-	args := []string{"--times", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--out-format=%n", "--8-bit-output", "--exclude=.git"}
+	// --modify-window=-1 makes the quick check compare nanoseconds, as
+	// FileEntry does. By default rsync compares whole seconds, so it would
+	// skip a same-size file rewritten within the second.
+	args := []string{"--times", "--modify-window=-1", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--out-format=%n", "--8-bit-output", "--exclude=.git"}
 	if j.Dirs {
 		args = append(args, "--recursive")
 	}
