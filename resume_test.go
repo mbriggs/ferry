@@ -86,7 +86,11 @@ func inTerminal(t *testing.T, argv ...string) *exec.Cmd {
 		t.Skip("no script command")
 	}
 	if runtime.GOOS == "linux" {
-		return exec.Command(script, "-qec", shellJoin(argv), "/dev/null")
+		// util-linux script runs -c through $SHELL. The test world sets
+		// SHELL="" so ferry skips the login shell, and older script (2.39, on
+		// Ubuntu 24.04) execs that empty path: "failed to execute". Give script a
+		// shell, and clear SHELL again for ferry.
+		return exec.Command("env", "SHELL=/bin/sh", script, "-qec", "SHELL= exec "+shellJoin(argv), "/dev/null")
 	}
 	return exec.Command(script, append([]string{"-q", "/dev/null"}, argv...)...)
 }
