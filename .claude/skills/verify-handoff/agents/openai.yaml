@@ -1,0 +1,6 @@
+interface:
+  display_name: "Verify handoff"
+  short_description: "Model-check ferry's handoff fencing and ownership with TLA+"
+  default_prompt: "Use $verify-handoff to check this change against the handoff model."
+policy:
+  allow_implicit_invocation: true

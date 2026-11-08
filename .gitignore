@@ -3,3 +3,10 @@
 /worktree.env
 /.claude/worktrees/
 /tmp/
+# The global gitignore drops .claude; keep the verify-handoff skill, which
+# formal/check.sh reads for its sync commit.
+!/.claude/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/verify-handoff/
