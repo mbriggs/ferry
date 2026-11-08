@@ -11,23 +11,27 @@ ferry ls kant
 
 ## Setup
 
-1. On kant, enable SSH over the tailnet and limit it to your devices with a tailnet ACL:
+1. On kant, enable SSH over the tailnet:
 
    ```
    sudo tailscale set --ssh
    ```
 
-2. Install the binary on both machines at `~/.local/bin/ferry`, the path the laptop runs over SSH. On kant, run `make install`. For the Mac, run `make dist` on kant and copy `dist/ferry-darwin-arm64` to the Mac's `~/.local/bin/ferry`. Once the repo is on GitHub, each release has the binaries attached, and `ferry version` prints the release tag.
+   Then give the tailnet policy an ssh rule that lets your laptop in as your kant user with `"action": "accept"`. A `"check"` rule waits for a browser login, which ferry's non-interactive ssh can't do. If kant has tags, the rule's `dst` must name the tag; `autogroup:self` only matches untagged devices.
 
-3. On the laptop, tell ferry how to reach kant. Your Mac username differs from kant's, so name the user:
+2. Install ferry on the laptop: `make install` in this repo (or copy the release binary to `~/.local/bin/ferry`).
+
+3. From the laptop, connect it to kant. Your Mac username differs from kant's, so name the user:
 
    ```
-   mkdir -p ~/.config/ferry && echo "kant mbriggs@kant" > ~/.config/ferry/hosts
+   ferry setup kant mbriggs@kant
    ```
 
-   Every ssh ferry starts, git's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
+   This writes `~/.config/ferry/hosts`, checks ssh, installs this build of ferry on kant at `~/.local/bin/ferry` (from `dist/`, so run `make dist` first, or run setup from a release download), and checks the pair. Run it again after upgrading ferry to update kant's copy.
 
-4. Check the connection with `ferry ls kant`. It should print `no tasks`.
+4. `ferry doctor` rechecks everything any time: both machines' ferry builds, names, ssh, the agents each side can find (kant's through its login shell's PATH), Rex, and the task records. Each failure comes with a fix.
+
+Every ssh ferry starts, git's included, shares one connection per handoff (ControlMaster, with sockets in `~/.local/state/ferry/ssh/`, kept for 60 seconds) and sends keepalives, so a dead link fails within about a minute instead of hanging.
 
 ## First real test
 

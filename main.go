@@ -14,7 +14,8 @@ const usage = `usage:
   ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]
   ferry from HOST [NAME] [--yes] [--no-launch]
   ferry ls HOST
-  ferry setup [--dry-run]
+  ferry setup HOST [USER@HOST] [--dry-run]
+  ferry doctor [HOST...]
   ferry version
 
 HOST is a name in ~/.config/ferry/hosts ("kant mbriggs@kant" per line), or an
@@ -50,6 +51,8 @@ func run1(args []string) int {
 		return cmdLs(l, rest)
 	case "setup":
 		return cmdSetup(l, rest)
+	case "doctor":
+		return cmdDoctor(l, rest)
 	case "version", "--version":
 		fmt.Println("ferry", version)
 		return 0
@@ -174,11 +177,11 @@ func cmdLs(l *Local, args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
-	remote, err := l.host(args[0])
+	m, err := l.machine(args[0])
 	if err != nil {
 		return fail(err)
 	}
-	recs, err := remote.RecordList()
+	recs, err := m.RecordList()
 	if err != nil {
 		return fail(err)
 	}
@@ -196,22 +199,63 @@ func cmdLs(l *Local, args []string) int {
 // host resolves a host name through ~/.config/ferry/hosts. Each line is
 // "NAME TARGET [FERRY_PATH]"; TARGET is an ssh target, or exec:HOME for tests.
 // An unknown name is used as an ssh target directly.
-func (l *Local) host(name string) (*Remote, error) {
+// hostEntry looks name up in ~/.config/ferry/hosts ("NAME TARGET
+// [FERRY_PATH]" per line). found is false when it isn't there, and then name
+// is used as the ssh target.
+func (l *Local) hostEntry(name string) (target, ferryPath string, found bool) {
 	f, err := os.Open(l.configDir("hosts"))
-	if err == nil {
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			fields := strings.Fields(sc.Text())
-			if len(fields) < 2 || strings.HasPrefix(fields[0], "#") || fields[0] != name {
-				continue
-			}
-			path := ""
-			if len(fields) > 2 {
-				path = fields[2]
-			}
-			return NewRemote(name, fields[1], path)
+	if err != nil {
+		return name, "", false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") || fields[0] != name {
+			continue
+		}
+		if len(fields) > 2 {
+			ferryPath = fields[2]
+		}
+		return fields[1], ferryPath, true
+	}
+	return name, "", false
+}
+
+// hostNames lists the hosts in ~/.config/ferry/hosts, in order.
+func (l *Local) hostNames() []string {
+	data, err := os.ReadFile(l.configDir("hosts"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && !strings.HasPrefix(f[0], "#") {
+			out = append(out, f[0])
 		}
 	}
-	return NewRemote(name, name, "")
+	return out
+}
+
+// isSelf reports whether name is this machine's own ferry name.
+func (l *Local) isSelf(name string) bool {
+	info, err := l.Info()
+	return err == nil && info.Name == name
+}
+
+func (l *Local) host(name string) (*Remote, error) {
+	if l.isSelf(name) {
+		return nil, fmt.Errorf("%s is this machine; run this from the other one", name)
+	}
+	target, path, _ := l.hostEntry(name)
+	return NewRemote(name, target, path)
+}
+
+// machine is host, except that this machine's own name gives this machine,
+// for commands that only read, like ls.
+func (l *Local) machine(name string) (Machine, error) {
+	if l.isSelf(name) {
+		return l, nil
+	}
+	return l.host(name)
 }

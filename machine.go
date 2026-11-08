@@ -87,10 +87,14 @@ type Remote struct {
 	// Task, when set, makes each call hold the task's lock on the far side
 	// (lockRemoteCall), so a call left running by a ferry that died finishes
 	// before a rerun's calls start.
-	Task   string
-	prefix []string
-	env    []string
-	gitURL func(rel string) string
+	Task string
+	// Target and FerryPath are the ssh target and the far side's ferry
+	// binary; Target is "" for the exec: test transport.
+	Target    string
+	FerryPath string
+	prefix    []string
+	env       []string
+	gitURL    func(rel string) string
 }
 
 func NewRemote(label, target, ferryPath string) (*Remote, error) {
@@ -113,9 +117,11 @@ func NewRemote(label, target, ferryPath string) (*Remote, error) {
 		os.MkdirAll(filepath.Join(home, sshControlDir), 0o700)
 	}
 	return &Remote{
-		Label:  label,
-		prefix: append(append([]string{"ssh"}, sshOptions...), target, ferryPath),
-		gitURL: func(rel string) string { return target + ":" + rel },
+		Label:     label,
+		Target:    target,
+		FerryPath: ferryPath,
+		prefix:    append(append([]string{"ssh"}, sshOptions...), target, ferryPath),
+		gitURL:    func(rel string) string { return target + ":" + rel },
 	}, nil
 }
 

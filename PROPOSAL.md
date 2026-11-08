@@ -26,7 +26,9 @@ All `ferry` commands run on the laptop and connect to kant. kant never connects 
 ferry to HOST [--agent claude|codex] [--session ID] [--yes] [--no-launch]   hand the task in $PWD to HOST
 ferry from HOST [NAME] [--yes] [--no-launch]                                bring a task back here
 ferry ls HOST                                                               tasks, owner, generation
-ferry setup                                                                 add ferry's Claude Code permission rules
+ferry setup HOST [USER@HOST]                                                connect to HOST: hosts file, ssh, install ferry there
+ferry doctor [HOST...]                                                      check this machine and each host, with fixes
+ferry setup --claude-rules                                                  add the Claude Code permission rules ferry's own tests need
 ```
 
 HOST is a name from `~/.config/ferry/hosts` (one `name ssh-target` pair per line, such as `kant mbriggs@kant`), or an SSH target used as is. The commands read as sentences on purpose: `ferry to kant` before you close the lid, `ferry from kant fix-auth` when you want a task back.

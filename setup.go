@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -19,15 +20,33 @@ var claudeRules = []string{
 	"Edit(~/.claude/projects/-tmp-ferry-test-*/**)",
 }
 
-// cmdSetup adds claudeRules to ~/.claude/settings.json. It writes through a
-// symlink (settings are often stowed from a dotfiles repo) and keeps a backup
-// in ~/.local/state/ferry, outside any repo.
+// cmdSetup connects this machine to another: `ferry setup HOST [TARGET]`
+// records the ssh target, checks ssh, installs or updates ferry there, and
+// runs doctor's checks for it. `ferry setup --claude-rules` instead adds the
+// Claude Code permission rules ferry's own development needs.
 func cmdSetup(l *Local, args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "show the change without writing it")
-	if err := fs.Parse(args); err != nil {
+	dryRun := fs.Bool("dry-run", false, "show what would change without changing it")
+	rules := fs.Bool("claude-rules", false, "add the Claude Code permission rules ferry's development needs")
+	pos, err := parse(fs, args)
+	if err != nil {
 		return 2
 	}
+	if *rules {
+		return setupClaudeRules(l, *dryRun)
+	}
+	if len(pos) < 1 || len(pos) > 2 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	return setupHost(l, pos[0], strings.Join(pos[1:], ""), *dryRun)
+}
+
+// setupClaudeRules adds claudeRules to ~/.claude/settings.json. It writes
+// through a symlink (settings are often stowed from a dotfiles repo) and
+// keeps a backup in ~/.local/state/ferry, outside any repo.
+func setupClaudeRules(l *Local, dryRunFlag bool) int {
+	dryRun := &dryRunFlag
 	path := filepath.Join(l.Home, ".claude", "settings.json")
 	target := path
 	if real, err := filepath.EvalSymlinks(path); err == nil {
