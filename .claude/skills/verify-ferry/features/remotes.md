@@ -1,6 +1,6 @@
 # Remotes travel with the code
 
-Every handoff gives the receiver the sender's remotes (URLs and push URLs), the branch's upstream, and the sender's remote-tracking refs where they're newer. ferry never fetches or pushes to a remote. A repo ferry creates takes the config silently. In an existing repo ferry prints a `remotes` line listing each change and asks `change these remotes on <host>?`. `--yes` answers that going to kant, never coming to the laptop.
+Every handoff gives the receiver the sender's remotes (URLs and push URLs), the branch's upstream, and the sender's remote-tracking refs where they're newer. ferry never fetches or pushes to a remote. A repo ferry creates takes the config without asking, though it still prints the `remotes` line. In an existing repo ferry prints a `remotes` line listing each change and asks `change these remotes on <host>?`. `--yes` answers that going to kant, never coming to the laptop.
 
 ## Sub-features
 
@@ -23,7 +23,7 @@ Preconditions:
 - **Fresh repo (`remotes-fresh`).** Run `$W ferry $R to kant --yes --no-launch`. The output has the two `remotes` lines above. `$W state $R after-to` shows `## main...origin/main [ahead 1]` on both sides, and `$KWT/.git/config` has `[remote "origin"]` and `[branch "main"]` with `remote = origin`.
 - **Quiet (`remotes-quiet`).** Run `$W ferry $R -C /tmp from kant demo --yes`. Exit 0 and no `remotes` line.
 - **Add (`remotes-add`).** Append `[remote "fork"]` with `url = https://example.com/fork.git` to `$WT/.git/config`, then `$W ferry $R to kant --yes --no-launch`. Output has `remotes kant: add remote fork https://example.com/fork.git` and no prompt; `$KWT/.git/config` has the fork section with git's default fetch refspec.
-- **Declined (`remotes-declined`).** Change `origin`'s `url` in `$KWT/.git/config` to `https://example.com/elsewhere.git`, then `$W ferry $R -C /tmp from kant demo --yes`. Output has the `set remote origin ...` line, `remotes kept laptop's remotes as they are`, and `remotes origin's URLs differ on laptop; left its remote-tracking refs`; `$WT/.git/config` still has the world's `origin.git` URL. Hand it back to kant with `--yes`, which resets kant's `origin` to the laptop's URL, and change kant's URL again for the next step.
+- **Declined (`remotes-declined`).** Change `origin`'s `url` in `$KWT/.git/config` to `https://example.com/elsewhere.git`, then `$W ferry $R -C /tmp from kant demo --yes`. Output has the `set remote origin ...` line, `remotes kept laptop's remotes as they are`, and `remotes origin's URLs differ on laptop; left its remote-tracking refs`; `$WT/.git/config` still has the world's `origin.git` URL. Hand it back to kant with `--yes --no-launch`, which resets kant's `origin` to the laptop's URL, and change kant's URL again for the next step.
 - **Ask (`remotes-ask`).** Run `$W tty $R -C /tmp from kant demo --yes --no-launch`, `$W wait $R 'change these remotes'`, `$W screen $R remotes-prompt`. The pane shows the `set remote origin` line and `change these remotes on laptop?`. Run `$W keys $R y` and `$W wait $R '[exit '`: `commit laptop owns demo`, `[exit 0]`, and `$WT/.git/config` has `url = https://example.com/elsewhere.git` under `origin`.
 
 ## Gotchas

@@ -16,7 +16,7 @@ In a repo under `~/src`, after exiting the agent, the user runs `ferry to kant`.
 ## How to get to it (user POV)
 
 - `cd ~/src/<repo> && ferry to kant`, after `/exit` in the agent.
-- Flags: `--yes` sends listed ignored files without asking, `--no-launch` prints the resume command, `--agent claude|codex`, `--session ID`, `--force`, `--force-version`.
+- Flags: `--yes` sends listed ignored files without asking and answers the remotes prompt (remotes.md), `--no-launch` prints the resume command, `--agent claude|codex`, `--session ID`, `--force`, `--force-version`.
 
 ## Driving it with world.sh
 
@@ -37,4 +37,4 @@ Preconditions:
 
 - A transcript modified in the last 2 seconds makes ferry wait up to 10 seconds for it to settle. Backdate edited transcripts with `$W backdate FILE`.
 - `--yes` never approves hooks. In a `--hooks` world, `world.sh ferry` answers the hook prompts no and prints `dehydrate skipped`. Use hooks.md for that path.
-- The world uses a plain repo. A linked worktree (`src/app-wt/fix-auth`) is covered by `TestRoundTrip` in `handoff_test.go`, not here.
+- The world uses a plain repo. A linked worktree (`src/app-wt/fix-auth`) is covered by `TestRoundTrip` in `handoff_test.go`, not here. claude-worktree.md drives one Claude made.

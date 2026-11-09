@@ -11,14 +11,16 @@ This directory is the maintained list of what to verify in ferry, from the user'
 | [hooks.md](hooks.md) | Dehydrate and restore hooks with approval | `.ferry/dehydrate`, `.ferry/restore` |
 | [setup.md](setup.md) | Add Claude permission rules | `ferry setup --claude-rules [--dry-run]` |
 | [connect.md](connect.md) | Connect a host, check it, push builds | `ferry setup HOST [USER@HOST]`, `ferry doctor [HOST...]`, `ferry push [HOST...]` |
+| [claude-worktree.md](claude-worktree.md) | Hand off a worktree Claude made | `ferry to kant [NAME]` in or beside `.claude/worktrees/NAME` |
 | [refusals.md](refusals.md) | Refusals and interrupted handoffs | `ferry to`/`from` with `--force`, `--force-version` |
 
-Not mapped here because a world can't reach it: launching the resumed agent in Rex, picking a task by its Rex label, a real agent continuing the conversation, and `ferry setup HOST` or `ferry push` installing ferry over ssh. `test/e2e-local.sh` covers that on kant. Codex sessions (`--agent codex`) aren't seeded by `world.sh new` yet; `test/codex-roundtrip.sh` covers them.
+Not mapped here because a world can't reach it: launching the resumed agent in Rex, picking a task by its Rex label, a real agent continuing the conversation, the `ferry` Claude skill (`skills/ferry/`, which closes the session and runs `ferry to`), stopping a Claude still in its worktree on kant, and `ferry setup HOST` or `ferry push` installing ferry over ssh. `test/e2e-local.sh` covers that on kant. Codex sessions (`--agent codex`) aren't seeded by `world.sh new` yet; `test/codex-roundtrip.sh` covers them.
 
 ## Conventions
 
 - Each feature's preconditions start from a fresh world, set up as in `../SKILL.md`, with `W` and `R` set and `$R/env` sourced.
 - A feature file's steps assume the world state the previous step left. Start a new world to rerun a feature from the top.
+- Step lines are quoted with one space after the label. ferry pads labels to 10 columns (`commit     kant owns demo`), so `wait` on the text after the label, or `grep -E 'commit +kant owns'`.
 
 ## Feature entry contract
 

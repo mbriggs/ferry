@@ -20,6 +20,8 @@
 #        world.sh wait ROOT TEXT [SECS]  poll the pane until TEXT shows (default 30s)
 #        world.sh screen ROOT [LABEL]    capture the pane to evidence and print it
 #        world.sh kant-work ROOT         play the agent on kant: commit, new file, transcript turn
+#        world.sh claude-worktree ROOT closed|kept
+#                                        stage a worktree Claude made, src/demo/.claude/worktrees/feat
 #        world.sh state ROOT [LABEL]     snapshot both homes into evidence
 #        world.sh backdate FILE...       set FILE's mtime a minute back (GNU and BSD)
 #        world.sh clean ROOT             kill this world's tmux server, remove ROOT (evidence stays)
@@ -28,6 +30,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 evroot=${FERRY_VERIFY_EVIDENCE:-$HOME/.cache/ferry-verify}
 SID=11111111-2222-3333-4444-555555555555
+CWSID=22222222-3333-4444-5555-666666666666
 NAME=demo
 die() { echo "world.sh: $*" >&2; exit 1; }
 
@@ -147,6 +150,7 @@ cmd_new() {
 
   cat > "$root/env" <<EOF
 export ROOT=$root LAPTOP=$laptop KANT=$kant FERRY=$ferry WT=$wt KWT=$kwt EVIDENCE=$ev SID=$SID
+export CWSID=$CWSID CWT=$wt/.claude/worktrees/feat KCWT=$kwt/.claude/worktrees/feat
 EOF
   echo "world: $root  evidence: $ev" > "$ev/00-world.txt"
   echo "$root"
@@ -240,6 +244,40 @@ cmd_kant_work() {
   printf '{"type":"assistant","cwd":"%s","sessionId":"%s","message":{"role":"assistant","content":"The codeword is HERON. Wrote kant-was-here.txt."}}\n' "$kwt" "$SID" >> "$t"
   backdate "$t"
   echo "kant: committed kant-was-here.txt, edited app.txt, appended a transcript turn"
+}
+
+# A worktree Claude made with --worktree: src/demo/.claude/worktrees/feat on
+# branch worktree-feat, with one uncommitted file and session $CWSID still in it.
+# closed: the user closed the pane, so the transcript is in the worktree's own
+# project folder and a dead Claude pid holds the git worktree lock.
+# kept: /exit and Keep, so Claude refiled the transcript into the main
+# checkout's project folder and ended it with a null worktree-state.
+cmd_claude_worktree() {
+  load "$1"
+  local mode=${2:-} cwt=$wt/.claude/worktrees/feat p first state turn dead
+  [[ $mode == closed || $mode == kept ]] || die "claude-worktree ROOT closed|kept"
+  [[ -e $cwt ]] && die "$cwt already exists"
+  echo '.claude/worktrees/' >> "$wt/.git/info/exclude"
+  g -C "$wt" worktree add -q -b worktree-feat "$cwt"
+  echo 'work in progress' > "$cwt/feat.txt"
+  # ferry takes a refiled transcript only when it's newer than the worktree's .git file.
+  perl -e '$t = time - 3600; utime $t, $t, @ARGV' -- "$cwt/.git"
+  first=$(printf '{"type":"user","cwd":"%s","sessionId":"%s","message":"start"}' "$cwt" "$CWSID")
+  state=$(printf '{"type":"worktree-state","sessionId":"%s","worktreeSession":{"originalCwd":"%s","worktreePath":"%s","worktreeName":"feat","worktreeBranch":"worktree-feat","sessionId":"%s"}}' "$CWSID" "$wt" "$cwt" "$CWSID")
+  turn=$(printf '{"type":"assistant","cwd":"%s","sessionId":"%s","message":"edited feat.txt"}' "$cwt" "$CWSID")
+  if [[ $mode == closed ]]; then
+    p=$laptop/.claude/projects/$(slug "$cwt"); mkdir -p "$p"
+    printf '%s\n' "$first" "$state" "$turn" > "$p/$CWSID.jsonl"
+    dead=$(sh -c 'echo $$')
+    g -C "$wt" worktree lock --reason "claude session feat (pid $dead start Sun Nov  8 02:30:03 2026)" "$cwt"
+  else
+    p=$laptop/.claude/projects/$(slug "$wt"); mkdir -p "$p"
+    printf '%s\n' "$first" "$state" "$turn" \
+      "$(printf '{"type":"relocated","sessionId":"%s","relocatedCwd":"%s"}' "$CWSID" "$wt")" \
+      "$(printf '{"type":"worktree-state","sessionId":"%s","worktreeSession":null}' "$CWSID")" > "$p/$CWSID.jsonl"
+  fi
+  backdate "$p/$CWSID.jsonl"
+  echo "laptop: Claude worktree ~/src/$NAME/.claude/worktrees/feat ($mode), session $CWSID in ~/${p#"$laptop"/}"
 }
 
 cmd_state() {
@@ -357,6 +395,7 @@ case $c in
   wait) cmd_wait "$@" ;;
   screen) cmd_screen "$@" ;;
   kant-work) cmd_kant_work "$@" ;;
+  claude-worktree) cmd_claude_worktree "$@" ;;
   state) cmd_state "$@" ;;
   backdate) backdate "$@" ;;
   clean) cmd_clean "$@" ;;
