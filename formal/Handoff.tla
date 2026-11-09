@@ -46,7 +46,7 @@
 \* present but empty; and the code, extras and hooks, folded into Work and
 \* FinishRestore.
 
-EXTENDS Naturals
+EXTENDS Naturals, FiniteSets
 
 \* MaxGen bounds the record's generation, MaxV the number of versions.
 \* Faults = FALSE removes every crash and failed call: the happy path.
@@ -119,9 +119,14 @@ After(o, p) == IF o = "ok" THEN Goto(p) ELSE Stop
 
 \* RecordPut: a compare-and-swap on the stored generation (record.go).
 PutEff(expect, new) == IF rec.gen = expect THEN rec' = new ELSE UNCHANGED rec
-\* StageSession: empty ready, then move the staged files into it.
-StageEff(m) == /\ ready' = [ready EXCEPT ![m] = stageTmp[m]]
-               /\ stageTmp' = [stageTmp EXCEPT ![m] = 0]
+\* StageSession for the session as sent, v: first it sums the staged files'
+\* sizes. If that isn't v's size, it refuses with ready untouched. Otherwise
+\* it empties ready and moves the staged files into it. Either way it
+\* removes the stage directory. A size counts turns, so a forked copy with as
+\* many turns as v passes, as it would in the code.
+SizeMatches(m, v) == stageTmp[m] > 0 /\ Cardinality(lin[stageTmp[m]]) = Cardinality(lin[v])
+StageEff(m, v) == /\ ready' = IF SizeMatches(m, v) THEN [ready EXCEPT ![m] = stageTmp[m]] ELSE ready
+                  /\ stageTmp' = [stageTmp EXCEPT ![m] = 0]
 \* PlaceSession: if ready doesn't exist, it returns nil. If it does, it
 \* refuses while Liveness sees an agent with the session loaded. Otherwise
 \* ready replaces the live copy, which goes to parked/<task>-replaced-*
@@ -274,15 +279,15 @@ Transfer ==
     /\ UNCHANGED <<copy, ready, parkedV, running, userOn, turns, rec, pending>>
     /\ Fork
 
-\* dst.StageSession. installed is set only on success. If the stage
-\* directory is gone (a dead run's StageSession moved it out and removed
-\* it), its WalkDir fails, after it has already emptied ready.
+\* dst.StageSession for the session as sent (sessV). installed is set only
+\* on success. It refuses a staged copy whose size isn't the one sent, such
+\* as an older copy a dead rsync renamed in, or none at all.
 Stage ==
     /\ pc = "stage"
-    /\ stageTmp[dst] = 0 => (Stop /\ ready' = [ready EXCEPT ![dst] = 0] /\ UNCHANGED stageTmp)
-    /\ stageTmp[dst] > 0 => \E o \in Outcomes(dst):
-         /\ IF Applied(o) THEN StageEff(dst) ELSE UNCHANGED <<ready, stageTmp>>
-         /\ IF o = "ok" THEN pc' = "commit" /\ instV' = stageTmp[dst] /\ UNCHANGED <<src, dst, runRec, sessV, rerun>>
+    /\ \E o \in Outcomes(dst):
+         /\ IF Applied(o) THEN StageEff(dst, sessV) ELSE UNCHANGED <<ready, stageTmp>>
+         /\ IF o = "ok" /\ SizeMatches(dst, sessV)
+              THEN pc' = "commit" /\ instV' = stageTmp[dst] /\ UNCHANGED <<src, dst, runRec, sessV, rerun>>
             ELSE Stop
     /\ UNCHANGED <<copy, parkedV, running, userOn, turns, rec, pending>>
     /\ Fork
@@ -398,7 +403,7 @@ InFlight ==
            -> [NoPending EXCEPT !.kind = "put", !.m = "kant", !.gen = runRec.gen, !.new = OwnedRec]
       [] pc = "stopAgent" /\ Remote(src)   -> [NoPending EXCEPT !.kind = "stop", !.m = src]
       [] pc = "transfer" /\ copy[src] > 0  -> [NoPending EXCEPT !.kind = "import", !.m = dst, !.v = copy[src]]
-      [] pc = "stage" /\ Remote(dst)       -> [NoPending EXCEPT !.kind = "stage", !.m = dst]
+      [] pc = "stage" /\ Remote(dst)       -> [NoPending EXCEPT !.kind = "stage", !.m = dst, !.v = sessV]
       [] pc = "finishPlace" /\ Remote(dst) /\ instV > 0 -> [NoPending EXCEPT !.kind = "place", !.m = dst]
       [] pc = "finishLaunch" -> [NoPending EXCEPT !.kind = "launch", !.m = dst]
       [] OTHER -> NoPending
@@ -416,7 +421,7 @@ Deliver ==
     /\ CASE pending.kind = "put"    -> PutEff(pending.gen, pending.new) /\ UNCHANGED <<copy, stageTmp, ready, parkedV, running, userOn>>
          [] pending.kind = "import" -> stageTmp' = [stageTmp EXCEPT ![pending.m] = pending.v]
                                        /\ UNCHANGED <<copy, ready, parkedV, running, userOn, rec>>
-         [] pending.kind = "stage"  -> StageEff(pending.m) /\ UNCHANGED <<copy, parkedV, running, userOn, rec>>
+         [] pending.kind = "stage"  -> StageEff(pending.m, pending.v) /\ UNCHANGED <<copy, parkedV, running, userOn, rec>>
          [] pending.kind = "place"  -> PlaceEff(pending.m) /\ UNCHANGED <<stageTmp, running, userOn, rec>>
          [] pending.kind = "launch" -> LaunchEff(pending.m) /\ UNCHANGED <<copy, stageTmp, ready, parkedV, userOn, rec>>
          [] pending.kind = "stop"   -> StopEff(pending.m) /\ UNCHANGED <<copy, stageTmp, ready, parkedV, rec>>
@@ -480,7 +485,8 @@ TypeOK ==
 \* Where turns survive. Live and staged copies, and a dead run's import on
 \* its way into in/<task>/session.
 Kept == ({copy[m] : m \in Machines} \cup {ready[m] : m \in Machines}
-         \cup {stageTmp[m] : m \in Machines} \cup {pending.v}) \ {0}
+         \cup {stageTmp[m] : m \in Machines}
+         \cup (IF pending.kind = "import" THEN {pending.v} ELSE {})) \ {0}
 Holds(v, S) == \E c \in S : v \in lin[c]
 
 \* Unless you forked the session, ferry never leaves agents running it on
@@ -527,5 +533,6 @@ ReachRerunFinish == ~(pc = "finishPlace" /\ rerun /\ instV > 0)
 ReachPlaceRefusal == ~(pc = "finishPlace" /\ instV > 0 /\ PlaceRefuses(dst))
 ReachReplacedPark == parkedV = {}
 ReachDeadCall == pending = NoPending
+ReachStaleStage == ~(pc = "stage" /\ stageTmp[dst] > 0 /\ ~SizeMatches(dst, sessV))
 
 =============================================================================

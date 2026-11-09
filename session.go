@@ -500,9 +500,13 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 		}
 		return r
 	}
-	if err := os.RemoveAll(ready); err != nil {
-		return Session{}, err
-	}
+	// Check the whole copy before anything changes. The laptop's rsync holds
+	// the task lock (runHoldingLock), but kant's receiving rsync holds
+	// nothing and can still rename a file in after a ferry that died, over
+	// the copy a rerun just sent. Agents only append to a session, so an
+	// older copy is smaller than the one the sender measured.
+	var files []string
+	var size int64
 	err = filepath.WalkDir(stage, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && d.IsDir() && d.Name() == ".rsync-partial" {
 			return filepath.SkipDir // left by a cut transfer; not part of the copy
@@ -514,47 +518,69 @@ func (l *Local) StageSession(q InstallReq) (Session, error) {
 		if !d.Type().IsRegular() || !sessionPathOK(q.Session.Agent, q.Session.ID, oldProj, r) {
 			return fmt.Errorf("refusing %s: not part of %s session %s", r, q.Session.Agent, q.Session.ID)
 		}
-		if (strings.HasSuffix(p, ".jsonl") || strings.HasSuffix(p, ".json")) && !strings.HasPrefix(r, filepath.Join(".claude", "file-history")) {
-			data, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			rewrite := rewriteHomeLines
-			if strings.HasSuffix(p, ".json") {
-				rewrite = func(b []byte, o, n string) ([]byte, int, error) { return rewriteHome(b, o, n) }
-			}
-			got, _, err := rewrite(data, q.OldHome, l.Home)
-			if err != nil {
-				return fmt.Errorf("%s: %w", r, err)
-			}
-			if q.Session.Agent == agentClaude && r == transcript {
-				got = leaveClaudeWorktree(got, q.Session.ID)
-			}
-			// rsync kept the sender's mtime; the rewrite mustn't replace it
-			// with ferry's own, which Liveness would read as an agent still
-			// writing.
-			st, err := os.Stat(p)
-			if err != nil {
-				return err
-			}
-			if err := writeAtomic(p, got, 0o600); err != nil {
-				return err
-			}
-			if err := os.Chtimes(p, time.Time{}, st.ModTime()); err != nil {
-				return err
-			}
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
-		return moveFile(p, filepath.Join(ready, mapRel(r)))
+		files, size = append(files, r), size+info.Size()
+		return nil
 	})
 	if err != nil {
-		os.RemoveAll(ready)
 		return Session{}, err
+	}
+	if size != q.Session.Size {
+		return Session{}, fmt.Errorf("the staged copy of session %s is %s, not the %s sent; an earlier ferry's transfer may have landed over it. Run this again", short(q.Session.ID), humanSize(size), humanSize(q.Session.Size))
+	}
+	if err := os.RemoveAll(ready); err != nil {
+		return Session{}, err
+	}
+	for _, r := range files {
+		if err := l.stageFile(q, stage, r, r == transcript, filepath.Join(ready, mapRel(r))); err != nil {
+			os.RemoveAll(ready)
+			return Session{}, fmt.Errorf("%s: %w", r, err)
+		}
 	}
 	out.Files = nil
 	for _, f := range q.Session.Files {
 		out.Files = append(out.Files, mapRel(f))
 	}
 	return out, nil
+}
+
+// stageFile rewrites the staged file r, relative to stage, for this home,
+// unless it's a file-history backup or not JSON, and moves it to to.
+func (l *Local) stageFile(q InstallReq, stage, r string, isTranscript bool, to string) error {
+	p := filepath.Join(stage, r)
+	if (strings.HasSuffix(p, ".jsonl") || strings.HasSuffix(p, ".json")) && !strings.HasPrefix(r, filepath.Join(".claude", "file-history")) {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rewrite := rewriteHomeLines
+		if strings.HasSuffix(p, ".json") {
+			rewrite = func(b []byte, o, n string) ([]byte, int, error) { return rewriteHome(b, o, n) }
+		}
+		got, _, err := rewrite(data, q.OldHome, l.Home)
+		if err != nil {
+			return err
+		}
+		if q.Session.Agent == agentClaude && isTranscript {
+			got = leaveClaudeWorktree(got, q.Session.ID)
+		}
+		// rsync kept the sender's mtime; the rewrite mustn't replace it with
+		// ferry's own, which Liveness would read as an agent still writing.
+		st, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		if err := writeAtomic(p, got, 0o600); err != nil {
+			return err
+		}
+		if err := os.Chtimes(p, time.Time{}, st.ModTime()); err != nil {
+			return err
+		}
+	}
+	return moveFile(p, to)
 }
 
 type PlaceReq struct {

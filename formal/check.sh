@@ -23,7 +23,7 @@ cd "$here"
 
 TLC_TOOL='http:tla2tools[url=https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar,checksum=sha256:936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88]@1.7.4'
 PROMISES="TypeOK NoTwoAgents NoLostTurns NoDestroyedTurns OwnerCanResume OneAgent AgentHasTranscript"
-REACH="happy:ReachRoundTrip happy:ReachLaunch happy:ReachExec happy:ReachStopAgent happy:ReachReplacedPark faults:ReachResend faults:ReachRerunFinish faults:ReachPlaceRefusal overlap:ReachDeadCall"
+REACH="happy:ReachRoundTrip happy:ReachLaunch happy:ReachExec happy:ReachStopAgent happy:ReachReplacedPark faults:ReachResend faults:ReachRerunFinish faults:ReachPlaceRefusal overlap:ReachDeadCall overlap:ReachStaleStage"
 ALLDEAD="put stop import stage place launch"
 MAXGEN=${MAXGEN:-12}
 MAXV=${MAXV:-3}
