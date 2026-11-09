@@ -13,6 +13,15 @@ d = json.load(open(sys.argv[1]))
 print(d.get("status", "") if d.get("sessionId") == sys.argv[2] else "other")' "$reg" "$sid" 2>/dev/null
 }
 
+# Check first, in this tab's environment (its PATH, its rsync), while the
+# session still runs: a refusal now costs nothing.
+cd "$wt" || exit 1
+if ! ferry to "$host" --session "$sid" --check; then
+  echo
+  echo "Nothing was stopped; Claude keeps running. Fix the cause, then ask it to ferry again."
+  exit 1
+fi
+echo
 echo "Waiting for Claude (pid $pid) to finish its reply. Ctrl-C cancels."
 idle=0 seen_idle=0
 while :; do
@@ -51,7 +60,6 @@ if kill -0 "$pid" 2>/dev/null; then
   exit 1
 fi
 
-cd "$wt" || exit 1
 ferry to "$host" --session "$sid" && exit 0
 echo
 echo "ferry to $host failed. Fix the cause, then run: cd $wt && ferry to $host --session $sid"

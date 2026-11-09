@@ -14,7 +14,7 @@ Don't use `/exit` and don't call `ExitWorktree` in this flow. If this session ma
    - `command -v ferry` and `command -v rex` succeed.
    - `REX_SESSION`, `CLAUDE_PID` and `CLAUDE_CODE_SESSION_ID` are set.
    - `~/.claude/sessions/$CLAUDE_PID.json` names `$CLAUDE_CODE_SESSION_ID`.
-   - `ferry ls HOST` succeeds. It fails fast when ssh or the ferry versions are wrong.
+   - `ferry to HOST --session "$CLAUDE_CODE_SESSION_ID" --check`, run in the worktree, succeeds. It runs every check that can refuse the handoff (ssh, ferry and agent versions, rsync on both machines, the task's owner) and stops before it stops anything. If it reports that HOST has work the handoff would overwrite, tell the user: the tab will offer to save that work to a branch on HOST first.
 3. Finish or stop your own background work (background Bash, Monitors, subagents). SIGTERM ends all of it. Uncommitted changes are fine; ferry moves them.
 4. Open the tab:
 
@@ -25,6 +25,6 @@ Don't use `/exit` and don't call `ExitWorktree` in this flow. If this session ma
 
 5. End your turn at once, with one line: "A 'ferry to HOST' tab stops this session when this reply ends, then hands it off; its prompts are in that tab." Run no more tools.
 
-The tab waits until this session has been idle for 3 seconds. If the user types again first, the session goes busy and the tab gives up without stopping anything. Run this skill again when they're ready.
+The tab runs the same `--check` first, in its own environment, which can differ from yours (a login shell without `~/.zshrc`, so a different PATH). If that check fails, the tab stops there and this session keeps running. Otherwise the tab waits until this session has been idle for 3 seconds. If the user types again first, the session goes busy and the tab gives up without stopping anything. Run this skill again when they're ready.
 
 If the user would rather do it by hand: close this pane (or `/exit` and pick Keep, when Claude asks), then run `ferry to HOST` in the worktree. In the repo's main checkout, `ferry to HOST` lists the worktrees that have a session and asks which one to send; `ferry to HOST NAME` names one.

@@ -53,7 +53,7 @@ On a terminal, ferry marks each step with a colored glyph (✓ done, · note, ! 
 
 The laptop drives every handoff, and kant keeps one record per task in `~/.local/state/ferry/tasks/`, naming the machine that owns it. Each write to the record is a compare-and-swap on its generation. The steps run in this order:
 
-1. Preflight. The agent must have exited. On the laptop you exit it yourself, and on kant ferry sends `/exit` to an idle agent in its Rex pane. It never stops a busy one. If the receiver's agent is older than the sender's, ferry refuses unless you pass `--force-version`.
+1. Preflight. The agent must have exited. On the laptop you exit it yourself, and on kant ferry sends `/exit` to an idle agent in its Rex pane. It never stops a busy one. If the receiver's agent is older than the sender's, ferry refuses unless you pass `--force-version`. Ferry also asks the receiver what the handoff would overwrite: uncommitted changes in its copy of the worktree, or commits there or on the branch that the sender's branch doesn't contain. At a terminal it offers to save that work to a new `ferry-saved/<task>-<time>` branch on the receiver first. Otherwise it stops, and `--force` overwrites without saving. `ferry to HOST --check` runs all of these checks while the agent still runs, and stops before it stops the agent or touches either worktree.
 2. `.ferry/dehydrate` runs on the sender, if approved.
 3. Code moves through git. The sender commits HEAD, its index, and its working tree as three hidden commits under `refs/ferry/<task>/`, without touching your index, stash, or branch. The receiver checks them out and stops if the result doesn't match the sender's fingerprint, or if its copy changed since it last handed the task away. Nothing merges.
 
