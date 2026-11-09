@@ -428,6 +428,68 @@ func TestRefusesToOverwriteUnhandedChanges(t *testing.T) {
 	if w.read(kwt, "stray.txt") == "" {
 		t.Fatal("stray edit must survive")
 	}
+	// The check runs before the handoff is recorded or the agent stopped.
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateOwned || r.Owner != "laptop" {
+		t.Fatalf("a refusal before the handoff must leave the record alone: %+v", r)
+	}
+}
+
+// At a terminal, ferry offers to save the receiver's unsent work to a
+// branch there, then hands off over it.
+func TestSavesUnhandedChangesToABranch(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
+	w.write(kwt, "stray.txt", "edited on kant after handing off\n")
+	// Without dehydrate, the save is the only prompt.
+	os.Remove(filepath.Join(wt, ".ferry", "dehydrate"))
+
+	cmd := inTerminal(t, ferryBin, "to", "kant", "--yes", "--no-launch")
+	cmd.Dir = wt
+	cmd.Env = w.env(w.laptop)
+	out, err := typeAt(cmd, "pick 1-2: ", "1\n")
+	if err != nil {
+		t.Fatalf("to: %v\n%s", err, out)
+	}
+	if exists(filepath.Join(kwt, "stray.txt")) {
+		t.Fatalf("kant's copy wasn't replaced:\n%s", out)
+	}
+	repo := filepath.Join(w.kant, "src", "app")
+	saved := w.git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/ferry-saved/")
+	if !strings.HasPrefix(saved, "ferry-saved/fix-auth-") || strings.Contains(saved, "\n") {
+		t.Fatalf("want one saved branch, got %q\n%s", saved, out)
+	}
+	if got := w.git(repo, "show", saved+":stray.txt"); got != "edited on kant after handing off" {
+		t.Fatalf("saved branch has stray.txt = %q", got)
+	}
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.Owner != "kant" || r.State != stateOwned {
+		t.Fatalf("handoff didn't finish: %+v", r)
+	}
+}
+
+// --check reports what the handoff would refuse or ask about while the agent
+// still runs, and leaves the agent, the record and both worktrees alone.
+func TestCheckRunsWhileTheAgentDoes(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
+	w.write(kwt, "stray.txt", "edited on kant after handing off\n")
+	w.write(w.laptop, ".claude/sessions/99.json", fmt.Sprintf(`{"pid":%d,"sessionId":%q,"status":"idle"}`, os.Getpid(), sessionID))
+
+	out := w.mustFerry(wt, "to", "kant", "--check")
+	if !strings.Contains(out, "stray.txt") || !strings.Contains(out, "offer to save") || !strings.Contains(out, "nothing found") {
+		t.Fatalf("check output:\n%s", out)
+	}
+	if w.read(kwt, "stray.txt") == "" {
+		t.Fatal("check must not touch kant's worktree")
+	}
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateOwned || r.Owner != "laptop" {
+		t.Fatalf("check must not change the record: %+v", r)
+	}
 }
 
 func TestUnapprovedHookIsSkipped(t *testing.T) {

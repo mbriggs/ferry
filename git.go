@@ -264,31 +264,24 @@ func (l *Local) Apply(q ApplyReq) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("snapshot %s is missing on this machine", base)
 	}
-	ours := func(fp string) bool {
-		for _, p := range append([]string{q.Expected}, q.Previous...) {
-			if p != "" && sameHeadAndTree(fp, p) {
-				return true
-			}
-		}
-		return false
-	}
-
 	if isWorktree(wt) {
-		cur, err := fingerprint(wt)
+		if cur, err := fingerprint(wt); err != nil {
+			return "", err
+		} else if cur == q.Expected {
+			return cur, nil
+		}
+	}
+	if !q.Force && !q.Fresh {
+		u, err := unsent(repo, wt, q.Branch, baseSHA, append([]string{q.Expected}, q.Previous...))
 		if err != nil {
 			return "", err
 		}
-		if cur == q.Expected {
-			return cur, nil
+		if !u.Empty() {
+			return "", u.refusal(q.WtRel, q.Branch)
 		}
-		if !q.Force && !q.Fresh && !ours(cur) {
-			if err := nothingToLose(wt, "HEAD", baseSHA, q.WtRel); err != nil {
-				return "", err
-			}
-		}
-		if err := l.branchSafe(repo, q, baseSHA, ours); err != nil {
-			return "", err
-		}
+	}
+
+	if isWorktree(wt) {
 		if _, err := git(wt, "checkout", "-q", "-f", "-B", q.Branch, base); err != nil {
 			return "", err
 		}
@@ -302,9 +295,6 @@ func (l *Local) Apply(q ApplyReq) (string, error) {
 				return "", fmt.Errorf("%s exists but isn't a git worktree of %s", q.WtRel, q.RepoRel)
 			}
 			os.Remove(wt)
-		}
-		if err := l.branchSafe(repo, q, baseSHA, ours); err != nil {
-			return "", err
 		}
 		if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
 			return "", err
@@ -330,40 +320,189 @@ func (l *Local) Apply(q ApplyReq) (string, error) {
 	return got, nil
 }
 
-// branchSafe refuses to move an existing branch off commits the snapshot
-// doesn't contain, unless ferry itself left the branch there.
-func (l *Local) branchSafe(repo string, q ApplyReq, baseSHA string, ours func(string) bool) error {
-	tip, err := git(repo, "rev-parse", "--verify", "-q", "refs/heads/"+q.Branch)
-	if err != nil || q.Force || q.Fresh {
-		return nil
-	}
-	for _, p := range append([]string{q.Expected}, q.Previous...) {
-		if fpField(p, "head") == tip {
-			return nil
-		}
-	}
-	if _, err := git(repo, "merge-base", "--is-ancestor", tip, baseSHA); err == nil {
-		return nil
-	}
-	log, _ := git(repo, "log", "--oneline", baseSHA+".."+tip)
-	return fmt.Errorf("branch %s here has commits the incoming snapshot doesn't contain; refusing to move it (pass --force to overwrite):\n%s", q.Branch, indent(log))
+// Unsent is the work on a machine that handing a task to it would
+// overwrite. Each field is git's output, "" when there's nothing.
+type Unsent struct {
+	Changes string `json:"changes,omitempty"` // `git status --porcelain` of the worktree
+	Commits string `json:"commits,omitempty"` // the worktree's commits missing from the incoming base
+	Branch  string `json:"branch,omitempty"`  // the branch's commits missing from the incoming base
 }
 
-// nothingToLose succeeds when the worktree is clean and its HEAD is already
-// contained in base, so overwriting it can't drop anything.
-func nothingToLose(wt, head, baseSHA, label string) error {
-	status, err := git(wt, "status", "--porcelain")
+func (u Unsent) Empty() bool { return u.Changes == "" && u.Commits == "" && u.Branch == "" }
+
+// refusal is Apply's error when the work it would overwrite isn't ferry's.
+func (u Unsent) refusal(wtRel, branch string) error {
+	return fmt.Errorf("%s; refusing to overwrite (pass --force to overwrite):\n%s", u.Summary(wtRel, branch), indent(u.Detail()))
+}
+
+// Summary says what u holds, in one line.
+func (u Unsent) Summary(wtRel, branch string) string {
+	var parts []string
+	if u.Changes != "" {
+		parts = append(parts, wtRel+" has changes that weren't handed off")
+	}
+	if u.Commits != "" {
+		parts = append(parts, wtRel+" has commits that weren't handed off")
+	}
+	if u.Branch != "" {
+		parts = append(parts, "branch "+branch+" has commits the incoming snapshot doesn't contain")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// Detail is git's lines for u.
+func (u Unsent) Detail() string {
+	var out []string
+	for _, s := range []string{u.Changes, u.Commits, u.Branch} {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// unsent finds what overwriting the worktree wt and moving branch to
+// baseSHA would lose. known are fingerprints ferry itself left here: a
+// worktree matching one holds nothing that wasn't handed off, and a branch
+// at one's head is where ferry put it.
+func unsent(repo, wt, branch, baseSHA string, known []string) (Unsent, error) {
+	var u Unsent
+	if isWorktree(wt) {
+		cur, err := fingerprint(wt)
+		if err != nil {
+			return u, err
+		}
+		if !knownTree(cur, known) {
+			// Against the tree ferry last left here, the list is what changed
+			// since; without one, it's everything uncommitted.
+			if from := knownAtHead(cur, known); from != "" {
+				u.Changes, err = git(wt, "diff", "--name-status", fpField(from, "tree"), fpField(cur, "tree"))
+			} else {
+				u.Changes, err = git(wt, "status", "--porcelain")
+			}
+			if err != nil {
+				return u, err
+			}
+			if _, err := git(wt, "merge-base", "--is-ancestor", "HEAD", baseSHA); err != nil {
+				u.Commits, _ = git(wt, "log", "--oneline", baseSHA+"..HEAD")
+			}
+		}
+	}
+	tip, err := git(repo, "rev-parse", "--verify", "-q", "refs/heads/"+branch)
+	if err != nil || knownHead(tip, known) {
+		return u, nil
+	}
+	if _, err := git(repo, "merge-base", "--is-ancestor", tip, baseSHA); err != nil {
+		u.Branch, _ = git(repo, "log", "--oneline", baseSHA+".."+tip)
+	}
+	return u, nil
+}
+
+func knownTree(fp string, known []string) bool {
+	for _, k := range known {
+		if k != "" && sameHeadAndTree(fp, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// knownAtHead is the known fingerprint with fp's HEAD and a tree, if any.
+func knownAtHead(fp string, known []string) string {
+	for _, k := range known {
+		if fpField(k, "tree") != "" && fpField(k, "head") == fpField(fp, "head") {
+			return k
+		}
+	}
+	return ""
+}
+
+func knownHead(sha string, known []string) bool {
+	for _, k := range known {
+		if fpField(k, "head") == sha {
+			return true
+		}
+	}
+	return false
+}
+
+// UnsentReq asks, before a handoff starts, what it would overwrite here.
+// Base is a ref holding the commit the sender's branch is on.
+type UnsentReq struct {
+	RepoRel  string   `json:"repo_rel"`
+	WtRel    string   `json:"wt_rel"`
+	Branch   string   `json:"branch"`
+	Base     string   `json:"base"`
+	Previous []string `json:"previous,omitempty"`
+}
+
+func (l *Local) Unsent(q UnsentReq) (Unsent, error) {
+	repo := l.abs(q.RepoRel)
+	baseSHA, err := git(repo, "rev-parse", "--verify", "-q", q.Base+"^{commit}")
 	if err != nil {
-		return err
+		return Unsent{}, fmt.Errorf("%s is missing on this machine", q.Base)
 	}
-	if status != "" {
-		return fmt.Errorf("%s has changes that weren't handed off; refusing to overwrite (pass --force to overwrite):\n%s", label, indent(status))
+	return unsent(repo, l.abs(q.WtRel), q.Branch, baseSHA, q.Previous)
+}
+
+type SaveUnsentReq struct {
+	RepoRel string `json:"repo_rel"`
+	WtRel   string `json:"wt_rel"`
+	Branch  string `json:"branch"`
+	// Name is the branch to save the worktree to. It must not exist yet.
+	Name string `json:"name"`
+}
+
+type SavedUnsent struct {
+	// Branches are the branches created: Name for the worktree, and
+	// Name-branch for Branch's tip when the worktree's copy doesn't hold it.
+	Branches []string `json:"branches"`
+	// Known are fingerprints of what was saved, for ApplyReq.Previous: Apply
+	// then overwrites exactly that, and refuses anything changed since.
+	Known []string `json:"known"`
+}
+
+// SaveUnsent copies the worktree (every file git doesn't ignore, as one
+// commit on top of its HEAD) and Branch's tip to new branches, so a handoff
+// can overwrite them without losing anything. The copy doesn't keep what was
+// staged apart from what wasn't.
+func (l *Local) SaveUnsent(q SaveUnsentReq) (SavedUnsent, error) {
+	repo, wt := l.abs(q.RepoRel), l.abs(q.WtRel)
+	var s SavedUnsent
+	create := func(name, sha string) error {
+		// An empty old value makes update-ref refuse a branch that exists.
+		if _, err := git(repo, "update-ref", "refs/heads/"+name, sha, ""); err != nil {
+			return fmt.Errorf("can't create branch %s: %w", name, err)
+		}
+		s.Branches = append(s.Branches, name)
+		return nil
 	}
-	if _, err := git(wt, "merge-base", "--is-ancestor", head, baseSHA); err != nil {
-		log, _ := git(wt, "log", "--oneline", baseSHA+".."+head)
-		return fmt.Errorf("%s has commits that weren't handed off; refusing to overwrite (pass --force to overwrite):\n%s", label, indent(log))
+	saved := ""
+	if isWorktree(wt) {
+		fp, err := fingerprint(wt)
+		if err != nil {
+			return s, err
+		}
+		msg := "ferry: ~/" + q.WtRel + " as it was before a handoff overwrote it"
+		if saved, err = git(wt, "commit-tree", fpField(fp, "tree"), "-p", "HEAD", "-m", msg); err != nil {
+			return s, err
+		}
+		if err := create(q.Name, saved); err != nil {
+			return s, err
+		}
+		s.Known = append(s.Known, fp)
 	}
-	return nil
+	tip, err := git(repo, "rev-parse", "--verify", "-q", "refs/heads/"+q.Branch)
+	if err != nil {
+		return s, nil
+	}
+	s.Known = append(s.Known, "head="+tip)
+	if saved != "" {
+		if _, err := git(repo, "merge-base", "--is-ancestor", tip, saved); err == nil {
+			return s, nil
+		}
+	}
+	return s, create(q.Name+"-branch", tip)
 }
 
 // fpField reads one field ("head", "index", "tree") from a fingerprint.

@@ -19,6 +19,9 @@ type handoffOpts struct {
 	NoLaunch     bool
 	Force        bool
 	ForceVersion bool
+	// Check runs every check that can refuse the handoff, then stops before
+	// anything is stopped, recorded, or moved.
+	Check bool
 }
 
 // task identifies the worktree being moved. Paths are relative to home so
@@ -62,6 +65,9 @@ type move struct {
 	si, di        Info
 	direction     string // "to" or "from", as typed
 	rec           *Record
+	// saved are fingerprints of dst's work that checkReceiver saved to a
+	// branch, so Apply may overwrite it.
+	saved []string
 }
 
 // handoff moves task t from src to dst. hub keeps the ownership record; it is
@@ -98,6 +104,10 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// A rerun after the commit point only needs to finish the last steps, and
 	// it uses the sessions this handoff recorded rather than searching again.
 	if r := m.rec; r != nil && r.State == stateLanding && r.Owner == m.di.Name && r.From == m.si.Name {
+		if m.opts.Check {
+			warn("check", "%s already owns %s; ferry %s %s finishes the handoff", m.di.Name, t.Name, m.direction, m.di.Name)
+			return nil
+		}
 		warn("owner", "%s owns %s %s; finishing the handoff", m.di.Name, t.Name, dim(fmt.Sprintf("(generation %d)", r.Generation)))
 		if err := m.resendIfResumed(); err != nil {
 			return err
@@ -109,9 +119,16 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	if err != nil {
 		return err
 	}
+	if err := m.checkReceiver(); err != nil {
+		return err
+	}
 	sess, err := m.stopAgent()
 	if err != nil {
 		return err
+	}
+	if m.opts.Check {
+		step("check", "nothing found that would stop the handoff")
+		return nil
 	}
 	if err := m.claim(sess, resuming); err != nil {
 		return err
@@ -191,6 +208,81 @@ func (m *move) mayHandOff() (bool, error) {
 	return resuming, nil
 }
 
+// checkReceiver looks for work on dst that the handoff would overwrite,
+// before anything is stopped or recorded, and offers to save it to a branch
+// there first. It moves src's branch tip to dst to compare against. Apply
+// checks again when it overwrites, so work done on dst after this still
+// stops the handoff.
+func (m *move) checkReceiver() error {
+	src, dst, t, di := m.src, m.dst, m.t, m.di
+	ds, err := dst.RepoState(t.RepoRel)
+	if err != nil {
+		return err
+	}
+	if !ds.Exists || len(ds.Roots) == 0 || ds.Branch == placeholderBranch {
+		return nil // sendCode creates the repo; there's nothing to lose
+	}
+	ws, err := src.RepoState(t.WtRel)
+	if err != nil {
+		return err
+	}
+	if !sharesRoot(ws.Roots, ds.Roots) {
+		return m.differentRepo()
+	}
+	if ws.Branch == "" {
+		return nil // Snapshot refuses a detached HEAD
+	}
+	incoming := taskRef(t.Key, "incoming")
+	if err := moveRefs(src, dst, t.RepoRel, "+refs/heads/"+ws.Branch+":"+incoming); err != nil {
+		return err
+	}
+	u, err := dst.Unsent(UnsentReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: ws.Branch, Base: incoming, Previous: m.known()})
+	if err != nil || u.Empty() {
+		return err
+	}
+	review("receiver", "%s: %s; the handoff would overwrite it:\n%s", di.Name, u.Summary(t.WtRel, ws.Branch), gutter(forTerminal(u.Detail())))
+	name := "ferry-saved/" + t.Name + "-" + time.Now().Format("20060102-150405")
+	switch {
+	case m.opts.Force:
+		warn("receiver", "overwriting it (--force)")
+		return nil
+	case m.opts.Check:
+		warn("receiver", "ferry %s %s will offer to save it to a branch on %s first", m.direction, di.Name, di.Name)
+		return nil
+	case !interactive():
+		return fmt.Errorf("%s has work this handoff would overwrite; run ferry at a terminal to save it to a branch there first, commit or discard it on %s, or pass --force to overwrite it", di.Name, di.Name)
+	}
+	choice, err := pick(di.Name+"'s copy would be overwritten:", []string{
+		"save it to branch " + name + " on " + di.Name + ", then hand off",
+		"stop; change nothing",
+	})
+	if err != nil || choice != 0 {
+		return errors.New("stopped; nothing was handed off")
+	}
+	saved, err := dst.SaveUnsent(SaveUnsentReq{RepoRel: t.RepoRel, WtRel: t.WtRel, Branch: ws.Branch, Name: name})
+	if err != nil {
+		return err
+	}
+	m.saved = saved.Known
+	step("saved", "%s: %s %s", di.Name, strings.Join(saved.Branches, ", "), dim("(git -C ~/"+t.RepoRel+" show "+saved.Branches[0]+")"))
+	return nil
+}
+
+// known are fingerprints of states ferry left in dst's worktree, which the
+// handoff may overwrite: what dst had when it last sent the task away, what
+// an interrupted attempt applied, and what checkReceiver saved.
+func (m *move) known() []string {
+	var k []string
+	if m.rec != nil {
+		k = append(k, m.rec.LastSent[m.di.Name], m.rec.Attempt)
+	}
+	return append(k, m.saved...)
+}
+
+func (m *move) differentRepo() error {
+	return fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", m.di.Name, m.t.RepoRel)
+}
+
 // stopAgent finds the session to move and makes sure no agent has it
 // loaded, stopping an idle one in Rex on kant. It returns nil when the
 // worktree has no session, and the code moves alone.
@@ -234,6 +326,10 @@ func (m *move) stopAgent() (*Session, error) {
 		return nil, fmt.Errorf("%s has %s %s, older than %s here; upgrade it or pass --force-version", di.Name, sess.Agent, want, have)
 	default:
 		step("versions", "%s %s on %s, %s on %s", sess.Agent, have, si.Name, want, di.Name)
+	}
+	if m.opts.Check {
+		// A check runs before the agent exits, so a live agent is expected.
+		return sess, nil
 	}
 	live, err := settle(src, *sess)
 	if err != nil {
@@ -318,7 +414,7 @@ func (m *move) sendCode() (SnapshotResult, error) {
 		return SnapshotResult{}, err
 	}
 	if ds.Exists && len(ds.Roots) > 0 && !sharesRoot(ss.Roots, ds.Roots) {
-		return SnapshotResult{}, fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", di.Name, t.RepoRel)
+		return SnapshotResult{}, m.differentRepo()
 	}
 	// A repo still on the placeholder branch was created by an earlier,
 	// interrupted run; finish creating it the same way.
@@ -347,7 +443,7 @@ func (m *move) sendCode() (SnapshotResult, error) {
 		return SnapshotResult{}, err
 	}
 	step("git", "moved %s to %s", dim("refs/ferry/"+t.Key+"/*"), di.Name)
-	previous := []string{rec.LastSent[di.Name], rec.Attempt}
+	previous := m.known()
 	if rec.Attempt != snap.Fingerprint {
 		rec.Attempt = snap.Fingerprint
 		if err := m.save(); err != nil {

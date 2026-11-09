@@ -12,8 +12,8 @@ import (
 
 const usage = `usage:
   ferry to HOST [NAME] [--agent claude|codex] [--session ID] [--yes] [--no-launch]
-               [--force] [--force-version]
-  ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version]
+               [--force] [--force-version] [--check]
+  ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version] [--check]
   ferry ls HOST
   ferry setup HOST [USER@HOST] [--dry-run]
   ferry setup --claude-rules [--dry-run]
@@ -27,7 +27,10 @@ repo's main checkout, NAME (or a prompt) picks one of its worktrees. "ferry
 from" with no NAME lists the agents running on HOST and asks which to pull;
 NAME can be a task name, a Rex session label, the first 8 or more characters
 of a running agent's session id, or a path like src/app. --force takes a task
-whose record names another owner; --force-version resumes on an older agent.
+whose record names another owner and overwrites work on HOST that wasn't
+handed off; --force-version resumes on an older agent. --check runs the
+checks that can refuse a handoff, and stops before it stops an agent,
+records anything, or touches either worktree.
 `
 
 func main() {
@@ -105,6 +108,7 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.BoolVar(&o.NoLaunch, "no-launch", false, "print the resume command instead of starting the agent (in rex for to, in this terminal for from)")
 	fs.BoolVar(&o.Force, "force", false, "take the task even if the record names another owner")
 	fs.BoolVar(&o.ForceVersion, "force-version", false, "resume even if the receiving agent is older")
+	fs.BoolVar(&o.Check, "check", false, "run the checks that can refuse the handoff, then stop before stopping an agent or touching a worktree")
 	return fs
 }
 
