@@ -33,19 +33,27 @@ func (l *Local) configDir(parts ...string) string {
 	return filepath.Join(append([]string{l.Home, ".config", "ferry"}, parts...)...)
 }
 
+// name is this machine's name, as Info reports it.
+func (l *Local) name() (string, error) {
+	if b, err := os.ReadFile(l.configDir("name")); err == nil {
+		if name := strings.TrimSpace(string(b)); name != "" {
+			return name, nil
+		}
+	}
+	h, err := os.Hostname()
+	if err != nil {
+		return "", err
+	}
+	name, _, _ := strings.Cut(h, ".")
+	return name, nil
+}
+
 // Info names this machine and reports agent versions. The name comes from
 // ~/.config/ferry/name when present, so two test homes on one host differ.
 func (l *Local) Info() (Info, error) {
-	name := ""
-	if b, err := os.ReadFile(l.configDir("name")); err == nil {
-		name = strings.TrimSpace(string(b))
-	}
-	if name == "" {
-		h, err := os.Hostname()
-		if err != nil {
-			return Info{}, err
-		}
-		name, _, _ = strings.Cut(h, ".")
+	name, err := l.name()
+	if err != nil {
+		return Info{}, err
 	}
 	_, rexErr := lookTool("rex")
 	return Info{

@@ -146,8 +146,12 @@ func chooseTo(l *Local, dir, name string) (task, error) {
 	case len(all) == 1:
 		return here, nil
 	case !interactive():
-		step("task", "sending this checkout; name a worktree to send that instead (`ferry to HOST NAME`)")
-		return here, nil
+		// Guessing would send a different task than a prompt would have.
+		names := make([]string, len(all))
+		for i, o := range all {
+			names[i] = o.t.Name
+		}
+		return task{}, fmt.Errorf("~/%s has worktrees with sessions, and there's no terminal to ask which to send; name one: `ferry to HOST NAME`, NAME one of %s", here.RepoRel, strings.Join(names, ", "))
 	}
 	lines := make([]string, len(all))
 	for i, o := range all {

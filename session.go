@@ -358,7 +358,16 @@ func (l *Local) claudeTrusted(cwd string) bool {
 	if json.Unmarshal(data, &cfg) != nil {
 		return false
 	}
-	return cfg.Projects[cwd].HasTrustDialogAccepted
+	// Claude trusts a folder inside a trusted one, such as a worktree under
+	// the repo's .claude/worktrees, without asking.
+	for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
+		if cfg.Projects[dir].HasTrustDialogAccepted {
+			return true
+		}
+		if dir == filepath.Dir(dir) {
+			return false
+		}
+	}
 }
 
 // codexTrusted reads `[projects."<cwd>"] trust_level = "trusted"` from

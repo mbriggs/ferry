@@ -325,7 +325,7 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	t.Log(out)
 
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
@@ -398,7 +398,7 @@ func TestRoundTrip(t *testing.T) {
 
 	w.approve(w.laptop, restoreScript)
 	w.approve(w.kant, dehydrateScript)
-	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	t.Log(out)
 
 	if got, _ := fingerprint(wt); got != kantFP {
@@ -421,7 +421,7 @@ func TestRoundTrip(t *testing.T) {
 	// A second trip to kant reuses its fenced worktree, which hasn't changed.
 	w.write(wt, "second.txt", "again\n")
 	secondFP, _ := fingerprint(wt)
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if got, _ := fingerprint(kwt); got != secondFP {
 		t.Fatalf("second trip: kant worktree differs")
 	}
@@ -452,7 +452,7 @@ func TestWaitsForAJustWrittenTranscript(t *testing.T) {
 	wt := w.laptopTask()
 	now := time.Now()
 	os.Chtimes(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl"), now, now)
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "waiting for it to settle") {
 		t.Fatalf("expected a wait for the transcript:\n%s", out)
 	}
@@ -461,8 +461,8 @@ func TestWaitsForAJustWrittenTranscript(t *testing.T) {
 func TestRefusesToOverwriteUnhandedChanges(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	// Someone edits kant's copy after it was handed back.
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
 	w.write(kwt, "stray.txt", "edited on kant after handing off\n")
@@ -484,8 +484,8 @@ func TestRefusesToOverwriteUnhandedChanges(t *testing.T) {
 func TestSavesUnhandedChangesToABranch(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
 	w.write(kwt, "stray.txt", "edited on kant after handing off\n")
 	// Without dehydrate, the save is the only prompt.
@@ -519,8 +519,8 @@ func TestSavesUnhandedChangesToABranch(t *testing.T) {
 func TestCheckRunsWhileTheAgentDoes(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
 	w.write(kwt, "stray.txt", "edited on kant after handing off\n")
 	w.write(w.laptop, ".claude/sessions/99.json", fmt.Sprintf(`{"pid":%d,"sessionId":%q,"status":"idle"}`, os.Getpid(), sessionID))
@@ -541,7 +541,7 @@ func TestCheckRunsWhileTheAgentDoes(t *testing.T) {
 func TestCheckOnAPullNamesTheRemote(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	w.write(wt, "stray.txt", "edited on the laptop after handing off\n")
 	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--check")
 	if !strings.Contains(out, "`ferry from kant fix-auth` will offer to save it to a branch on laptop") {
@@ -571,7 +571,7 @@ func TestRepoAlreadyAtThePathOnKant(t *testing.T) {
 
 	os.RemoveAll(other)
 	w.git(w.root, "init", "-q", "--initial-branch=main", other)
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if w.read(w.kant, "src/app-wt/fix-auth/unpushed.txt") != "local commit\n" {
 		t.Fatal("the handoff into an empty repo didn't land the code")
 	}
@@ -621,13 +621,22 @@ func TestVersionLess(t *testing.T) {
 	}
 }
 
-func TestUnapprovedHookIsSkipped(t *testing.T) {
+// With no terminal, an unapproved script stops the run instead of being
+// skipped unasked; --skip-scripts skips it on purpose.
+func TestUnapprovedHookStopsWithoutATerminal(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
 	os.Remove(filepath.Join(w.kant, ".config/ferry/approved"))
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	if !strings.Contains(out, "isn't approved") || !strings.Contains(out, "skipped") {
-		t.Fatalf("expected the restore hook to be shown and skipped:\n%s", out)
+	out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
+	if err == nil || !strings.Contains(out, "no terminal to ask at") {
+		t.Fatalf("expected the unapproved restore to stop the run:\n%s", out)
+	}
+	if exists(filepath.Join(w.kant, "src/app-wt/fix-auth/.restored")) {
+		t.Fatal("unapproved restore ran")
+	}
+	out = w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	if !strings.Contains(out, "skipped .ferry/restore (--skip-scripts)") {
+		t.Fatalf("expected the restore hook to be skipped:\n%s", out)
 	}
 	if exists(filepath.Join(w.kant, "src/app-wt/fix-auth/.restored")) {
 		t.Fatal("unapproved restore ran")
@@ -640,7 +649,7 @@ func TestUnapprovedHookIsSkipped(t *testing.T) {
 func TestOwnerCheck(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
 	if err == nil || !strings.Contains(out, "kant owns fix-auth") {
 		t.Fatalf("second push should be refused, got err=%v\n%s", err, out)
@@ -656,7 +665,7 @@ func TestCodexSession(t *testing.T) {
 	w.write(w.laptop, rel,
 		fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q,"cwd":%q,"runtime_workspace_roots":[%q]}}`+"\n", id, wt, wt)+
 			fmt.Sprintf(`{"type":"turn_context","payload":{"cwd":%q,"model":"gpt-test"}}`+"\n", wt))
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
 	got := w.read(w.kant, rel)
 	if strings.Contains(got, wt) || !strings.Contains(got, kwt) {

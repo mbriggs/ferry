@@ -134,7 +134,7 @@ func heavyDir(rel string) bool {
 }
 
 func neverExtra(rel string) bool {
-	return within(filepath.ToSlash(rel), ".claude/worktrees") || filepath.Base(rel) == ".DS_Store"
+	return within(filepath.ToSlash(rel), claudeWorktreesRel) || filepath.Base(rel) == ".DS_Store"
 }
 
 // matchAny reports whether rel matches a pattern: a glob against the base

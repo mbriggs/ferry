@@ -32,6 +32,9 @@ type HookInfo struct {
 	Approved bool   `json:"approved"`
 	// TooLarge hooks can't be shown in full, so they can't be approved.
 	TooLarge bool `json:"too_large,omitempty"`
+	// Refused says why the hook can't run whatever the answer
+	// (checkInterpreter).
+	Refused string `json:"refused,omitempty"`
 }
 
 // maxHookSize is the largest hook ferry will show for approval.
@@ -70,7 +73,32 @@ func (l *Local) HookInfo(q HookReq) (HookInfo, error) {
 	if len(data) > maxHookSize {
 		return HookInfo{Exists: true, Path: p, SHA: sha, TooLarge: true, Approved: l.approved(sha)}, nil
 	}
-	return HookInfo{Exists: true, Path: p, SHA: sha, Content: string(data), Approved: l.approved(sha)}, nil
+	info := HookInfo{Exists: true, Path: p, SHA: sha, Content: string(data), Approved: l.approved(sha)}
+	if err := l.checkInterpreter(data); err != nil {
+		info.Refused = err.Error()
+	}
+	return info, nil
+}
+
+// checkInterpreter refuses a hook whose #! line names a file in this home,
+// or a relative path, which runs from the worktree. Approval covers the
+// hook's own bytes, so "#!./tools/interp" would run whatever the other
+// machine put in tools/interp under a script that still reads as approved.
+// "#!/bin/sh" and "#!/usr/bin/env python3" name nothing either machine's
+// repos can change.
+func (l *Local) checkInterpreter(data []byte) error {
+	argv := hookArgv(data, "")
+	for _, word := range argv[:len(argv)-1] {
+		for _, w := range strings.Fields(word) {
+			if !strings.Contains(w, "/") {
+				continue
+			}
+			if !filepath.IsAbs(w) || within(filepath.Clean(w), l.Home) {
+				return fmt.Errorf("its #! line runs %s, a file the other machine can change; use an interpreter outside your home, like #!/bin/sh or #!/usr/bin/env NAME", w)
+			}
+		}
+	}
+	return nil
 }
 
 func hashHook(data []byte) string {
@@ -147,6 +175,9 @@ func (l *Local) RunHook(q HookReq) (HookResult, error) {
 	}
 	if hashHook(data) != q.SHA || !l.approved(q.SHA) || len(data) > maxHookSize {
 		return HookResult{}, fmt.Errorf("%s changed or isn't approved; not running it", q.Name)
+	}
+	if err := l.checkInterpreter(data); err != nil {
+		return HookResult{}, fmt.Errorf("not running %s: %v", q.Name, err)
 	}
 	if err := os.MkdirAll(l.stateDir("run"), 0o700); err != nil {
 		return HookResult{}, err

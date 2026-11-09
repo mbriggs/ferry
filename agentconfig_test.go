@@ -94,3 +94,23 @@ func TestClaudeConfigFindsEveryStartupScript(t *testing.T) {
 		t.Fatalf("changes = %v, want %v", got, scripts)
 	}
 }
+
+// Claude trusts a folder inside a trusted one, so a session in one of
+// Claude's worktrees is trusted when its repo is.
+func TestClaudeTrustsSubfoldersOfATrustedFolder(t *testing.T) {
+	home := t.TempDir()
+	repo := filepath.Join(home, "src", "app")
+	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"projects":{"`+repo+`":{"hasTrustDialogAccepted":true},"`+filepath.Join(home, "src", "other")+`":{"hasTrustDialogAccepted":false}}}`), 0o600)
+	l := &Local{Home: home}
+	for dir, want := range map[string]bool{
+		repo: true,
+		filepath.Join(repo, ".claude", "worktrees", "feat"): true,
+		filepath.Join(home, "src", "app-wt"):                false,
+		filepath.Join(home, "src", "other", "sub"):          false,
+		filepath.Join(home, "src"):                          false,
+	} {
+		if got := l.claudeTrusted(dir); got != want {
+			t.Errorf("claudeTrusted(%s) = %v, want %v", dir, got, want)
+		}
+	}
+}

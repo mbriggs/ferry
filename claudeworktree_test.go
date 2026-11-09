@@ -10,6 +10,43 @@ import (
 	"time"
 )
 
+// A main checkout whose .gitignore doesn't name .claude/worktrees still
+// sends without its Claude worktrees: git would add each as a gitlink to a
+// commit kant may not have, and the apply there would fail.
+func TestMainCheckoutSendsWithoutItsClaudeWorktrees(t *testing.T) {
+	w := newWorld(t)
+	app, _ := w.claudeWorktree("closed")
+	w.write(app, ".gitignore", "")
+	w.git(app, "commit", "-qam", "stop ignoring worktrees")
+	out := w.mustFerry(app, "to", "kant", "app", "--yes", "--skip-scripts", "--no-launch")
+	kapp := filepath.Join(w.kant, "src", "app")
+	if exists(filepath.Join(kapp, ".claude", "worktrees", "feat")) {
+		t.Fatalf("a Claude worktree went to kant:\n%s", out)
+	}
+	if got := w.git(kapp, "ls-tree", "-r", "--name-only", "refs/ferry/"+taskKey("src/app")+"/wip"); strings.Contains(got, ".claude/worktrees") {
+		t.Fatalf("the snapshot holds a Claude worktree:\n%s", got)
+	}
+}
+
+// Any other untracked checkout inside the worktree can't go through git,
+// so the sender refuses before anything on kant changes.
+func TestNestedCheckoutIsRefusedBeforeKantChanges(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	nested := filepath.Join(wt, "vendor-x")
+	w.git(w.root, "init", "-q", nested)
+	w.write(nested, "x.txt", "x\n")
+	w.git(nested, "add", "-A")
+	w.git(nested, "commit", "-qm", "x")
+	out, err := w.ferry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	if err == nil || !strings.Contains(out, "vendor-x") || !strings.Contains(out, "isn't a submodule") {
+		t.Fatalf("want a refusal naming vendor-x, got err=%v\n%s", err, out)
+	}
+	if exists(filepath.Join(w.kant, "src", "app-wt", "fix-auth")) {
+		t.Fatal("kant's worktree was created before the refusal")
+	}
+}
+
 // claudeWorktree builds ~/src/app with a Claude worktree .claude/worktrees/feat
 // and a session in it, shaped the way the session ended (see
 // claudeworktree.go). It returns the main checkout and the worktree.
@@ -84,7 +121,7 @@ func TestClaudeWorktreeSessionsMoveAndResumePlain(t *testing.T) {
 		t.Run(ended, func(t *testing.T) {
 			w := newWorld(t)
 			_, wt := w.claudeWorktree(ended)
-			out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+			out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 			t.Log(out)
 
 			kwt := filepath.Join(w.kant, "src", "app", ".claude", "worktrees", "feat")
@@ -112,15 +149,20 @@ func TestToFromMainCheckoutNamesAWorktree(t *testing.T) {
 	w := newWorld(t)
 	app, _ := w.claudeWorktree("kept")
 
-	// Not on a terminal, a bare `ferry to` sends the main checkout, and the
-	// worktree's refiled session stays out of it.
-	out := w.mustFerry(app, "to", "kant", "--yes", "--no-launch")
-	t.Log(out)
-	if !strings.Contains(out, "ferry to HOST NAME") || !strings.Contains(out, "moving code only") {
-		t.Fatalf("the main checkout should go alone, with a hint:\n%s", out)
+	// Not on a terminal, a bare `ferry to` can't ask which to send, so it
+	// names the choices instead of guessing.
+	out, err := w.ferry(app, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	if err == nil || !strings.Contains(out, "NAME one of app, feat") {
+		t.Fatalf("a bare ferry to should list the choices:\n%s", out)
+	}
+	// Named, the main checkout goes alone: the worktree's refiled session
+	// stays out of it.
+	out = w.mustFerry(app, "to", "kant", "app", "--yes", "--skip-scripts", "--no-launch")
+	if !strings.Contains(out, "moving code only") {
+		t.Fatalf("the main checkout should go alone:\n%s", out)
 	}
 
-	out = w.mustFerry(app, "to", "kant", "feat", "--yes", "--no-launch")
+	out = w.mustFerry(app, "to", "kant", "feat", "--yes", "--skip-scripts", "--no-launch")
 	t.Log(out)
 	if !strings.Contains(out, "task       feat") && !strings.Contains(out, "feat  (src/app/.claude/worktrees/feat") {
 		t.Fatalf("NAME should pick the worktree:\n%s", out)
@@ -144,7 +186,7 @@ func TestToFromALinkedWorktreeNamesAnother(t *testing.T) {
 	w.git(app, "worktree", "add", "-q", "-b", "other", here)
 	w.write(here, "other.txt", "not this one\n")
 
-	w.mustFerry(here, "to", "kant", "feat", "--yes", "--no-launch")
+	w.mustFerry(here, "to", "kant", "feat", "--yes", "--skip-scripts", "--no-launch")
 	kapp := filepath.Join(w.kant, "src", "app", ".claude", "worktrees")
 	if !exists(filepath.Join(kapp, "feat", "feat.txt")) || exists(filepath.Join(kapp, "other")) {
 		t.Fatal("NAME from a linked worktree should send that worktree, and only it")
@@ -166,11 +208,11 @@ func TestLiveClaudeWorktreeSessionRefusesWithKeepAdvice(t *testing.T) {
 func TestClaudeWorktreeSessionRoundTrip(t *testing.T) {
 	w := newWorld(t)
 	app, wt := w.claudeWorktree("kept")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src", "app", ".claude", "worktrees", "feat")
 	w.appendKant(kwt, `{"type":"assistant","cwd":"`+kwt+`","message":"did kant work"}`)
 
-	out := w.mustFerry(w.laptop, "from", "kant", "feat", "--yes", "--no-launch")
+	out := w.mustFerry(w.laptop, "from", "kant", "feat", "--yes", "--skip-scripts", "--no-launch")
 	t.Log(out)
 	back := w.read(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/"+sessionID+".jsonl")
 	if !strings.Contains(back, "did kant work") || lastWorktreeState(t, back) != nil {
@@ -189,7 +231,7 @@ func TestClaudeWorktreeSessionRoundTrip(t *testing.T) {
 func TestPullStopsAClaudeWorktreeAgentWithSigterm(t *testing.T) {
 	w := newWorld(t)
 	_, wt := w.claudeWorktree("closed")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src", "app", ".claude", "worktrees", "feat")
 	w.appendKant(kwt, `{"type":"worktree-state","worktreeSession":{"worktreePath":"`+kwt+`"}}`)
 
@@ -204,7 +246,7 @@ func TestPullStopsAClaudeWorktreeAgentWithSigterm(t *testing.T) {
 	w.write(w.kant, ".claude/sessions/"+pid+".json", `{"pid":`+pid+`,"sessionId":"`+sessionID+`","status":"idle"}`)
 	log := w.paneRex("feat")
 
-	out := w.mustFerry(w.laptop, "from", "kant", "feat", "--yes", "--no-launch")
+	out := w.mustFerry(w.laptop, "from", "kant", "feat", "--yes", "--skip-scripts", "--no-launch")
 	t.Log(out)
 	if data, _ := os.ReadFile(log); strings.Contains(string(data), "/exit") {
 		t.Fatalf("typed /exit into a Claude worktree session:\n%s", data)
@@ -217,6 +259,35 @@ func TestPullStopsAClaudeWorktreeAgentWithSigterm(t *testing.T) {
 	back := w.read(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/"+sessionID+".jsonl")
 	if lastWorktreeState(t, back) != nil {
 		t.Fatalf("the laptop's copy should resume outside Claude's worktree handling:\n%s", back)
+	}
+}
+
+// A plain Claude session is stopped with SIGTERM too: /exit typed after a
+// draft in its input box would send the draft as a prompt.
+func TestPullStopsAPlainClaudeAgentWithoutTyping(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	agent := exec.Command("sleep", "60")
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { agent.Wait(); close(exited) }()
+	t.Cleanup(func() { agent.Process.Kill(); <-exited })
+	pid := itoa(agent.Process.Pid)
+	w.write(w.kant, ".claude/sessions/"+pid+".json", `{"pid":`+pid+`,"sessionId":"`+sessionID+`","status":"idle"}`)
+	log := w.paneRex("fix-auth")
+	w.approve(w.kant, dehydrateScript)
+
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts", "--no-launch")
+	if data, _ := os.ReadFile(log); strings.Contains(string(data), "send ") {
+		t.Fatalf("typed into the agent's pane:\n%s\n%s", data, out)
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatalf("the agent should have been stopped:\n%s", out)
 	}
 }
 

@@ -19,6 +19,9 @@ type handoffOpts struct {
 	NoLaunch     bool
 	Force        bool
 	ForceVersion bool
+	// SkipScripts skips a .ferry script that would ask first, instead of
+	// asking, or stopping when there is no terminal.
+	SkipScripts bool
 	// Check runs every check that can refuse the handoff, then stops before
 	// anything is stopped, recorded, or moved.
 	Check bool
@@ -406,7 +409,7 @@ func (m *move) dehydrate() error {
 			ask, changes = true, changeSummary(src.GitURL(t.WtRel), t.Key, "")
 		}
 	}
-	_, err := runHook(src, m.si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: m.direction}, ask, changes)
+	_, err := runHook(src, m.si.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "dehydrate", Task: t.Name, Direction: m.direction}, ask, changes, m.opts.SkipScripts)
 	return err
 }
 
@@ -902,7 +905,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 	if dst.IsLocal() {
 		changes = changeSummary(dst.GitURL(t.WtRel), t.Key, taskRef(t.Key, "wip"))
 	}
-	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, dst.IsLocal(), changes)
+	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, dst.IsLocal(), changes, opts.SkipScripts)
 	if err != nil {
 		bad("restore", "failed: %v", err)
 		warn("next", "fix it, then run `%s` again to finish", m.command())
@@ -1078,7 +1081,7 @@ func moveRefs(src, dst Machine, repoRel string, refspecs ...string) error {
 // what changed since the laptop last sent the task, because hooks run the
 // repo's build tooling, which a kant agent can edit without touching the
 // hook itself. changes is computed on the laptop, never read from kant.
-func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) (string, error) {
+func runHook(m Machine, where string, q HookReq, everyRun bool, changes string, skip bool) (string, error) {
 	info, err := m.HookInfo(q)
 	if err != nil || !info.Exists {
 		return "", err
@@ -1086,6 +1089,9 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 	if info.TooLarge {
 		warn(q.Name, "%s: .ferry/%s is over %d KB, too large to review; not running it", where, q.Name, maxHookSize>>10)
 		return "", nil
+	}
+	if info.Refused != "" {
+		return "", fmt.Errorf("%s: not running .ferry/%s: %s", where, q.Name, info.Refused)
 	}
 	if !info.Approved || everyRun {
 		why := "isn't approved on " + where
@@ -1095,6 +1101,17 @@ func runHook(m Machine, where string, q HookReq, everyRun bool, changes string) 
 		review(q.Name, ".ferry/%s %s %s:\n%s", q.Name, why, dim("(sha "+info.SHA[:12]+")"), gutter(forTerminal(info.Content)))
 		if changes != "" {
 			review("", "changed since this machine last sent the task:\n%s", gutter(forTerminal(changes)))
+		}
+		// Skipping a hook nobody was asked about would move the task
+		// without what dehydrate saves, or start the agent without what
+		// restore sets up, and exit 0 as if all went well. So skipping
+		// takes --skip-scripts.
+		switch {
+		case skip:
+			warn(q.Name, "%s: skipped .ferry/%s (--skip-scripts)", where, q.Name)
+			return "", nil
+		case !interactive():
+			return "", fmt.Errorf(".ferry/%s on %s needs a yes before it runs, and there's no terminal to ask at; run ferry at a terminal, or pass --skip-scripts to go on without it", q.Name, where)
 		}
 		prompt := fmt.Sprintf("run this %s on %s, now and whenever it's unchanged?", q.Name, where)
 		if everyRun {

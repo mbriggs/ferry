@@ -105,7 +105,7 @@ func TestRemoteCallsWaitForAnEarlierCallOnTheTask(t *testing.T) {
 	const held = 1500 * time.Millisecond
 	time.AfterFunc(held, release)
 	start := time.Now()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if d := time.Since(start); d < held {
 		t.Fatalf("the handoff finished in %v, before the earlier call released the lock", d)
 	}

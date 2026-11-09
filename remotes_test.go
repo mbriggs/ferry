@@ -42,7 +42,7 @@ func TestRemotesTravel(t *testing.T) {
 
 	// A new repo on kant takes every remote, the upstream, and the tracking
 	// refs without asking.
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if got := w.git(kapp, "remote", "get-url", "origin"); got != origin {
 		t.Fatalf("kant origin = %q", got)
 	}
@@ -59,7 +59,7 @@ func TestRemotesTravel(t *testing.T) {
 		t.Fatalf("kant kept the staged tracking refs:\n%s", staged)
 	}
 
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 
 	// The laptop fetches feature, kant fetches main. Each side's newer ref
 	// survives the next trip; neither moves backward.
@@ -67,7 +67,7 @@ func TestRemotesTravel(t *testing.T) {
 	w.git(app, "fetch", "-q", "origin", "feature:refs/remotes/origin/feature")
 	main := w.pushToOrigin("main", "m1.txt")
 	w.git(kapp, "fetch", "-q", "origin", "main:refs/remotes/origin/main")
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if got := w.git(kapp, "rev-parse", "origin/feature"); got != feature {
 		t.Fatalf("kant origin/feature = %q, want the laptop's %s\n%s", got, feature, out)
 	}
@@ -80,7 +80,7 @@ func TestRemotesTravel(t *testing.T) {
 	w.git(kapp, "remote", "set-url", "origin", "https://example.com/elsewhere.git")
 	w.git(kapp, "fetch", "-q", origin, "main:refs/remotes/origin/main")
 	before := w.git(app, "rev-parse", "origin/main")
-	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if got := w.git(app, "remote", "get-url", "origin"); got != origin {
 		t.Fatalf("laptop origin = %q, want it unchanged\n%s", got, out)
 	}

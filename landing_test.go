@@ -89,7 +89,7 @@ func TestLandingRerunParksOnlyTheHandedOffSession(t *testing.T) {
 		t.Fatalf("first run should fail in restore:\n%s", out)
 	}
 	w.write(w.kant, "allow-restore", "")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !exists(otherPath) {
 		t.Fatal("the rerun parked an unrelated session")
 	}
@@ -108,7 +108,7 @@ func TestLandingRerunLaunchesOnce(t *testing.T) {
 		t.Fatalf("launched %d agents before restore succeeded", n)
 	}
 	w.write(w.kant, "allow-restore", "")
-	w.mustFerry(wt, "to", "kant", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if n := countLines(log, "new "); n != 1 {
 		t.Fatalf("launched %d agents, want 1", n)
 	}
@@ -139,7 +139,7 @@ func TestRerunRetriesAFailedLaunch(t *testing.T) {
 		t.Fatalf("record after the failed launch: state %s, owner %s", r.State, r.Owner)
 	}
 	os.Remove(filepath.Join(w.root, "rex-fail"))
-	out = w.mustFerry(wt, "to", "kant", "--yes")
+	out = w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if n := countLines(log, "new "); n != 2 {
 		t.Fatalf("rex new ran %d times, want the failure and one retry:\n%s", n, out)
 	}
@@ -158,7 +158,7 @@ func TestLandingRerunDoesNotRelaunchALiveAgent(t *testing.T) {
 	// The interrupted run had already started the agent on kant.
 	w.write(w.kant, ".claude/sessions/1.json", fmt.Sprintf(`{"pid":%d,"sessionId":%q,"status":"idle"}`, os.Getpid(), sessionID))
 
-	out := w.mustFerry(wt, "to", "kant", "--yes")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if !strings.Contains(out, "already running") {
 		t.Fatalf("expected the rerun to notice the running agent:\n%s", out)
 	}
@@ -180,7 +180,7 @@ func TestTrustIsAnsweredOnlyWhenKantDoesntTrustTheFolder(t *testing.T) {
 				w.write(w.kant, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, kwt))
 				w.write(w.root, "trusted", "")
 			}
-			w.mustFerry(wt, "to", "kant", "--yes")
+			w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 			answered := countLines(log, "send-key") > 0
 			if answered == kantTrusts {
 				t.Fatalf("answered the trust prompt = %v with kant trusting = %v\n%s", answered, kantTrusts, w.read(w.root, "rex.log"))
@@ -198,7 +198,7 @@ func TestTrustAnswerSurvivesADroppedKey(t *testing.T) {
 	w.write(w.root, "drop-key", "")
 	wt := w.laptopTask()
 	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
-	out := w.mustFerry(wt, "to", "kant", "--yes")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if !strings.Contains(out, "launch     kant: rex session") {
 		t.Fatalf("the agent didn't launch:\n%s\n%s", out, w.read(w.root, "rex.log"))
 	}
@@ -212,7 +212,7 @@ func TestTrustIsNotAnsweredFromConversationText(t *testing.T) {
 	log := w.fakeRex("● I said we should trust this folder earlier.\n❯ \n  auto mode on\n")
 	wt := w.laptopTask()
 	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
-	w.mustFerry(wt, "to", "kant", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if n := countLines(log, "send-key"); n != 0 {
 		t.Fatalf("typed %d keys into a conversation", n)
 	}
@@ -254,7 +254,7 @@ func TestNoLaunchIntoAFolderNeitherMachineTrusts(t *testing.T) {
 	w := newWorld(t)
 	log := w.fakeRex("auto mode on")
 	wt := w.laptopTask()
-	out := w.mustFerry(wt, "to", "kant", "--yes")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts")
 	if n := countLines(log, "new "); n != 0 {
 		t.Fatalf("started an agent that would wait at the trust prompt:\n%s", out)
 	}
@@ -276,13 +276,13 @@ func TestNoLaunchAndPullsHereStartNothing(t *testing.T) {
 	w.write(w.kant, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, kwt))
 	w.write(w.root, "trusted", "")
 
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if n := countLines(log, "new "); n != 0 || !strings.Contains(out, "claude --resume") {
 		t.Fatalf("--no-launch started %d agents:\n%s", n, out)
 	}
 	ran := filepath.Join(w.root, "claude-ran")
 	writeExec(t, filepath.Join(w.root, "bin", "claude"), "#!/bin/sh\n[ \"$1\" = --resume ] || exec echo '2.1.0 (Claude Code)'\ntouch "+ran+"\n")
-	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if n := countLines(log, "new "); n != 0 || !strings.Contains(out, "claude --resume") {
 		t.Fatalf("a pull here started %d agents in rex:\n%s", n, out)
 	}
@@ -312,7 +312,7 @@ func TestLandingRerunSendsTurnsAddedOnTheSource(t *testing.T) {
 	os.RemoveAll(filepath.Join(w.laptop, ".claude/sessions"))
 
 	w.write(w.kant, "allow-restore", "")
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "sending it again") {
 		t.Fatalf("the rerun didn't notice the new turns:\n%s", out)
 	}

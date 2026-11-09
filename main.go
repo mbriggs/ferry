@@ -109,6 +109,7 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.BoolVar(&o.NoLaunch, "no-launch", false, "print the resume command instead of starting the agent (in rex for to, in this terminal for from)")
 	fs.BoolVar(&o.Force, "force", false, "take the task even if the record names another owner, and overwrite the receiver's unsent work without saving it")
 	fs.BoolVar(&o.ForceVersion, "force-version", false, "resume even if the receiving agent is older")
+	fs.BoolVar(&o.SkipScripts, "skip-scripts", false, "skip .ferry/dehydrate and .ferry/restore when they would ask first; without a terminal to ask at, ferry stops instead")
 	fs.BoolVar(&o.Check, "check", false, "run the checks that can refuse the handoff, then stop before stopping an agent or touching a worktree")
 	return fs
 }
@@ -149,7 +150,7 @@ func cmdTo(l *Local, args []string) int {
 	defer release()
 	remote.Task = t.Key
 	if err := handoff(l, remote, remote, t, o); err != nil {
-		return fail(err)
+		return fail(l.hostHint(pos[0], err))
 	}
 	return 0
 }
@@ -178,7 +179,7 @@ func cmdFrom(l *Local, args []string) int {
 	}
 	p, err := choosePull(remote, me.Name, pos[0], name)
 	if err != nil {
-		return fail(err)
+		return fail(l.hostHint(pos[0], err))
 	}
 	t := p.t
 	if o.SessionID == "" {
@@ -194,7 +195,7 @@ func cmdFrom(l *Local, args []string) int {
 	defer release()
 	remote.Task = t.Key
 	if err := handoff(remote, l, remote, t, o); err != nil {
-		return fail(err)
+		return fail(l.hostHint(pos[0], err))
 	}
 	return 0
 }
@@ -281,8 +282,8 @@ func (l *Local) hostNames() []string {
 
 // isSelf reports whether name is this machine's own ferry name.
 func (l *Local) isSelf(name string) bool {
-	info, err := l.Info()
-	return err == nil && info.Name == name
+	me, err := l.name()
+	return err == nil && me == name
 }
 
 func (l *Local) host(name string) (*Remote, error) {
@@ -291,6 +292,20 @@ func (l *Local) host(name string) (*Remote, error) {
 	}
 	target, path, _ := l.hostEntry(name)
 	return NewRemote(name, target, path)
+}
+
+// hostHint adds what to do when ssh couldn't reach a host the hosts file
+// doesn't name. The usual cause is running ferry on kant, which has no
+// hosts file because the laptop drives every handoff.
+func (l *Local) hostHint(name string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "ssh: ") {
+		return err
+	}
+	if _, _, found := l.hostEntry(name); found {
+		return err
+	}
+	me, _ := l.name()
+	return fmt.Errorf("%w\n%s isn't in ~/.config/ferry/hosts. The laptop drives every handoff, so if %s is the laptop, run `ferry from %s` or `ferry to %s` there instead; to reach it from here, run `ferry setup %s USER@%s` first", err, name, name, me, me, name, name)
 }
 
 // machine is host, except that this machine's own name gives this machine,
