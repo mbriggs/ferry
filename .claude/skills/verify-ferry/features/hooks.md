@@ -4,7 +4,7 @@ A repo can commit `.ferry/dehydrate` (runs on the sending machine before the cod
 
 ## Sub-features
 
-- `hook-approve` shows an unapproved hook with its sha and asks `run this <hook> on <machine>, now and whenever it's unchanged?`. On a terminal that's a Yes/No form with ` (←/→ then Enter)` after the question: Yes takes an arrow key and then Enter, and `y` or any other typed key submits No. With no terminal it answers no. A yes appends the sha to that machine's `~/.config/ferry/approved`.
+- `hook-approve` shows an unapproved hook with its sha and asks `run this <hook> on <machine>, now and whenever it's unchanged?`. On a terminal that's a Yes/No form with `←/→ then enter` after the question: Yes takes an arrow key and then Enter, and Enter alone submits No. Typed keys like `y` do nothing. With no terminal it answers no. A yes appends the sha to that machine's `~/.config/ferry/approved`.
 - `hook-skip` prints `<hook> skipped` on no, and the handoff continues.
 - `hook-state` sends files the dehydrate hook writes under `.ferry/state/` as extras.
 - `hook-summary` puts the restore output's last line into the `resume` note as `Environment: ...`.
@@ -20,7 +20,7 @@ Preconditions:
 
 - Fresh world from `$W new --hooks`, doctor all `ok`.
 
-- **Start.** Run `$W tty $R to kant --yes --no-launch`, `$W wait $R 'run this dehydrate'`, then `$W screen $R dehydrate-prompt`. The pane shows the dehydrate script, `isn't approved on laptop (sha ...)`, and the question above `Yes     No` buttons.
+- **Start.** Run `$W tty $R to kant --yes --no-launch`, `$W wait $R 'run this dehydrate'`, then `$W screen $R dehydrate-prompt`. The pane shows the dehydrate script, `isn't approved on laptop (sha ...)`, and the question followed by `←/→ then enter   Yes   No`.
 - **Approve dehydrate (`hook-approve`).** Run `$W press $R Left Enter`, `$W wait $R 'run this restore'`, then `$W screen $R restore-prompt`. The pane shows `extras .env (14 B), .ferry/state/db.dump (17 B)` and the restore prompt `isn't approved on kant`.
 - **Approve restore (`hook-state`, `hook-summary`).** Run `$W press $R Left Enter`, `$W wait $R '[exit '`, then `$W screen $R done`. The pane shows `restore    kant: db loaded: dump from laptop`, a `resume` line containing `Environment: db loaded: dump from laptop`, and `[exit 0]`. `cat $KWT/.restored` prints `restored-to`. `$LAPTOP/.config/ferry/approved` and `$KANT/.config/ferry/approved` each hold one 64-hex sha.
 - **Skip (`hook-skip`).** In a second `--hooks` world, run `$W ferry $R to kant --yes --no-launch` (no tty, so prompts answer no). Output has `dehydrate skipped` and `restore skipped`, exit 0, and kant has no `.restored`.
@@ -30,5 +30,5 @@ Preconditions:
 
 - After a round trip, the next `ferry to` stops at the laptop's dehydrate prompt even though that sha is approved. A step that expects `ferry to` to finish unattended in a used `--hooks` world will hang until `wait` times out.
 - Step labels are padded to 10 columns (`restore    kant: ...`). A `wait` for a label and its text with one space between them never matches.
-- `$W keys $R y` on a hook prompt answers No: the pane prints `restore skipped` and the handoff goes on.
+- `$W keys $R y` on a hook prompt answers No, since the `y` is ignored and the Enter after it submits the default: the pane prints `restore skipped` and the handoff goes on.
 - Approval is per machine and per exact content. Editing a hook on kant changes its sha, so the next run prompts again.

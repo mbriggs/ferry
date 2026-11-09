@@ -32,7 +32,7 @@ R=$($W new)                                # or: $W new --hooks
 - an idle Claude transcript, session `11111111-2222-3333-4444-555555555555`, mentioning the codeword HERON
 - with `--hooks`: committed `.ferry/dehydrate` and `.ferry/restore`, not approved on either side
 
-It's ready when it prints the root and exits 0. `$R/env` holds `ROOT LAPTOP KANT FERRY WT KWT EVIDENCE SID` for `source`. Shell variables don't survive between tool calls, so set `W` and `R` and `source $R/env` again in each call.
+It's ready when it prints the root and exits 0. `$R/env` holds `ROOT LAPTOP KANT FERRY WT KWT EVIDENCE SID`, plus `CWT KCWT CWSID` for claude-worktree.md, for `source`. Shell variables don't survive between tool calls, so set `W` and `R` and `source $R/env` again in each call.
 
 ## Doctor
 
@@ -72,9 +72,10 @@ $W screen $R after
 
 Before each `screen`, `wait` for the text the next step prints. The old prompt stays on screen, so wait for something new.
 
-Two more helpers drive the world itself:
+Three more helpers drive the world itself:
 
 - `$W kant-work $R` plays the resumed agent on kant: commits `kant-was-here.txt` (that file only), appends to `app.txt` unstaged, appends a transcript turn. Use it between `to` and `from`.
+- `$W claude-worktree $R closed|kept` stages a worktree Claude made, `$CWT` (`src/demo/.claude/worktrees/feat`), with session `$CWSID`: `closed` as after closing its pane, `kept` as after `/exit` and Keep. claude-worktree.md drives it.
 - `$W state $R LABEL` snapshots both homes: git status, log, staged diff, ignored files, `.env` mode, transcripts, parked files, task records (kant holds the records).
 
 To stage your own scenario, edit files under `$LAPTOP` or `$KANT` directly. That is the user's own activity, not a ferry shortcut. To change a fake transcript, keep its mtime over 2 seconds old (`$W backdate FILE`); ferry waits on a transcript written in the last 2 seconds.

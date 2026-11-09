@@ -1,6 +1,6 @@
 # Connect a host and check it
 
-`ferry setup HOST [USER@HOST]` writes HOST's line into `~/.config/ferry/hosts`, checks ssh, installs this ferry build on the far side, and ends with doctor's checks for that host. `ferry doctor [HOST...]` checks this machine (ferry's name, git, agents, rex, `~/src`), then each named host, or every host in the hosts file: the hosts entry, ssh, the far side's ferry version, distinct names, agents, rex, and the task records. `ferry push [HOST...]` only installs this build on each host, or every host in the hosts file, that runs a different one. Each exits 1 if any check or host fails.
+`ferry setup HOST [USER@HOST]` writes HOST's line into `~/.config/ferry/hosts`, checks ssh, installs this ferry build on the far side, and ends with doctor's checks for that host. `ferry doctor [HOST...]` checks this machine (ferry's name, git, rsync 3.2.5 or newer, agents, rex, `~/src`), then each named host, or every host in the hosts file: the hosts entry, ssh, the far side's ferry version, distinct names, rsync, agents, rex, and the task records. `ferry push [HOST...]` only installs this build on each host, or every host in the hosts file, that runs a different one. Each exits 1 if any check or host fails.
 
 ## Sub-features
 
@@ -23,7 +23,7 @@ Preconditions:
 
 - A fresh world. `source $R/env`, then `cp $LAPTOP/.config/ferry/hosts $R/hosts.orig` to compare against.
 
-- **Known host (`setup-host-known`).** Run `$W ferry $R setup kant`. The output starts with `hosts kant -> exec:<kant home> (already set)`, then a `kant` section with `ok` for hosts, ferry, names, agents (`claude 0.0.0, codex 0.0.0`), rex, and records. Exit 0. `cmp $LAPTOP/.config/ferry/hosts $R/hosts.orig` succeeds.
+- **Known host (`setup-host-known`).** Run `$W ferry $R setup kant`. The output starts with `hosts kant -> exec:<kant home> (already set)`, then a `kant` section with `ok` for hosts, ferry, names, rsync, agents (`claude 0.0.0, codex 0.0.0`), rex, and records. Exit 0. `cmp $LAPTOP/.config/ferry/hosts $R/hosts.orig` succeeds.
 - **Dry run (`setup-host-dry`).** Run `$W ferry $R setup kant2 exec:$KANT --dry-run`. Output `hosts would set kant2 -> exec:...` and `dry run, nothing written`, no `kant2` checks, exit 0. The hosts file is unchanged.
 - **New host (`setup-host-new`).** Run `$W ferry $R setup kant2 me@kant2`. Output `hosts kant2 -> me@kant2, in ~/.config/ferry/hosts`, then `ssh me@kant2: world.sh: blocked ssh ...`, exit 1. `diff $R/hosts.orig $LAPTOP/.config/ferry/hosts` shows `> kant2 me@kant2`.
 - **Doctor (`doctor-ok`).** In a fresh world, run `$W ferry $R doctor`. A `this machine (laptop)` section, a `kant` section, every line `ok`, exit 0.

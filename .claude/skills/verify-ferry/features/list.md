@@ -20,11 +20,13 @@ Preconditions:
 - A fresh world.
 
 - **Empty (`ls-empty`).** Run `$W ferry $R ls kant`. Exit 0, output `no tasks`.
-- **After a handoff (`ls-table`).** Run `$W ferry $R to kant --yes --no-launch`, then `$W ferry $R ls kant`. A header `NAME OWNER STATE GEN AGENT PATH` and a `demo` row with owner `kant`, state `owned`, agent `claude`, path `~/src/demo`.
+- **After a handoff (`ls-table`).** Run `$W ferry $R to kant --yes --no-launch`, then `$W ferry $R ls kant`. A header `NAME OWNER STATE GEN AGENT PATH` (padded columns, so match `grep -E '^NAME +OWNER'`) and a `demo` row with owner `kant`, state `owned`, agent `claude`, path `~/src/demo`.
 - **After bringing it back.** Run `$W ferry $R -C /tmp from kant demo --yes`, then `ls` again. The row's owner is `laptop`, state `owned`, and the generation is higher.
 - **On the hub (`ls-self`).** Run `$W ferry $R --as kant ls kant`. Exit 0 and the same `demo` row.
 - **No host (`ls-usage`).** Run `$W ferry $R ls`. Exit 2, and the output starts with `usage:`.
 
 ## Gotchas
 
+- That table is the plain layout, which `world.sh ferry` always gets. On a terminal (`world.sh tty`) ferry prints a styled list instead: no GEN column, a `✓` or `!` per state, and a dim `gen N` at the end of each row.
+- "Newest first" means most recently written, and every handoff rewrites the record, so a task just brought back moves to the top.
 - The generation goes up by more than one per handoff (claim, attempt, commit, finish). Assert that it increased, not a specific value, unless you're testing the record code.

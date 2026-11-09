@@ -25,5 +25,6 @@ Preconditions:
 ## Gotchas
 
 - With no settings file, the backup holds `{}`, not a copy of anything.
+- `--dry-run` with the rule already there prints only `already set in ...`, with no `dry run` line.
 - On macOS, `/tmp` is a symlink, so the `already set in` line names `/private/tmp/...` while the first two runs name `/tmp/...`.
 - To test key-order preservation or the symlink path, write a settings file (or a symlink to one) under `$LAPTOP/.claude/` before the step.
