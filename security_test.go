@@ -42,6 +42,43 @@ func TestStageSessionRefusesFilesOutsideTheSession(t *testing.T) {
 	}
 }
 
+// A dead ferry's rsync can rename an older copy of the session over the one
+// a rerun just sent. Staging that copy would resume the agent without the
+// turns added in between.
+func TestStageSessionRefusesAnOlderCopy(t *testing.T) {
+	home := t.TempDir()
+	l := &Local{Home: home}
+	oldHome := "/Users/matt"
+	cwd := oldHome + "/src/app"
+	transcript := filepath.Join(".claude", "projects", claudeSlug(cwd), sessionID+".jsonl")
+	stage := filepath.Join(".local", "state", "ferry", "in", "t", "session")
+	older := `{"cwd":"` + cwd + `","n":1}` + "\n"
+	newer := older + `{"cwd":"` + cwd + `","n":2}` + "\n"
+	p := filepath.Join(home, stage, transcript)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte(older), 0o600)
+	ready, err := l.readyDir("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := filepath.Join(ready, "earlier")
+	os.MkdirAll(ready, 0o755)
+	os.WriteFile(earlier, []byte("x"), 0o600)
+
+	_, err = l.StageSession(InstallReq{
+		Session:  Session{Agent: agentClaude, ID: sessionID, Cwd: cwd, Files: []string{transcript}, Size: int64(len(newer))},
+		OldHome:  oldHome,
+		StageRel: stage,
+		Task:     "t",
+	})
+	if err == nil || !strings.Contains(err.Error(), "staged copy") {
+		t.Fatalf("want a refusal of the older copy, got %v", err)
+	}
+	if !exists(earlier) {
+		t.Fatal("the refusal emptied ready")
+	}
+}
+
 func TestSessionIDsMustBeUUIDs(t *testing.T) {
 	l := &Local{Home: t.TempDir()}
 	for _, id := range []string{"../../../.config/fish", "abc", sessionID + "/../x"} {

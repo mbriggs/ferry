@@ -32,7 +32,7 @@ The model covers this code, as of the sync commit below. Run `git diff <sync com
 | `Claim` | `m.claim`: the `handing-off` `m.save()` that records `Source`. A resumed claim skips it |
 | `Work` | `m.dehydrate`, `m.sendCode` (repo, snapshot, `moveRefs`, the `Attempt` `m.save()`, `Apply`, `syncRemotes`), `m.sendExtras` (rsync), `m.sendGitHooks` |
 | `Transfer` | `m.stageSession`: the second `src.FindSession` ("disappeared before it was sent"), then `m.sendSession`: `rsyncTo` (`rsync.go`) into `in/<task>/session`, run on the laptop as a child of ferry |
-| `Stage` | `dst.StageSession` into `in/<task>/ready`. It empties `ready` before it walks the stage directory, so a missing stage directory fails with `ready` empty. `installed` is set only on success |
+| `Stage`, `StageEff`, `SizeMatches` | `dst.StageSession` into `in/<task>/ready`. It first sums the staged files' sizes and refuses, with `ready` untouched, unless that is the `Size` of the session as sent; an older copy, or none, fails. The model counts a size in turns. Then it empties `ready` and moves the files in. It removes the stage directory either way. `installed` is set only on success |
 | `Commit` | `m.commit`: the `landing` `m.save()`, which sets `rec.Source` to the session sent and returns err on failure |
 | `FinishPlace`, `PlaceEff` | `finish()`: `dst.PlaceSession`: nil if `ready` is gone, refuses while `Liveness` sees the session loaded, else parks the receiver's copy to `parked/<task>-replaced-*` and moves `ready` in. The source keeps its copy |
 | `FinishRestore` | the restore hook, then the branch: `Launch` on kant, exec here on the laptop (a terminal, no `--no-launch`), or print the resume command |
@@ -66,7 +66,7 @@ There are three modes:
 
 In each mode, a promise must hold, unless `formal/known-findings` lists it for that mode. A listed promise must fail as the code is, and must hold once the switches on its line remove its cause. That second run is what keeps a known finding from hiding a new one. A switch is `-KIND`, which drops one kind of dead call (`put`, `stop`, `import`, `stage`, `place`, `launch`). When a new finding needs a switch that this doesn't describe, add a model constant that defaults to what the code does, and teach `check()` in `check.sh` to set it.
 
-Each `Reach*` check must fail in its mode. A failing reach check shows that the model gets to a round trip, a launch on kant, an exec on the laptop, a stopped agent, a parked replaced copy, a rerun that sends the session again, a rerun into `finish()`, a `PlaceSession` refusal, or a dead call. If one passes, the model can't get there, and every pass in that mode means less.
+Each `Reach*` check must fail in its mode. A failing reach check shows that the model gets to a round trip, a launch on kant, an exec on the laptop, a stopped agent, a parked replaced copy, a rerun that sends the session again, a rerun into `finish()`, a `PlaceSession` refusal, a dead call, or a `StageSession` that finds a copy of the wrong size. If one passes, the model can't get there, and every pass in that mode means less.
 
 Exit 0 means all of the above. The output lines mean:
 
@@ -91,9 +91,11 @@ Mirror the change in the matching action, keeping one action per call that can f
 
 ## Current findings
 
-- **overlap NoLostTurns, held by `-import`.** A session rsync left running by a dead `ferry to` can land after the rerun's own rsync and before its `StageSession`. You run `ferry to kant`, and ferry dies while `sendSession`'s rsync copies the session, but the rsync keeps going (ferry was killed on its own, not by Ctrl-C). You open the session on the laptop, add a turn, and exit. You rerun `ferry to kant`. It finds the newer copy and rsyncs it into `in/<task>/session`, and then the old rsync renames the older copy over it. `StageSession` stages the older copy, `m.commit` records the newer one as `Source`, and `PlaceSession` makes the older copy live on kant. The agent on kant resumes without your turn. The laptop still has it, until the next `ferry from kant` parks the laptop's copy. Nothing notices: `resendIfResumed` runs only on a rerun of a `landing` record. Since 91684d8, which replaced the `ferry remote import` call (under `lockRemoteCall`) with rsync. The window needs ferry killed without its process group, and the old rsync still running after you have added a turn and rerun, so a large session on a slow link.
+None. `known-findings` lists no line.
 
 Fixed or gone since the first version of this model:
+
+- A session rsync left running by a dead `ferry to` could rename an older copy over the one the rerun had just sent, after you had added a turn on the laptop. `StageSession` staged the older copy, and the agent on kant resumed without your turn (since 91684d8, which moved the session from a locked `ferry remote import` to rsync). c5ee2f8 made the laptop's rsync hold the task lock, which shut out a rerun while it runs, but kant's receiving rsync can still rename a file in after its sender is gone. `StageSession` now refuses a staged copy whose size isn't the one sent, before it touches `ready`. Agents only append, so an older copy is smaller. Two forked copies of the same size would still pass, and the model allows that too.
 
 - `Launch` returned before the agent registered (`InstantRegister`). Now it waits.
 - `finish()` compared the source against a stale session (`CompareStaged`). The size check is now gone entirely (2b4274b), and `SizeCheckFair` went with it.
