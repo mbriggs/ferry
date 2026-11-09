@@ -41,7 +41,7 @@ command -v "$java" >/dev/null || { echo "check.sh: needs Java 11 or later on PAT
 skill=../.claude/skills/verify-handoff/SKILL.md
 if [ -f "$skill" ]; then
   sync=$(sed -n 's/.*Sync commit: `\([0-9a-f]*\)`.*/\1/p' "$skill")
-  if [ -n "$sync" ] && ! git -C .. diff --quiet "$sync" -- handoff.go record.go session.go machine.go main.go rex.go 2>/dev/null; then
+  if [ -n "$sync" ] && ! git -C .. diff --quiet "$sync" -- handoff.go record.go session.go machine.go main.go rex.go rsync.go 2>/dev/null; then
     echo "WARN   covered code changed since sync commit ${sync%"${sync#????????????}"}; recheck the coverage table in $skill"
   fi
 fi
