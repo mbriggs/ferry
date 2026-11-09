@@ -106,8 +106,87 @@ func TestPrepareExtrasRefusesGitDir(t *testing.T) {
 	home := t.TempDir()
 	l := &Local{Home: home}
 	os.MkdirAll(filepath.Join(home, "src/app/.git/hooks"), 0o755)
-	err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{".git/hooks/post-checkout"}})
-	if err == nil || !strings.Contains(err.Error(), ".git") {
-		t.Fatalf("want a .git refusal, got %v", err)
+	// macOS's filesystem resolves .GIT to the same directory as .git.
+	for _, p := range []string{".git/hooks/post-checkout", ".GIT/hooks/post-checkout"} {
+		err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{p}})
+		if err == nil || !strings.Contains(err.Error(), "inside .git") {
+			t.Errorf("%s: want a .git refusal, got %v", p, err)
+		}
 	}
+}
+
+// FuzzSessionPathOK checks that whatever the other machine puts in a session,
+// a path sessionPathOK accepts stays in the agent's session directories. Park
+// also accepts a directory f when f+"/x" passes, so that form is checked too.
+func FuzzSessionPathOK(f *testing.F) {
+	proj := filepath.Join(".claude", "projects", claudeSlug("/Users/matt/src/app"))
+	for _, s := range []string{
+		proj + "/" + sessionID + ".jsonl", proj + "/memory/a/..", ".claude/file-history/" + sessionID + "/x",
+		".codex/sessions/2026/01/02/rollout-a-" + sessionID + ".jsonl", "../.bashrc", proj + "/../x/" + sessionID + ".jsonl",
+	} {
+		f.Add(false, sessionID, "/Users/matt/src/app", proj, s)
+	}
+	f.Add(false, sessionID, "/Users/matt/src/app", ".claude/projects/../..", "../"+sessionID+".jsonl")
+	f.Add(true, sessionID, "/x", "", ".codex/sessions/2026/01/02/rollout-"+sessionID+".jsonl")
+	f.Fuzz(func(t *testing.T, codex bool, id, cwd, projDir, rel string) {
+		s := Session{Agent: agentClaude, ID: id, Cwd: cwd, ProjDir: projDir}
+		if codex {
+			s.Agent = agentCodex
+		}
+		proj := s.projDir()
+		for _, p := range []string{rel, rel + "/x"} {
+			if !sessionPathOK(s.Agent, s.ID, proj, p) {
+				continue
+			}
+			clean := filepath.ToSlash(filepath.Clean(rel))
+			ok := filepath.IsLocal(clean) && (strings.HasPrefix(clean, ".claude/projects/") ||
+				strings.HasPrefix(clean, ".claude/file-history/") || strings.HasPrefix(clean, ".codex/sessions/"))
+			if !ok {
+				t.Fatalf("accepted %q (as %q) for project %q, which leaves the session directories", rel, p, proj)
+			}
+		}
+	})
+}
+
+// FuzzSafeDest checks every path safeDest accepts against the filesystem
+// itself: the path is local, and no existing step along it is a symlink, a
+// file in a directory's place, or the repo's .git directory under any
+// spelling the filesystem treats as the same name.
+func FuzzSafeDest(f *testing.F) {
+	root := f.TempDir()
+	outside := f.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git", "hooks"), 0o755)
+	os.MkdirAll(filepath.Join(root, "d"), 0o755)
+	os.WriteFile(filepath.Join(root, "f"), nil, 0o600)
+	os.Symlink(outside, filepath.Join(root, "ln"))
+	os.Symlink("..", filepath.Join(root, "d", "up"))
+	gitDir, err := os.Stat(filepath.Join(root, ".git"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	for _, s := range []string{".git/hooks/pre-commit", "d/new", "f", "ln/x", "d/up/f", "d/../.git/config", "./d", ".env"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, rel string) {
+		if safeDest(root, rel) != nil {
+			return
+		}
+		if !filepath.IsLocal(rel) {
+			t.Fatalf("accepted %q, which isn't local", rel)
+		}
+		cur := root
+		for _, part := range strings.Split(filepath.Clean(rel), string(filepath.Separator)) {
+			cur = filepath.Join(cur, part)
+			st, err := os.Lstat(cur)
+			if err != nil {
+				return
+			}
+			if os.SameFile(st, gitDir) {
+				t.Fatalf("accepted %q, which reaches .git", rel)
+			}
+			if st.Mode()&os.ModeSymlink != 0 {
+				t.Fatalf("accepted %q through the symlink %s", rel, cur)
+			}
+		}
+	})
 }
