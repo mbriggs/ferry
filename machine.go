@@ -28,6 +28,7 @@ type Machine interface {
 	FinishRepo(FinishRepoReq) error
 	Snapshot(SnapshotReq) (SnapshotResult, error)
 	Apply(ApplyReq) (string, error)
+	SyncRemotes(SyncRemotesReq) (SyncRemotesResult, error)
 	ListExtras(wtRel string) (ExtrasList, error)
 	GitHooks(repoRel string) ([]GitHook, error)
 	InstallGitHooks(InstallGitHooksReq) error
@@ -53,7 +54,7 @@ type Machine interface {
 // renamed, a request or response it would misread, or an op this side now
 // needs. Adding an optional field doesn't need a bump. Both sides of a
 // handoff must agree; a peer that predates the field reports 0.
-const protocol = 3
+const protocol = 4
 
 type Info struct {
 	Name     string `json:"name"`
@@ -214,6 +215,9 @@ func (r *Remote) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	return rpc[SnapshotResult](r, "snapshot", q)
 }
 func (r *Remote) Apply(q ApplyReq) (string, error) { return rpc[string](r, "apply", q) }
+func (r *Remote) SyncRemotes(q SyncRemotesReq) (SyncRemotesResult, error) {
+	return rpc[SyncRemotesResult](r, "sync-remotes", q)
+}
 func (r *Remote) ListExtras(rel string) (ExtrasList, error) {
 	return rpc[ExtrasList](r, "list-extras", rel)
 }
@@ -329,6 +333,7 @@ var ops = map[string]handler{
 	"repo-state":     query((*Local).RepoState),
 	"snapshot":       query((*Local).Snapshot),
 	"apply":          query((*Local).Apply),
+	"sync-remotes":   query((*Local).SyncRemotes),
 	"list-extras":    query((*Local).ListExtras),
 	"stage-session":  query((*Local).StageSession),
 	"remove-extras":  query((*Local).RemoveExtras),

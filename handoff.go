@@ -331,7 +331,7 @@ func (m *move) sendCode() (SnapshotResult, error) {
 		if err := moveRefs(src, dst, t.RepoRel, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"); err != nil {
 			return SnapshotResult{}, err
 		}
-		if err := dst.FinishRepo(FinishRepoReq{RepoRel: t.RepoRel, Branch: ss.Branch, Origin: ss.Origin}); err != nil {
+		if err := dst.FinishRepo(FinishRepoReq{RepoRel: t.RepoRel, Branch: ss.Branch}); err != nil {
 			return SnapshotResult{}, err
 		}
 	} else {
@@ -358,7 +358,52 @@ func (m *move) sendCode() (SnapshotResult, error) {
 		return SnapshotResult{}, err
 	}
 	step("apply", "%s: %s matches the snapshot", di.Name, t.WtRel)
+	if err := m.syncRemotes(snap, fresh); err != nil {
+		return SnapshotResult{}, err
+	}
 	return snap, nil
+}
+
+// syncRemotes gives dst src's remotes and the branch's upstream, and moves
+// dst's remote-tracking refs forward to src's. A repo ferry just created
+// takes the config as it is. An existing one asks first, because a changed
+// URL or upstream redirects the next push. Coming to the laptop, --yes
+// doesn't answer: kant runs agents unattended, so a remote kant names is
+// trusted no more than a hook kant wrote. Declining keeps dst's config; the
+// tracking refs of remotes whose URLs match still move.
+func (m *move) syncRemotes(snap SnapshotResult, fresh bool) error {
+	dst, t, di := m.dst, m.t, m.di
+	q := SyncRemotesReq{RepoRel: t.RepoRel, Task: t.Key, Branch: snap.Branch, Remotes: snap.Remotes, Upstream: snap.Upstream}
+	q.DryRun = true
+	plan, err := dst.SyncRemotes(q)
+	if err != nil {
+		return err
+	}
+	q.DryRun, q.Config = false, true
+	if len(plan.Changes) > 0 {
+		step("remotes", "%s: %s", di.Name, strings.Join(plan.Changes, "; "))
+		if !fresh {
+			yes := m.opts.Yes && !dst.IsLocal()
+			if !yes && !confirm("change these remotes on "+di.Name+"?") {
+				warn("remotes", "kept %s's remotes as they are", di.Name)
+				q.Config = false
+			}
+		}
+	}
+	res, err := dst.SyncRemotes(q)
+	if err != nil {
+		return err
+	}
+	switch {
+	case res.Tracking == 1:
+		step("remotes", "%s: moved 1 remote-tracking ref forward", di.Name)
+	case res.Tracking > 1:
+		step("remotes", "%s: moved %d remote-tracking refs forward", di.Name, res.Tracking)
+	}
+	if len(res.Differ) > 0 {
+		note("remotes", "%s's URLs differ on %s; left its remote-tracking refs", strings.Join(res.Differ, ", "), di.Name)
+	}
+	return nil
 }
 
 // sendExtras sends the ignored files that differ on dst, after a yes, and

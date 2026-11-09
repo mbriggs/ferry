@@ -42,7 +42,6 @@ type RepoState struct {
 	Exists bool     `json:"exists"`
 	Roots  []string `json:"roots"`
 	Branch string   `json:"branch"`
-	Origin string   `json:"origin"`
 }
 
 func (l *Local) RepoState(repoRel string) (RepoState, error) {
@@ -56,7 +55,6 @@ func (l *Local) RepoState(repoRel string) (RepoState, error) {
 		sort.Strings(s.Roots)
 	}
 	s.Branch, _ = git(dir, "symbolic-ref", "--short", "-q", "HEAD")
-	s.Origin, _ = git(dir, "remote", "get-url", "origin")
 	return s, nil
 }
 
@@ -88,24 +86,17 @@ func (l *Local) InitRepo(repoRel string) error {
 type FinishRepoReq struct {
 	RepoRel string `json:"repo_rel"`
 	Branch  string `json:"branch"`
-	Origin  string `json:"origin"`
 }
 
-// FinishRepo moves a repo created by InitRepo off its placeholder branch and
-// gives it the source's origin, once branches have been pushed into it.
+// FinishRepo moves a repo created by InitRepo off its placeholder branch,
+// once branches have been pushed into it. Its remotes come later, from
+// SyncRemotes.
 func (l *Local) FinishRepo(q FinishRepoReq) error {
 	dir := l.abs(q.RepoRel)
 	head, _ := git(dir, "symbolic-ref", "--short", "-q", "HEAD")
 	if head == placeholderBranch && q.Branch != "" {
 		if _, err := git(dir, "checkout", "-q", q.Branch); err != nil {
 			return err
-		}
-	}
-	if q.Origin != "" {
-		if _, err := git(dir, "remote", "get-url", "origin"); err != nil {
-			if _, err := git(dir, "remote", "add", "origin", q.Origin); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -121,12 +112,18 @@ type SnapshotResult struct {
 	Branch      string `json:"branch"`
 	Fingerprint string `json:"fingerprint"`
 	Dirty       int    `json:"dirty"`
+	// Remotes and Upstream are the repo's remotes and the branch's upstream.
+	// The snapshot stages the remote-tracking refs beside its commits.
+	Remotes  []GitRemote `json:"remotes"`
+	Upstream Upstream    `json:"upstream"`
 }
 
 // Snapshot records the worktree as three commits under refs/ferry/<task>/:
 // base is HEAD, index is the real index on top of base, and wip is the whole
 // working tree (tracked, untracked, deletions; not ignored files) with base
-// and index as parents. The user's index, branch, and files are untouched.
+// and index as parents. It copies refs/remotes/* to
+// refs/ferry/<task>/remotes/*. The user's index, branch, and files are
+// untouched.
 func (l *Local) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	dir := l.abs(q.WtRel)
 	base, err := git(dir, "rev-parse", "--verify", "-q", "HEAD")
@@ -161,13 +158,20 @@ func (l *Local) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 			return SnapshotResult{}, err
 		}
 	}
+	if err := stageTracking(dir, q.Task); err != nil {
+		return SnapshotResult{}, err
+	}
+	remotes, err := remotesOf(dir)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
 	fp := fingerprintOf(base, idxTree, wipTree)
 	status, _ := git(dir, "status", "--porcelain")
 	dirty := 0
 	if status != "" {
 		dirty = len(strings.Split(status, "\n"))
 	}
-	return SnapshotResult{Base: base, Branch: branch, Fingerprint: fp, Dirty: dirty}, nil
+	return SnapshotResult{Base: base, Branch: branch, Fingerprint: fp, Dirty: dirty, Remotes: remotes, Upstream: upstreamOf(dir, branch)}, nil
 }
 
 // worktreeTree is the tree of everything `git add -A` would stage, built in a

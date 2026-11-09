@@ -6,6 +6,7 @@ This directory is the maintained list of what to verify in ferry, from the user'
 |---|---|---|
 | [hand-off.md](hand-off.md) | Hand a task to kant | `ferry to kant` |
 | [bring-back.md](bring-back.md) | Bring a task back | `ferry from kant [NAME]` |
+| [remotes.md](remotes.md) | Remotes, upstreams, and remote-tracking refs travel with the code | `ferry to kant`, `ferry from kant NAME` |
 | [list.md](list.md) | List tasks on a host | `ferry ls kant` |
 | [hooks.md](hooks.md) | Dehydrate and restore hooks with approval | `.ferry/dehydrate`, `.ferry/restore` |
 | [setup.md](setup.md) | Add Claude permission rules | `ferry setup --claude-rules [--dry-run]` |
