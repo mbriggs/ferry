@@ -83,3 +83,62 @@ func TestReplacedExtrasEndPrivate(t *testing.T) {
 		t.Fatalf("replaced .env mode: %v %v", st.Mode().Perm(), err)
 	}
 }
+
+// An ignored file edited on both machines: the receiver's copy is parked
+// before the sender's replaces it, and the output says so.
+func TestExtrasChangedOnBothSidesAreParked(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), ".env", "SECRET=kant\n")
+	w.write(wt, ".env", "SECRET=laptop\n")
+	w.approve(w.kant, dehydrateScript)
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	if w.read(wt, ".env") != "SECRET=kant\n" {
+		t.Fatalf("kant's .env didn't come back:\n%s", out)
+	}
+	if !strings.Contains(out, "parked its copies of .env") {
+		t.Fatalf("the output doesn't say the laptop's .env was parked:\n%s", out)
+	}
+	parked, _ := filepath.Glob(filepath.Join(w.laptop, ".local/state/ferry/parked", taskKey("src/app-wt/fix-auth")+"-extras-*", ".env"))
+	if len(parked) != 1 || w.read(filepath.Dir(parked[0]), ".env") != "SECRET=laptop\n" {
+		t.Fatalf("the laptop's .env wasn't parked: %v", parked)
+	}
+}
+
+// An ignored script stays executable, though only for its owner; a symlink
+// stays and is listed; a name with a newline is escaped in the output, and
+// isn't sent again when nothing changed.
+func TestExtrasModesLinksAndOddNames(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.write(wt, ".gitignore", ".env*\nbin-local/\n.ferry/state/\nnode_modules/\n.restored\n")
+	w.write(wt, "bin-local/run", "#!/bin/sh\n")
+	os.Chmod(filepath.Join(wt, "bin-local/run"), 0o755)
+	os.Symlink("/etc/hosts", filepath.Join(wt, "bin-local/hosts"))
+	w.write(wt, ".env\nfake", "x\n")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
+	if st, err := os.Stat(filepath.Join(kwt, "bin-local/run")); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("bin-local/run mode on kant: %v %v", st, err)
+	}
+	if _, err := os.Lstat(filepath.Join(kwt, "bin-local/hosts")); err == nil {
+		t.Fatal("the symlink was sent")
+	}
+	if !strings.Contains(out, "symlinks staying on laptop: bin-local/hosts") {
+		t.Fatalf("the symlink isn't listed as staying:\n%s", out)
+	}
+	if strings.Contains(out, ".env\nfake") || !strings.Contains(out, `.env\x{a}fake`) {
+		t.Fatalf("the newline in a name wasn't escaped:\n%s", out)
+	}
+	if w.read(kwt, ".env\nfake") != "x\n" {
+		t.Fatal("the file with a newline in its name didn't arrive")
+	}
+	w.approve(w.kant, dehydrateScript)
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	_, notSent, _ := strings.Cut(out, "already on laptop, not sent:")
+	notSent, _, _ = strings.Cut(notSent, "\n")
+	if !strings.Contains(notSent, `.env\x{a}fake`) || !strings.Contains(notSent, "bin-local/run") {
+		t.Fatalf("unchanged extras were sent again:\n%s", out)
+	}
+}

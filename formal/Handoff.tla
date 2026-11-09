@@ -346,12 +346,13 @@ ExecLive ==
     /\ UNCHANGED <<world, rec, pending>>
     /\ Fork
 
-\* finish(): dst.Launch. A failed launch only prints the resume command.
+\* finish(): dst.Launch. A failed launch returns err with the record still
+\* landing, so a rerun retries it.
 FinishLaunch ==
     /\ pc = "finishLaunch"
     /\ \E o \in Outcomes(dst):
          /\ IF Applied(o) THEN LaunchEff(dst) ELSE UNCHANGED running
-         /\ Goto("finishPut")
+         /\ IF o = "ok" THEN Goto("finishPut") ELSE Stop
     /\ UNCHANGED <<copy, stageTmp, ready, parkedV, userOn, turns, rec, pending>>
     /\ Fork
 

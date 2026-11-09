@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -156,15 +158,57 @@ func taskKey(wtRel string) string {
 // lockTask keeps two ferry commands from handing off the same task at once.
 // The record's generation check only guards state changes; the steps between
 // them (apply, extras, the session) would otherwise interleave. Every handoff
-// is driven from this machine, and the kernel drops the flock the moment
-// ferry exits, however it exits. A call this ferry made on the other machine
-// can still be running there after that; lockRemoteCall covers it.
+// is driven from this machine, and the kernel drops the flock once ferry
+// and any rsync it started (runHoldingLock) have exited, however they exit.
+// A call this ferry made on the other machine can still be running there
+// after that; lockRemoteCall covers it.
 func (l *Local) lockTask(task string) (release func(), err error) {
-	release, err = l.flockTask(task, ".lock", 0)
+	f, err := l.flockTask(task, ".lock", 0)
 	if errors.Is(err, errLockHeld) {
-		return nil, errors.New("another ferry is handing off this task; wait for it to finish")
+		return nil, errors.New("another ferry is handing off this task, or an rsync left by one that was killed is still copying; wait for it to finish (`pgrep -fl rsync` finds it)")
+	} else if err != nil {
+		return nil, err
 	}
-	return release, err
+	heldTaskLock = f
+	return func() { heldTaskLock = nil; f.Close() }, nil
+}
+
+// heldTaskLock is the task lock this process holds, if any. One ferry
+// hands off one task.
+var heldTaskLock *os.File
+
+// runHoldingLock runs cmd, which copies into a task's files, so that it
+// can't outlive the handoff unnoticed. cmd inherits the task lock's
+// descriptor, and the kernel keeps an flock until every copy of it closes,
+// so a ferry killed with SIGKILL leaves the lock held until cmd exits: a
+// rerun can't start while an old copy is still writing. A SIGINT, SIGTERM
+// or SIGHUP stops cmd, then ends ferry as the signal would have.
+func runHoldingLock(cmd *exec.Cmd) error {
+	if heldTaskLock != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, heldTaskLock)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case sig := <-sigs:
+		cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
+		os.Exit(128 + int(sig.(syscall.Signal)))
+		return nil
+	}
 }
 
 // lockRemoteCall is held by `ferry remote` for the length of one call on a
@@ -172,11 +216,13 @@ func (l *Local) lockTask(task string) (release func(), err error) {
 // crashing), the call can keep running here; a rerun's calls wait for it
 // instead of interleaving with it.
 func (l *Local) lockRemoteCall(task string) (release func(), err error) {
-	release, err = l.flockTask(task, ".remote.lock", remoteLockWait)
+	f, err := l.flockTask(task, ".remote.lock", remoteLockWait)
 	if errors.Is(err, errLockHeld) {
 		return nil, fmt.Errorf("an earlier ferry's call on this task has run here for over %v; wait for it, or find it with `pgrep -af 'ferry remote'`", remoteLockWait)
+	} else if err != nil {
+		return nil, err
 	}
-	return release, err
+	return func() { f.Close() }, nil
 }
 
 // remoteLockWait is how long a call waits for one left running by a dead
@@ -188,8 +234,8 @@ const remoteLockWait = 3 * time.Minute
 var errLockHeld = errors.New("lock held")
 
 // flockTask takes an exclusive flock on locks/<task><suffix>, trying for up
-// to wait.
-func (l *Local) flockTask(task, suffix string, wait time.Duration) (release func(), err error) {
+// to wait. Closing the file releases it.
+func (l *Local) flockTask(task, suffix string, wait time.Duration) (*os.File, error) {
 	if !taskPattern.MatchString(task) {
 		return nil, fmt.Errorf("bad task key %q", task)
 	}
@@ -205,7 +251,7 @@ func (l *Local) flockTask(task, suffix string, wait time.Duration) (release func
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			return func() { f.Close() }, nil
+			return f, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			f.Close()

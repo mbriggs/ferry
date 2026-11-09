@@ -36,7 +36,7 @@ type Machine interface {
 	InstallGitHooks(InstallGitHooksReq) error
 	StageSession(InstallReq) (Session, error)
 	PlaceSession(PlaceReq) error
-	PrepareExtras(PrepareExtrasReq) error
+	PrepareExtras(PrepareExtrasReq) (PrepareExtrasResult, error)
 	RemoveExtras(RemoveExtrasReq) (RemoveExtrasResult, error)
 	Park(ParkReq) error
 	RecordGet(task string) (*Record, error)
@@ -45,7 +45,7 @@ type Machine interface {
 	HookInfo(HookReq) (HookInfo, error)
 	Approve(sha string) error
 	RunHook(HookReq) (HookResult, error)
-	Launch(LaunchReq) (string, error)
+	Launch(LaunchReq) (LaunchResult, error)
 	// GitURL is how git and rsync on the other machine reach rel on this one.
 	GitURL(rel string) string
 	IsLocal() bool
@@ -56,7 +56,7 @@ type Machine interface {
 // renamed, a request or response it would misread, or an op this side now
 // needs. Adding an optional field doesn't need a bump. Both sides of a
 // handoff must agree; a peer that predates the field reports 0.
-const protocol = 5
+const protocol = 6
 
 type Info struct {
 	Name     string `json:"name"`
@@ -230,8 +230,10 @@ func (r *Remote) ListExtras(rel string) (ExtrasList, error) {
 func (r *Remote) StageSession(q InstallReq) (Session, error) {
 	return rpc[Session](r, "stage-session", q)
 }
-func (r *Remote) PlaceSession(q PlaceReq) error          { return do(r, "place-session", q) }
-func (r *Remote) PrepareExtras(q PrepareExtrasReq) error { return do(r, "prepare-extras", q) }
+func (r *Remote) PlaceSession(q PlaceReq) error { return do(r, "place-session", q) }
+func (r *Remote) PrepareExtras(q PrepareExtrasReq) (PrepareExtrasResult, error) {
+	return rpc[PrepareExtrasResult](r, "prepare-extras", q)
+}
 func (r *Remote) RemoveExtras(q RemoveExtrasReq) (RemoveExtrasResult, error) {
 	return rpc[RemoveExtrasResult](r, "remove-extras", q)
 }
@@ -242,7 +244,9 @@ func (r *Remote) RecordList() ([]Record, error)          { return rpc[[]Record](
 func (r *Remote) HookInfo(q HookReq) (HookInfo, error)   { return rpc[HookInfo](r, "hook-info", q) }
 func (r *Remote) Approve(sha string) error               { return do(r, "approve", sha) }
 func (r *Remote) RunHook(q HookReq) (HookResult, error)  { return rpc[HookResult](r, "run-hook", q) }
-func (r *Remote) Launch(q LaunchReq) (string, error)     { return rpc[string](r, "launch", q) }
+func (r *Remote) Launch(q LaunchReq) (LaunchResult, error) {
+	return rpc[LaunchResult](r, "launch", q)
+}
 
 // --- remote server -------------------------------------------------------
 
@@ -345,7 +349,7 @@ var ops = map[string]handler{
 	"list-extras":    query((*Local).ListExtras),
 	"stage-session":  query((*Local).StageSession),
 	"remove-extras":  query((*Local).RemoveExtras),
-	"prepare-extras": command((*Local).PrepareExtras),
+	"prepare-extras": query((*Local).PrepareExtras),
 	"record-get":     query((*Local).RecordGet),
 	"hook-info":      query((*Local).HookInfo),
 	"run-hook":       query((*Local).RunHook),

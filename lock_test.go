@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,36 @@ func TestTaskLockIsExclusiveUntilReleased(t *testing.T) {
 	if _, err := l.lockTask("../escape"); err == nil {
 		t.Fatal("accepted a path as a task key")
 	}
+}
+
+// A copy ferry starts holds the task lock with it, so a ferry killed
+// mid-copy leaves the lock held until the copy exits, and no rerun can
+// start under a copy that's still writing.
+func TestACopyHoldsTheTaskLockUntilItExits(t *testing.T) {
+	l := &Local{Home: t.TempDir()}
+	release, err := l.lockTask("src-app-abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := filepath.Join(l.Home, "stop")
+	copied := make(chan error, 1)
+	go func() {
+		copied <- runHoldingLock(exec.Command("/bin/sh", "-c", "while [ ! -e "+stop+" ]; do sleep 0.05; done"))
+	}()
+	time.Sleep(200 * time.Millisecond)
+	release() // what dying does to ferry's own descriptor
+	if _, err := l.lockTask("src-app-abc123"); err == nil || !strings.Contains(err.Error(), "rsync") {
+		t.Fatalf("took the lock while the copy ran: %v", err)
+	}
+	os.WriteFile(stop, nil, 0o600)
+	if err := <-copied; err != nil {
+		t.Fatal(err)
+	}
+	release, err = l.lockTask("src-app-abc123")
+	if err != nil {
+		t.Fatalf("the lock outlived the copy: %v", err)
+	}
+	release()
 }
 
 // A call left running on kant by a ferry that died holds the task's lock

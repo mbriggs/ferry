@@ -22,8 +22,8 @@ import (
 //
 // claudeConfig fingerprints that config for the project folders in dirs:
 // every file under <dir>/.claude except Claude's own worktrees,
-// <dir>/.mcp.json, and the files hooks and MCP servers run (hookFiles). Keys are absolute paths, values
-// sha256.
+// <dir>/.mcp.json, and the files its settings and MCP servers run
+// (hookFiles). Keys are absolute paths, values sha256.
 func claudeConfig(dirs []string) map[string]string {
 	out := map[string]string{}
 	for _, dir := range dirs {
@@ -54,13 +54,13 @@ func claudeConfig(dirs []string) map[string]string {
 	return out
 }
 
-// hookFiles returns the files inside dir that hook commands in dir's Claude
-// settings, or MCP servers in its .mcp.json, run, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
+// hookFiles returns the files inside dir that commands in dir's Claude
+// settings (hooks, statusLine, apiKeyHelper and the rest), or MCP servers in
+// its .mcp.json, run, such as "$CLAUDE_PROJECT_DIR/.claude/hooks/start.sh" or
 // "bin/check", and the files those name in turn: a hook script that sources
-// lib/env.sh or runs scripts/lint runs them too. A name counts when it
-// resolves, against dir or the naming file's folder, to a regular file
-// inside dir; a path like "$HERE/lib/env.sh" or "$(dirname "$0")/lib.sh"
-// is tried without its prefix.
+// lib/env.sh or runs scripts/lint runs them too. fileRefs says which names
+// count; a path like "$HERE/lib/env.sh" or "$(dirname "$0")/lib.sh" is
+// tried without its prefix.
 // Code a hook reaches without naming a file (make's Makefile, a package
 // script) isn't found.
 func hookFiles(dir string) []string {
@@ -75,7 +75,7 @@ func hookFiles(dir string) []string {
 			}
 		}
 	}
-	for _, cmd := range hookCommands(dir) {
+	for _, cmd := range settingsStrings(dir) {
 		add(cmd, dir)
 	}
 	// An MCP server's command and args can name a project script too.
@@ -96,57 +96,87 @@ func hookFiles(dir string) []string {
 // half the repo doesn't make every start slow.
 const maxHookFiles = 200
 
-// hookCommands returns the command of every hook in dir's Claude settings.
-func hookCommands(dir string) []string {
+// settingsStrings returns every string value in dir's Claude settings.
+// Hooks aren't the only commands Claude runs from them: statusLine,
+// apiKeyHelper, awsAuthRefresh and otelHeadersHelper do too, and new keys
+// appear. So every value counts, and one that names no file adds nothing.
+func settingsStrings(dir string) []string {
 	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case string:
+			out = append(out, v)
+		case []any:
+			for _, e := range v {
+				walk(e)
+			}
+		case map[string]any:
+			for _, e := range v {
+				walk(e)
+			}
+		}
+	}
 	for _, name := range []string{"settings.json", "settings.local.json"} {
 		data, err := os.ReadFile(filepath.Join(dir, ".claude", name))
 		if err != nil {
 			continue
 		}
-		var settings struct {
-			Hooks map[string][]struct {
-				Hooks []struct {
-					Command string `json:"command"`
-				} `json:"hooks"`
-			} `json:"hooks"`
-		}
-		if json.Unmarshal(data, &settings) != nil {
-			continue
-		}
-		for _, groups := range settings.Hooks {
-			for _, g := range groups {
-				for _, h := range g.Hooks {
-					out = append(out, h.Command)
-				}
-			}
+		var v any
+		if json.Unmarshal(data, &v) == nil {
+			walk(v)
 		}
 	}
 	return out
 }
 
 var (
-	pathToken = regexp.MustCompile(`[A-Za-z0-9_.~/+@%-]+`)
+	pathToken = regexp.MustCompile(`[A-Za-z0-9_.~/+@%\\-]+`)
 	// What a script puts in front of a path to find its own folder or the
 	// project: "$HERE/", "${BASH_SOURCE%/*}/", "$(dirname "$0")/".
 	varPrefix = regexp.MustCompile("(\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[^}]*\\}|\\$\\([^()]*\\)|`[^`]*`)/")
 )
 
-// fileRefs returns the regular files inside dir that text names, resolving
-// relative names against dir and against base.
+// fileRefs returns the regular files inside dir that text names. A relative
+// name resolves against dir, against base, and against every folder inside
+// dir that text names, because "cd tools && ./run.sh" runs tools/run.sh.
+// A name with a backslash counts both as written and as the shell reads it,
+// so `back\slash.sh` names backslash.sh too.
 func fileRefs(text, dir, base string) []string {
 	// Quotes go first: "$CLAUDE_PROJECT_DIR"/bin/x is one path.
 	text = strings.NewReplacer(`"`, "", "'", "", "${CLAUDE_PROJECT_DIR}", dir, "$CLAUDE_PROJECT_DIR", dir).Replace(text)
 	text = varPrefix.ReplaceAllString(text, "")
+	var toks []string
+	for _, tok := range pathToken.FindAllString(text, -1) {
+		toks = append(toks, tok)
+		if u := shellUnescape(tok); u != tok {
+			toks = append(toks, u)
+		}
+	}
+	resolve := func(tok string, bases []string) []string {
+		if filepath.IsAbs(tok) {
+			return []string{filepath.Clean(tok)}
+		}
+		var out []string
+		for _, b := range bases {
+			out = append(out, filepath.Join(b, tok))
+		}
+		return out
+	}
+	bases := []string{dir, base}
+	isBase := map[string]bool{dir: true, base: true}
+	for _, tok := range toks {
+		for _, p := range resolve(tok, []string{dir, base}) {
+			if !isBase[p] && len(bases) < maxRefDirs && within(p, dir) && isDir(p) {
+				isBase[p] = true
+				bases = append(bases, p)
+			}
+		}
+	}
 	var out []string
 	seen := map[string]bool{}
-	for _, tok := range pathToken.FindAllString(text, -1) {
-		cands := []string{tok}
-		if !filepath.IsAbs(tok) {
-			cands = []string{filepath.Join(dir, tok), filepath.Join(base, tok)}
-		}
-		for _, p := range cands {
-			p = filepath.Clean(p)
+	for _, tok := range toks {
+		for _, p := range resolve(tok, bases) {
 			if seen[p] || !within(p, dir) {
 				continue
 			}
@@ -157,6 +187,25 @@ func fileRefs(text, dir, base string) []string {
 		}
 	}
 	return out
+}
+
+// maxRefDirs bounds the folders one text's names resolve against.
+const maxRefDirs = 32
+
+// shellUnescape reads backslashes as the shell does outside quotes: `\x`
+// is x, and `\\` is one backslash.
+func shellUnescape(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // scriptText reads p to look for the files it names: text files up to 1 MB.

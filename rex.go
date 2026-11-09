@@ -23,26 +23,39 @@ type LaunchReq struct {
 // launchTimeout is how long Launch waits for the agent to load the session.
 var launchTimeout = 60 * time.Second
 
-// Launch starts the agent in a new Rex session on this machine and returns
-// the session id. When AcceptTrust is set (the folder was trusted on the
-// sending machine), it answers the agent's folder-trust prompt, which would
-// otherwise leave an unattended agent waiting. Claude's prompt defaults to
-// "No, exit", so it needs Down before Enter; Codex defaults to trusting.
-//
-// Launch returns only once Liveness can see the agent. Until the agent
-// registers (Claude writes ~/.claude/sessions/<pid>.json, Codex takes its
-// thread lock), nothing else in ferry knows it is running: a `ferry from`
-// would park the transcript under it, and a rerun would start a second one.
-// So an agent that doesn't register within launchTimeout has its Rex session
-// killed, and Launch fails.
-func (l *Local) Launch(q LaunchReq) (string, error) {
+type LaunchResult struct {
+	Session string `json:"session,omitempty"` // the Rex session running the agent
+	// Untrusted means Launch started nothing, on purpose: neither machine
+	// trusts the folder, and an agent started there would wait at the trust
+	// prompt. Rerunning won't change that, so it isn't a failure.
+	Untrusted bool `json:"untrusted,omitempty"`
+}
+
+// Launch starts the agent in a new Rex session on this machine. When
+// AcceptTrust is set (the folder was trusted on the sending machine), it
+// answers the agent's folder-trust prompt, which would otherwise leave an
+// unattended agent waiting. Claude's prompt defaults to "No, exit", so it
+// needs Down before Enter; Codex defaults to trusting.
+func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
 	cwd := l.abs(q.CwdRel)
 	trusted := (q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))
 	if trusted {
 		q.AcceptTrust = false // there's no prompt to answer
 	} else if !q.AcceptTrust {
-		return "", fmt.Errorf("%s isn't trusted here and wasn't on the sending machine; not starting an agent that would wait at the trust prompt", cwd)
+		return LaunchResult{Untrusted: true}, nil
 	}
+	id, err := l.launchRex(q)
+	return LaunchResult{Session: id}, err
+}
+
+// launchRex starts the agent and returns its Rex session once Liveness can
+// see the agent. Until the agent registers (Claude writes
+// ~/.claude/sessions/<pid>.json, Codex takes its thread lock), nothing else
+// in ferry knows it is running: a `ferry from` would park the transcript
+// under it, and a rerun would start a second one. So an agent that doesn't
+// register within launchTimeout has its Rex session killed, and the launch
+// fails.
+func (l *Local) launchRex(q LaunchReq) (string, error) {
 	// finish() checks this too, but a Launch left running by a ferry that
 	// died can reach here after you opened the session yourself.
 	if live, err := l.Liveness(q.Session); err != nil {

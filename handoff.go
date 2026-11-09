@@ -70,6 +70,16 @@ type move struct {
 	saved []string
 }
 
+// command is the ferry command that runs this handoff again. It names the
+// other machine as typed, which is the hub, whichever way the task moves.
+func (m *move) command() string {
+	c := "ferry " + m.direction + " " + fmt.Sprint(m.hub)
+	if m.direction == "from" {
+		c += " " + m.t.Name
+	}
+	return c
+}
+
 // handoff moves task t from src to dst. hub keeps the ownership record; it is
 // always the remote machine, because the laptop drives every handoff. Each
 // step below is a method on move, in the order they run.
@@ -105,7 +115,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// it uses the sessions this handoff recorded rather than searching again.
 	if r := m.rec; r != nil && r.State == stateLanding && r.Owner == m.di.Name && r.From == m.si.Name {
 		if m.opts.Check {
-			warn("check", "%s already owns %s; ferry %s %s finishes the handoff", m.di.Name, t.Name, m.direction, m.di.Name)
+			warn("check", "%s already owns %s; `%s` finishes the handoff", m.di.Name, t.Name, m.command())
 			return nil
 		}
 		warn("owner", "%s owns %s %s; finishing the handoff", m.di.Name, t.Name, dim(fmt.Sprintf("(generation %d)", r.Generation)))
@@ -247,7 +257,7 @@ func (m *move) checkReceiver() error {
 		warn("receiver", "overwriting it (--force)")
 		return nil
 	case m.opts.Check:
-		warn("receiver", "ferry %s %s will offer to save it to a branch on %s first", m.direction, di.Name, di.Name)
+		warn("receiver", "`%s` will offer to save it to a branch on %s first", m.command(), di.Name)
 		return nil
 	case !interactive():
 		return fmt.Errorf("%s has work this handoff would overwrite; run ferry at a terminal to save it to a branch there first, commit or discard it on %s, or pass --force to overwrite it", di.Name, di.Name)
@@ -503,8 +513,9 @@ func (m *move) syncRemotes(snap SnapshotResult, fresh bool) error {
 }
 
 // sendExtras sends the ignored files that differ on dst, after a yes, and
-// removes there the ones src deleted since dst sent them. It returns the
-// extras src listed, and whether dst now has them.
+// removes there the ones src deleted since dst sent them. A file dst changed
+// since it last sent it is parked there before it's overwritten. It returns
+// the extras src listed, and whether dst now has them.
 func (m *move) sendExtras() ([]FileEntry, bool, error) {
 	src, dst, t, si, di := m.src, m.dst, m.t, m.si, m.di
 	found, err := src.ListExtras(t.WtRel)
@@ -513,11 +524,10 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 	}
 	extras := found.Files
 	if len(found.LeftBehind) > 0 {
-		left := found.LeftBehind
-		if len(left) > 8 {
-			left = append(left[:8:8], fmt.Sprintf("and %d more", len(found.LeftBehind)-8))
-		}
-		note("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, strings.Join(left, ", "))
+		note("left", "staying on %s (dependencies, build output, .ferry/exclude): %s", si.Name, listNames(firstFew(found.LeftBehind)))
+	}
+	if len(found.Links) > 0 {
+		note("left", "symlinks staying on %s: %s", si.Name, listNames(firstFew(found.Links)))
 	}
 	// Extras di sent last time that si no longer has were deleted here.
 	incoming := map[string]bool{}
@@ -538,54 +548,56 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 		return extras, true, nil
 	}
 
-	if err := dst.PrepareExtras(PrepareExtrasReq{WtRel: t.WtRel, Task: t.Key, Paths: paths}); err != nil {
-		return nil, false, err
-	}
-	job := rsyncJob{SrcRel: t.WtRel, DstRel: t.WtRel, Files: paths, Private: true, WorkDir: filepath.Join(di.Home, extrasWork(t.Key))}
-	differ, err := rsyncTo(src, dst, job, true)
+	prep, err := dst.PrepareExtras(PrepareExtrasReq{WtRel: t.WtRel, Task: t.Key, Paths: paths})
 	if err != nil {
 		return nil, false, err
 	}
-	changed := map[string]bool{}
-	sendAll := false
-	for _, p := range differ {
-		changed[p] = true
-		// rsync escapes control characters in the names it prints, so a name
-		// that matches no extra can't be tied to one; send them all.
-		sendAll = sendAll || !incoming[filepath.FromSlash(p)]
-	}
-	var send, same []FileEntry
-	for _, e := range extras {
-		if sendAll || changed[filepath.ToSlash(e.Path)] {
-			send = append(send, e)
-			job.Total += e.Size
-		} else {
-			same = append(same, e)
-		}
-	}
-	if names := describeFiles(send); len(names) > 0 {
+	plan := planExtras(extras, prep.Have, m.rec.Extras[di.Name])
+	if names := describeFiles(plan.send); len(names) > 0 {
 		step("extras", "%s", strings.Join(names, ", "))
 	}
-	if names := describeFiles(same); len(names) > 0 {
+	if names := describeFiles(plan.same); len(names) > 0 {
 		note("extras", "already on %s, not sent: %s", di.Name, strings.Join(names, ", "))
+	}
+	if len(plan.conflicts) > 0 {
+		warn("extras", "changed on %s too since it last sent them; its copies get parked first: %s", di.Name, strings.Join(describeFiles(plan.conflicts), ", "))
 	}
 	prompt := "send these ignored files to " + di.Name + "?"
 	if len(gone) > 0 {
-		step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, strings.Join(goneNames, ", "))
+		step("extras", "deleted on %s since %s sent them: %s", si.Name, di.Name, listNames(goneNames))
 		prompt = "send these ignored files to " + di.Name + " and remove the deleted ones there?"
 	}
 	switch {
-	case len(send) == 0 && len(gone) == 0:
+	case len(plan.send) == 0 && len(gone) == 0:
 		return extras, true, nil
 	case !m.opts.Yes && !confirm(prompt):
 		warn("extras", "skipped")
 		return extras, false, nil
 	}
-	job.Files = nil
-	for _, e := range send {
-		job.Files = append(job.Files, e.Path)
+	// Park dst's changed copies before rsync replaces them. One that changed
+	// again since PrepareExtras looked is left alone and not sent.
+	parked, err := dst.RemoveExtras(RemoveExtrasReq{WtRel: t.WtRel, Task: t.Key, Files: plan.conflicts})
+	if err != nil {
+		return nil, false, err
 	}
-	if _, err := rsyncTo(src, dst, job, false); err != nil {
+	if len(parked.Removed) > 0 {
+		step("extras", "%s: parked its copies of %s in ~/.local/state/ferry/parked/", di.Name, listNames(parked.Removed))
+	}
+	skip := map[string]bool{}
+	for _, p := range parked.Kept {
+		skip[p] = true
+	}
+	if len(parked.Kept) > 0 {
+		warn("extras", "%s: not sending %s, changed there during the handoff", di.Name, listNames(parked.Kept))
+	}
+	job := rsyncJob{SrcRel: t.WtRel, DstRel: t.WtRel, Private: true, WorkDir: filepath.Join(di.Home, extrasWork(t.Key))}
+	for _, e := range plan.send {
+		if !skip[e.Path] {
+			job.Files = append(job.Files, e.Path)
+			job.Total += e.Size
+		}
+	}
+	if err := rsyncTo(src, dst, job); err != nil {
 		return nil, false, err
 	}
 	res, err := dst.RemoveExtras(RemoveExtrasReq{WtRel: t.WtRel, Task: t.Key, Files: gone})
@@ -593,12 +605,58 @@ func (m *move) sendExtras() ([]FileEntry, bool, error) {
 		return nil, false, err
 	}
 	if len(res.Removed) > 0 {
-		step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, strings.Join(res.Removed, ", "))
+		step("extras", "%s: removed %s (parked in ~/.local/state/ferry/parked/)", di.Name, listNames(res.Removed))
 	}
 	if len(res.Kept) > 0 {
-		note("extras", "%s: kept %s, changed there since it was sent", di.Name, strings.Join(res.Kept, ", "))
+		note("extras", "%s: kept %s, changed there since it was sent", di.Name, listNames(res.Kept))
 	}
 	return extras, true, nil
+}
+
+// extrasPlan sorts the extras a handoff found by what dst has.
+type extrasPlan struct {
+	send, same []FileEntry
+	// conflicts are dst's own entries for files in send that dst changed
+	// since it last sent them, or never sent. Overwriting one would lose
+	// work, so it's parked first.
+	conflicts []FileEntry
+}
+
+// planExtras compares the extras src found with the ones dst has, and with
+// the ones dst sent when it last handed the task away. rsync keeps mtimes,
+// so a file is the same on both sides when its size and mtime match, which
+// is rsync's own quick check.
+func planExtras(extras, have, dstSent []FileEntry) extrasPlan {
+	there := map[string]FileEntry{}
+	for _, e := range have {
+		there[e.Path] = e
+	}
+	sent := map[string]FileEntry{}
+	for _, e := range dstSent {
+		sent[e.Path] = e
+	}
+	var p extrasPlan
+	for _, e := range extras {
+		h, ok := there[e.Path]
+		switch {
+		case ok && h.Size == e.Size && h.MTime == e.MTime:
+			p.same = append(p.same, e)
+		case ok && h != sent[e.Path]:
+			p.send = append(p.send, e)
+			p.conflicts = append(p.conflicts, h)
+		default:
+			p.send = append(p.send, e)
+		}
+	}
+	return p
+}
+
+// firstFew shortens a long list of names for one line of output.
+func firstFew(names []string) []string {
+	if len(names) <= 8 {
+		return names
+	}
+	return append(names[:8:8], fmt.Sprintf("and %d more", len(names)-8))
 }
 
 // sendGitHooks copies the hooks in src's .git/hooks that dst lacks or has
@@ -658,7 +716,7 @@ func (m *move) stageSession(sess *Session) (*Session, *Session, error) {
 // in in/<task>/ready, with paths rewritten. Nothing live changes.
 func (m *move) sendSession(sess Session) (*Session, error) {
 	stage := filepath.Join(".local", "state", "ferry", "in", m.t.Key, "session")
-	if _, err := rsyncTo(m.src, m.dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Dirs: true, Total: sess.Size}, false); err != nil {
+	if err := rsyncTo(m.src, m.dst, rsyncJob{SrcRel: ".", DstRel: stage, Files: sess.Files, Dirs: true, Total: sess.Size}); err != nil {
 		return nil, err
 	}
 	s, err := m.dst.StageSession(InstallReq{Session: sess, OldHome: m.si.Home, StageRel: stage, Task: m.t.Key})
@@ -757,13 +815,23 @@ func sessionFits(home string, s Session, t task) error {
 	return fmt.Errorf("session %s belongs to ~/%s, not this worktree (~/%s)", short(s.ID), started, t.WtRel)
 }
 
-// describeFiles lists files with their sizes for the output. A long list is
-// folded into one line per top-level folder.
+// listNames joins file names for the output, with control characters
+// escaped: the names can come from the other machine.
+func listNames(names []string) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = nameForTerminal(n)
+	}
+	return strings.Join(out, ", ")
+}
+
+// describeFiles lists files with their sizes for the output, names escaped
+// as listNames does. A long list is folded into one line per top-level folder.
 func describeFiles(files []FileEntry) []string {
 	if len(files) <= 8 {
 		var out []string
 		for _, e := range files {
-			out = append(out, fmt.Sprintf("%s (%s)", e.Path, humanSize(e.Size)))
+			out = append(out, fmt.Sprintf("%s (%s)", nameForTerminal(e.Path), humanSize(e.Size)))
 		}
 		return out
 	}
@@ -790,6 +858,7 @@ func describeFiles(files []FileEntry) []string {
 	var out []string
 	for _, top := range order {
 		g := groups[top]
+		top = nameForTerminal(top)
 		if g.n == 1 {
 			out = append(out, fmt.Sprintf("%s (%s)", top, humanSize(g.size)))
 		} else {
@@ -836,7 +905,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 	summary, err := runHook(dst, di.Name, HookReq{WtRel: t.WtRel, RepoRel: t.RepoRel, Name: "restore", Task: t.Name, Direction: direction}, dst.IsLocal(), changes)
 	if err != nil {
 		bad("restore", "failed: %v", err)
-		warn("next", "fix it, then run `ferry %s %s%s` again to finish", direction, di.Name, map[bool]string{true: " " + t.Name}[direction == "from"])
+		warn("next", "fix it, then run `%s` again to finish", m.command())
 		return errors.New("restore failed; the task moved but the agent wasn't started")
 	}
 	clock.lap("restore")
@@ -855,7 +924,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 		if lm, ok := dst.(*Local); ok && installed.Agent == agentClaude {
 			changed = configChanges(lm.Home, cfgBefore, claudeConfig(claudeDirs(lm.abs(t.WtRel), installed.Cwd)))
 			if len(changed) > 0 {
-				warn("claude", "config Claude loads here, changed by the handoff: %s", strings.Join(changed, ", "))
+				warn("claude", "config Claude loads here, changed by the handoff: %s", listNames(changed))
 			}
 		}
 		if dst.IsLocal() && !opts.NoLaunch && interactive() {
@@ -885,13 +954,21 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 			rexSession = rec.RexSession
 			break
 		}
-		id, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, Session: *installed, AcceptTrust: sess != nil && sess.Trusted})
-		if err != nil {
-			bad("launch", "failed: %v", err)
+		launched, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: cwdRel, Argv: argv, Agent: installed.Agent, Session: *installed, AcceptTrust: sess != nil && sess.Trusted})
+		if err == nil && launched.Untrusted {
+			warn("launch", "neither %s nor %s trusts ~/%s; not starting an agent that would wait at the trust prompt", di.Name, si.Name, cwdRel)
 			warn("resume", "on %s: cd ~/%s && %s", di.Name, cwdRel, resumeCommand(argv))
 			break
 		}
-		rexSession = id
+		if err != nil {
+			// The record stays landing, so rerunning this command retries
+			// the launch. A rerun that finds the agent running, because it
+			// was started by hand on di, just finishes.
+			bad("launch", "failed: %v", err)
+			warn("next", "run `%s` again to retry, or on %s: cd ~/%s && %s", m.command(), di.Name, cwdRel, resumeCommand(argv))
+			return errors.New("the task moved but the agent didn't start")
+		}
+		rexSession = launched.Session
 		step("launch", "%s: rex session %q running %s --resume %s", di.Name, t.Name, installed.Agent, short(installed.ID))
 	}
 	if installed != nil && rexSession != "" {

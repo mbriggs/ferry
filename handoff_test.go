@@ -537,6 +537,18 @@ func TestCheckRunsWhileTheAgentDoes(t *testing.T) {
 	}
 }
 
+// Pulling, the receiver is the laptop, but the command to run names kant.
+func TestCheckOnAPullNamesTheRemote(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.write(wt, "stray.txt", "edited on the laptop after handing off\n")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--check")
+	if !strings.Contains(out, "`ferry from kant fix-auth` will offer to save it to a branch on laptop") {
+		t.Fatalf("check output:\n%s", out)
+	}
+}
+
 // A repo at the same path on kant that shares no history with this one is
 // someone else's work, so the handoff stops before touching it. One with no
 // commits yet has nothing to lose, and the handoff fills it.

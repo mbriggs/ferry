@@ -81,11 +81,18 @@ func hashHook(data []byte) string {
 // forTerminal makes hook text safe to print for review: every control
 // character except newline and tab is shown escaped, so a script can't use
 // carriage returns or ANSI sequences to hide lines from the person approving.
-func forTerminal(s string) string {
+func forTerminal(s string) string { return escapeControls(s, true) }
+
+// nameForTerminal makes a file name from the other machine safe to print in
+// a list: every control character is escaped, newline and tab included, so a
+// name can't start a line that looks like ferry's own output.
+func nameForTerminal(s string) string { return escapeControls(s, false) }
+
+func escapeControls(s string, keepLines bool) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
-		case r == '\n' || r == '\t':
+		case keepLines && (r == '\n' || r == '\t'):
 			b.WriteRune(r)
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || r == 0x2028 || r == 0x2029 || r == 0x202e:
 			fmt.Fprintf(&b, "\\x{%x}", r)

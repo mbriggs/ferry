@@ -27,10 +27,11 @@ repo's main checkout, NAME (or a prompt) picks one of its worktrees. "ferry
 from" with no NAME lists the agents running on HOST and asks which to pull;
 NAME can be a task name, a Rex session label, the first 8 or more characters
 of a running agent's session id, or a path like src/app. --force takes a task
-whose record names another owner and overwrites work on HOST that wasn't
-handed off; --force-version resumes on an older agent. --check runs the
-checks that can refuse a handoff, and stops before it stops an agent,
-records anything, or touches either worktree.
+whose record names another owner, and overwrites work the receiving machine
+hasn't handed off without saving it (HOST for "to", this machine for "from");
+--force-version resumes on an older agent. --check runs the checks that can
+refuse a handoff, and stops before it stops an agent, records anything, or
+touches either worktree.
 `
 
 func main() {
@@ -106,7 +107,7 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.StringVar(&o.SessionID, "session", "", "session id to move")
 	fs.BoolVar(&o.Yes, "yes", false, "send listed ignored files without asking (never approves hooks)")
 	fs.BoolVar(&o.NoLaunch, "no-launch", false, "print the resume command instead of starting the agent (in rex for to, in this terminal for from)")
-	fs.BoolVar(&o.Force, "force", false, "take the task even if the record names another owner")
+	fs.BoolVar(&o.Force, "force", false, "take the task even if the record names another owner, and overwrite the receiver's unsent work without saving it")
 	fs.BoolVar(&o.ForceVersion, "force-version", false, "resume even if the receiving agent is older")
 	fs.BoolVar(&o.Check, "check", false, "run the checks that can refuse the handoff, then stop before stopping an agent or touching a worktree")
 	return fs

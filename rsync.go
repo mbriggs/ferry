@@ -73,8 +73,10 @@ type rsyncJob struct {
 	// Dirs lets Files name directories, copied with everything in them.
 	// Without it rsync copies only the listed files.
 	Dirs bool
-	// Private makes new files 0600, for secrets. rsync keeps the mode of a
-	// file the receiver already has, so PrepareExtras sets those to 0600 first.
+	// Private keeps only the owner's permission bits, for secrets: a 0644
+	// .env arrives 0600 and a 0755 script 0700. rsync keeps the mode of a
+	// file the receiver already has while it writes, so PrepareExtras
+	// takes the group and other bits off those first.
 	Private bool
 	// WorkDir, an absolute path on dst, holds partial and temp files, so a
 	// cut transfer leaves nothing in DstRel. Without it, partial files go in
@@ -85,18 +87,15 @@ type rsyncJob struct {
 	Total int64
 }
 
-// rsyncTo runs the job and returns the files rsync sent, or with dryRun,
-// would send.
-func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
+// rsyncTo runs the job.
+func rsyncTo(src, dst Machine, j rsyncJob) error {
 	if len(j.Files) == 0 {
-		return nil, nil
+		return nil
 	}
-	// --8-bit-output keeps non-ASCII names as they are in --out-format;
-	// rsync still escapes control characters (see sendExtras).
 	// --modify-window=-1 makes the quick check compare nanoseconds, as
 	// FileEntry does. By default rsync compares whole seconds, so it would
 	// skip a same-size file rewritten within the second.
-	args := []string{"--times", "--modify-window=-1", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--out-format=%n", "--8-bit-output", "--exclude=.git"}
+	args := []string{"--times", "--perms", "--modify-window=-1", "--omit-dir-times", "--mkpath", "--from0", "--files-from=-", "--exclude=.git"}
 	if j.Dirs {
 		args = append(args, "--recursive")
 	}
@@ -104,7 +103,7 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 	for _, m := range []Machine{src, dst} {
 		if r, ok := m.(*Remote); ok && r.Target != "" {
 			if shell != "" {
-				return nil, errors.New("rsync can't copy between two remote machines")
+				return errors.New("rsync can't copy between two remote machines")
 			}
 			shell = "ssh " + strings.Join(sshOptions, " ")
 		}
@@ -113,19 +112,14 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 		args = append(args, "--rsh="+shell)
 	}
 	if j.Private {
-		args = append(args, "--chmod=F600")
-	} else {
-		args = append(args, "--perms")
+		args = append(args, "--chmod=Fgo-rwx,Fug-s")
 	}
 	if j.WorkDir != "" {
 		args = append(args, "--partial-dir="+j.WorkDir+"/partial", "--temp-dir="+j.WorkDir+"/tmp")
 	} else {
 		args = append(args, "--partial-dir=.rsync-partial")
 	}
-	if dryRun {
-		args = append(args, "--dry-run")
-	}
-	showProgress := !dryRun && !plain && j.Total >= 8<<20
+	showProgress := !plain && j.Total >= 8<<20
 	if showProgress {
 		args = append(args, "--info=progress2")
 	}
@@ -133,12 +127,12 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 
 	cmd := exec.Command("rsync", args...)
 	cmd.Stdin = strings.NewReader(strings.Join(j.Files, "\x00"))
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
 	if showProgress {
 		cmd.Stdout = os.Stdout
 	}
-	err := cmd.Run()
+	err := runHoldingLock(cmd)
 	if showProgress {
 		fmt.Println()
 	}
@@ -147,14 +141,7 @@ func rsyncTo(src, dst Machine, j rsyncJob, dryRun bool) ([]string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, fmt.Errorf("rsync: %s", msg)
+		return fmt.Errorf("rsync: %s", msg)
 	}
-	var sent []string
-	for _, line := range strings.Split(out.String(), "\n") {
-		// Directories rsync creates on the way are listed with a trailing /.
-		if line != "" && !strings.HasSuffix(line, "/") {
-			sent = append(sent, line)
-		}
-	}
-	return sent, nil
+	return nil
 }
