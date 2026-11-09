@@ -150,6 +150,8 @@ check "the pushed branch is the lane rebased onto origin's main" '[[ $(g -C "$ro
 check "the lane's commit kept its message" '[[ $(g -C "$root/origin.git" log -1 --format=%s a) == "lane change" ]]'
 check "main didn't move, here or on origin" '[[ $(g -C "$p" rev-parse main) == "$local_main" && $(g -C "$root/origin.git" rev-parse main) == "$local_main" ]]'
 echo more > "$a/more.txt"; g -C "$a" add more.txt; g -C "$a" commit -qm "more"
+# origin's main moves again, so this land's rebase rewrites what the first pushed.
+echo again > "$p/again.txt"; g -C "$p" add again.txt; g -C "$p" commit -qm "main again"; g -C "$p" push -q origin main 2>/dev/null; local_main=$(g -C "$p" rev-parse main)
 check "landing again from the primary updates the same pull request" '(cd "$p" && bin/worktree land a) | grep -q "open pull request" && [[ $(grep -c "pr create" "$root/gh.log") == 1 && $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) ]]'
 check "teardown refuses while the pull request is open" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
 echo "MERGED $(g -C "$a" rev-parse HEAD~1)" > "$root/gh-merged"

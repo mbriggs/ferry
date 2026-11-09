@@ -251,8 +251,12 @@ cmd_land() {
   git -C "$wt" fetch -q origin main || die "couldn't fetch origin's main"
   git -C "$wt" rebase -q origin/main || die "rebase of $branch onto origin/main stopped; resolve it in $wt, then land again"
   [ -n "$(git -C "$wt" rev-list origin/main..HEAD)" ] || die "$branch has no commits that origin's main lacks"
-  # The rebase can rewrite commits an earlier land pushed.
-  git -C "$wt" push -q --force-with-lease -u origin "$branch:$branch" || die "pushing $branch failed"
+  # A plain push, unless the rebase rewrote commits an earlier land pushed.
+  force=
+  if git -C "$wt" fetch -q origin "$branch" 2>/dev/null && ! git -C "$wt" merge-base --is-ancestor FETCH_HEAD HEAD; then
+    force=--force-with-lease=$branch:$(git -C "$wt" rev-parse FETCH_HEAD)
+  fi
+  git -C "$wt" push -q $force -u origin "$branch:$branch" || die "pushing $branch failed"
   if url=$(cd "$wt" && $gh pr view "$branch" --json url -q .url 2>/dev/null) && [ -n "$url" ]; then
     echo "pushed $branch to its open pull request: $url"
   else
