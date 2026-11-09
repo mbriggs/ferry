@@ -9,11 +9,12 @@
 #   bin/worktree info                        this checkout's lane and the names it uses
 #   bin/worktree teardown --stale            drop the lanes whose directory is gone (hooks)
 #   bin/worktree teardown NAME [--discard]   from the primary: remove a worktree, its branch, and its lane
-#   bin/worktree land NAME                   from the primary: rebase the lane onto main, fast-forward main to it
+#   bin/worktree land [NAME]                 rebase a lane onto origin's main, push its branch, open its PR
 #   bin/worktree guard --deny|--confirm|--warn ACTION
 #
 # WORKTREE_LANE_RANGE=LO-HI narrows allocation (the script's own tests use it).
-# It can't widen the range past 0-99.
+# It can't widen the range past 0-99. WORKTREE_GH replaces the gh command
+# (the tests use a fake).
 set -eu
 
 die() { echo "bin/worktree: $*" >&2; exit 1; }
@@ -28,6 +29,9 @@ common=$(git rev-parse --path-format=absolute --git-common-dir)
 primary=$(dirname "$common")
 reg=$primary/tmp/worktrees
 is_lane() { [ -f "$top/.git" ]; }
+if [ -n "${WORKTREE_GH:-}" ]; then gh=$WORKTREE_GH
+elif [ -x /opt/hallpass/bin/hallpass ]; then gh="/opt/hallpass/bin/hallpass gh"
+else gh=gh; fi
 
 # lane_dirs N: every path a lane's test scripts create, one per line.
 lane_dirs() {
@@ -195,8 +199,7 @@ in_primary_on_main() {
   [ "$(git symbolic-ref --short HEAD 2>/dev/null)" = main ] || die "$1 needs the primary on main"
 }
 # Teardown counts untracked files, since removing the worktree deletes them.
-# land counts only tracked changes: a fast-forward leaves untracked files alone,
-# and git refuses one that would overwrite them.
+# land counts only tracked changes: untracked files don't go in the push.
 dirty() { [ -n "$(git -C "$1" status --porcelain)" ]; }
 dirty_tracked() { [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; }
 registered_path() { # the path as the registry and git record it
@@ -218,14 +221,14 @@ cmd_teardown() {
   branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
   if [ -z "$discard" ]; then
     dirty "$wt" && die "$wt has uncommitted changes; commit them, or pass --discard once the user agrees to lose them"
-    git merge-base --is-ancestor "$(git -C "$wt" rev-parse HEAD)" main \
-      || die "$wt's HEAD isn't on main; land it first (bin/worktree land $name), or pass --discard once the user agrees"
+    landed "$wt" "$branch" \
+      || die "$wt isn't merged: land it (bin/worktree land $name) and wait for its pull request to merge, or pass --discard once the user agrees"
   fi
   path=$(registered_path "$wt")
   if [ -n "$discard" ]; then git worktree remove --force "$wt"; else git worktree remove "$wt"; fi
-  if [ -n "$branch" ]; then
-    if [ -n "$discard" ]; then git branch -D "$branch"; else git branch -d "$branch"; fi
-  fi
+  # -D: a squash or rebase merge leaves the branch unmerged as far as git
+  # knows, and landed has already checked it.
+  [ -z "$branch" ] || git branch -q -D "$branch"
   locked "$reglock" _drop "$path"
 }
 
@@ -233,17 +236,46 @@ _drop() { # under reglock: drop the lane registered for PATH
   if n=$(lane_of "$1"); then drop_lane "$n"; else echo "no lane was registered for $1"; fi
 }
 
+# land never touches main: main moves only when a pull request merges on
+# GitHub, and that push cuts a release. With no NAME it lands the lane it
+# runs in.
 cmd_land() {
-  name=${1:?usage: bin/worktree land NAME}
-  in_primary_on_main land
-  wt=$(resolve "$name")
+  if [ $# -gt 0 ]; then wt=$(resolve "$1")
+  elif is_lane; then wt=$top
+  else die "usage: bin/worktree land NAME (or run it in the lane with no NAME)"; fi
   [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
-  dirty_tracked "$primary" && die "the primary checkout has uncommitted changes; commit or stash them first"
   dirty_tracked "$wt" && die "$wt has uncommitted changes; commit them first"
   branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
-  git -C "$wt" rebase main || die "rebase of $branch onto main stopped; resolve it in $wt, then land again"
-  git merge --ff-only "$branch"
-  echo "main is at $(git rev-parse --short HEAD) with $branch. Pushing main publishes a release; push when ready."
+  [ "$branch" != main ] || die "$wt is on main; land pushes a lane's own branch"
+  git -C "$wt" remote get-url origin >/dev/null 2>&1 || die "this repo has no origin remote; the user adds it (git remote add origin URL)"
+  git -C "$wt" fetch -q origin main || die "couldn't fetch origin's main"
+  git -C "$wt" rebase -q origin/main || die "rebase of $branch onto origin/main stopped; resolve it in $wt, then land again"
+  [ -n "$(git -C "$wt" rev-list origin/main..HEAD)" ] || die "$branch has no commits that origin's main lacks"
+  # A plain push, unless the rebase rewrote commits an earlier land pushed.
+  force=
+  if git -C "$wt" fetch -q origin "$branch" 2>/dev/null && ! git -C "$wt" merge-base --is-ancestor FETCH_HEAD HEAD; then
+    force=--force-with-lease=$branch:$(git -C "$wt" rev-parse FETCH_HEAD)
+  fi
+  git -C "$wt" push -q $force -u origin "$branch:$branch" || die "pushing $branch failed"
+  if url=$(cd "$wt" && $gh pr view "$branch" --json url -q .url 2>/dev/null) && [ -n "$url" ]; then
+    echo "pushed $branch to its open pull request: $url"
+  else
+    url=$(cd "$wt" && $gh pr create --base main --head "$branch" --fill) || die "pushed $branch, but opening its pull request failed"
+    echo "pushed $branch and opened $url"
+  fi
+}
+
+# landed WORKTREE BRANCH: the lane's HEAD is on main or origin's main, or is
+# the head of a merged pull request (a squash or rebase merge leaves it off
+# main).
+landed() {
+  head=$(git -C "$1" rev-parse HEAD)
+  git merge-base --is-ancestor "$head" main && return 0
+  if git remote get-url origin >/dev/null 2>&1; then
+    git fetch -q origin main 2>/dev/null || true
+    git merge-base --is-ancestor "$head" origin/main 2>/dev/null && return 0
+  fi
+  [ -n "$2" ] && [ "$(cd "$1" && $gh pr view "$2" --json state,headRefOid -q '.state+" "+.headRefOid' 2>/dev/null)" = "MERGED $head" ]
 }
 
 cmd_guard() {
@@ -254,7 +286,9 @@ cmd_guard() {
     --warn) echo "warning: running $action from a lane ($top), not the primary checkout." >&2 ;;
     --confirm)
       branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)
-      if ! { : </dev/tty; } 2>/dev/null; then
+      # A subshell: in POSIX sh, a failed redirection on a special builtin like
+      # `:` ends the whole script with status 1 instead of failing the test.
+      if ! ( : </dev/tty ) 2>/dev/null; then
         echo "$action refuses to run in a lane ($top) without a terminal to confirm on. Run it from $primary." >&2; exit 3
       fi
       printf '%s runs from lane %s (branch %s), not the primary.\nType the branch name to go ahead: ' "$action" "$top" "$branch" >/dev/tty

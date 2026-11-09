@@ -37,13 +37,15 @@ A session isolated to a worktree can't run git against the primary. Call `ExitWo
 
 ## Landing
 
-Commit in the lane, then from the primary run `bin/worktree land NAME` (a name under `.claude/worktrees/`, or a path). It refuses if either checkout has uncommitted changes, rebases the lane onto `main` inside the lane, and fast-forwards `main`. On a rebase conflict it stops; resolve the conflict in the lane and run `land` again. The lane's commits keep their messages.
+A lane lands as a pull request, never directly on `main`. Commit in the lane, then run `bin/worktree land` in the lane (or `bin/worktree land NAME` from the primary, with a name under `.claude/worktrees/` or a path). It refuses if the lane has uncommitted tracked changes or no `origin` remote. Then it rebases the lane onto `origin/main`, pushes the lane's branch, and opens its pull request, or prints the URL of the one already open. On a rebase conflict it stops; resolve the conflict in the lane and run `land` again. Running `land` again after more commits pushes them to the same pull request.
 
-The user pushes. A push to `main` cuts a release, so never push it yourself.
+`land` fills in the pull request from the commits. If the lane has more than one commit, or the commits don't explain the change on their own, rewrite the title and body with the `pr` skill. The token behind hallpass lacks `read:org`, which `gh pr edit` needs, so set them through the REST API: `/opt/hallpass/bin/hallpass gh api -X PATCH repos/mbriggs/ferry/pulls/N -F body=@FILE -f "title=..."`.
+
+Never commit to the primary's `main`, merge into it, or push it. The user merges the pull request; that push to `main` cuts a release.
 
 ## Cleanup
 
-Ask the user before you remove a lane. Call `ExitWorktree` with `keep`, never `remove`. `remove` refuses any worktree with commits made since it was created, even landed ones. Then run `bin/worktree teardown NAME` from the primary. It refuses a lane with uncommitted changes or a HEAD that isn't on `main`. `--discard` skips both checks, but only pass it after the user agrees to lose the work. Teardown removes the worktree, deletes the branch, and drops the lane.
+Ask the user before you remove a lane. Call `ExitWorktree` with `keep`, never `remove`. `remove` refuses any worktree with commits made since it was created, even landed ones. Then run `bin/worktree teardown NAME` from the primary. It refuses a lane with uncommitted changes, or one whose HEAD is neither on `main` or `origin/main` nor the head of a merged pull request. `--discard` skips both checks, but only pass it after the user agrees to lose the work. Teardown removes the worktree, deletes the branch, and drops the lane.
 
 Running teardown from inside the lane leaves the directory behind, and the next command there provisions the lane again.
 
