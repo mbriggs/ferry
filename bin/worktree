@@ -254,7 +254,9 @@ cmd_guard() {
     --warn) echo "warning: running $action from a lane ($top), not the primary checkout." >&2 ;;
     --confirm)
       branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)
-      if ! { : </dev/tty; } 2>/dev/null; then
+      # A subshell: in POSIX sh, a failed redirection on a special builtin like
+      # `:` ends the whole script with status 1 instead of failing the test.
+      if ! ( : </dev/tty ) 2>/dev/null; then
         echo "$action refuses to run in a lane ($top) without a terminal to confirm on. Run it from $primary." >&2; exit 3
       fi
       printf '%s runs from lane %s (branch %s), not the primary.\nType the branch name to go ahead: ' "$action" "$top" "$branch" >/dev/tty
