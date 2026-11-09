@@ -39,7 +39,7 @@ A session isolated to a worktree can't run git against the primary. Call `ExitWo
 
 A lane lands as a pull request, never directly on `main`. Commit in the lane, then run `bin/worktree land` in the lane (or `bin/worktree land NAME` from the primary, with a name under `.claude/worktrees/` or a path). It refuses if the lane has uncommitted tracked changes or no `origin` remote. Then it rebases the lane onto `origin/main`, pushes the lane's branch, and opens its pull request, or prints the URL of the one already open. On a rebase conflict it stops; resolve the conflict in the lane and run `land` again. Running `land` again after more commits pushes them to the same pull request.
 
-`land` fills in the pull request from the commits. If the lane has more than one commit, or the commits don't explain the change on their own, rewrite the body with the `pr` skill (`gh pr edit --body-file`).
+`land` fills in the pull request from the commits. If the lane has more than one commit, or the commits don't explain the change on their own, rewrite the title and body with the `pr` skill. The token behind hallpass lacks `read:org`, which `gh pr edit` needs, so set them through the REST API: `/opt/hallpass/bin/hallpass gh api -X PATCH repos/mbriggs/ferry/pulls/N -F body=@FILE -f "title=..."`.
 
 Never commit to the primary's `main`, merge into it, or push it. The user merges the pull request; that push to `main` cuts a release.
 
