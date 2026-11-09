@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRewriteHome(t *testing.T) {
@@ -41,34 +44,73 @@ func TestRewriteHomeLinesRejectsBadJSON(t *testing.T) {
 	}
 }
 
-// FuzzRewriteHome checks that any valid JSON stays valid, and that rewriting
-// to a fresh home and back restores the original document.
+// FuzzRewriteHome checks, for any pair of homes, that valid JSON stays
+// valid, that every string under the old home and nothing else changes, and
+// that rewriting back restores the document, key order and number spellings
+// included. The round trip only holds when nothing was under the new home
+// already, so those documents are skipped.
 func FuzzRewriteHome(f *testing.F) {
-	f.Add(`{"cwd":"/Users/matt/src","x":["/Users/matt",2]}`)
-	f.Add(`"/Users/matt"`)
-	f.Add(`[{"a":"é\"/Users/matt/x"}]`)
-	f.Fuzz(func(t *testing.T, in string) {
-		if !json.Valid([]byte(in)) || strings.Contains(in, "/zz-fresh") {
+	const matt, fresh = "/Users/matt", "/zz-fresh"
+	f.Add(`{"cwd":"/Users/matt/src","x":["/Users/matt",2]}`, matt, fresh)
+	f.Add(`"/Users/matt"`, matt, fresh)
+	f.Add(`{"p":"/home/m/x","q":"/home/mbriggs/y"}`, "/home/m", "/home/mbriggs")
+	f.Add(`{"p":"/home/mbriggs/x","n":1.50}`, "/home/mbriggs", "/home/m")
+	f.Add(`["/a b/\"q\"/c"]`, `/a b/"q"`, "/Users/<x>&é")
+	f.Add(`[{"a":"é\"/Users/matt/x"}]`, matt, fresh)
+	f.Fuzz(func(t *testing.T, in, oldHome, newHome string) {
+		if !isHome(oldHome) || !isHome(newHome) {
 			return
 		}
-		out, _, err := rewriteHome([]byte(in), "/Users/matt", "/zz-fresh")
+		doc, err := decodeOrdered([]byte(in))
+		if err != nil || countUnder(doc, newHome) > 0 {
+			return
+		}
+		out, n, err := rewriteHome([]byte(in), oldHome, newHome)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !json.Valid(out) {
 			t.Fatalf("invalid output %q", out)
 		}
-		back, _, err := rewriteHome(out, "/zz-fresh", "/Users/matt")
+		if want := countUnder(doc, oldHome); n != want {
+			t.Fatalf("rewrote %d strings, want %d:\n%s\n%s", n, want, in, out)
+		}
+		back, _, err := rewriteHome(out, newHome, oldHome)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var a, b any
-		json.Unmarshal([]byte(in), &a)
-		json.Unmarshal(back, &b)
-		ja, _ := json.Marshal(a)
-		jb, _ := json.Marshal(b)
-		if string(ja) != string(jb) {
-			t.Fatalf("round trip changed the document:\n%s\n%s", ja, jb)
+		if got, _ := decodeOrdered(back); !reflect.DeepEqual(doc, got) {
+			t.Fatalf("round trip changed the document:\n%s\n%s", in, back)
 		}
 	})
+}
+
+// isHome reports whether h could be a home directory: absolute, clean, not
+// the root, and valid UTF-8, since that's all the OS hands out.
+func isHome(h string) bool {
+	return filepath.IsAbs(h) && filepath.Clean(h) == h && h != "/" && utf8.ValidString(h)
+}
+
+// countUnder counts the strings in a decoded document, keys included, that
+// are home or a path under it.
+func countUnder(v any, home string) int {
+	switch x := v.(type) {
+	case string:
+		if x == home || strings.HasPrefix(x, home+"/") {
+			return 1
+		}
+	case []any:
+		n := 0
+		for _, e := range x {
+			n += countUnder(e, home)
+		}
+		return n
+	case *ordered:
+		n := 0
+		for _, k := range x.keys {
+			n += countUnder(k, home) + countUnder(x.vals[k], home)
+		}
+		return n
+	}
+	return 0
 }

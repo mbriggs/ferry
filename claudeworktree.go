@@ -49,17 +49,25 @@ func readClaudeTranscript(path string) (claudeTranscript, error) {
 			}
 			t.lastCwd = cwd
 		}
-		if m["type"] == "worktree-state" {
-			ws, _ := m["worktreeSession"].(map[string]any)
-			if p, _ := ws["worktreePath"].(string); p != "" {
-				t.worktree, t.inWorktree = p, true
-			} else {
-				t.inWorktree = false
-			}
+		if p, ok := worktreeState(m); ok && p != "" {
+			t.worktree, t.inWorktree = p, true
+		} else if ok {
+			t.inWorktree = false
 		}
 		return true
 	})
 	return t, err
+}
+
+// worktreeState reads a worktree-state record: ok says m is one, and path is
+// the worktree it enters, "" when it leaves.
+func worktreeState(m map[string]any) (path string, ok bool) {
+	if m["type"] != "worktree-state" {
+		return "", false
+	}
+	ws, _ := m["worktreeSession"].(map[string]any)
+	path, _ = ws["worktreePath"].(string)
+	return path, true
 }
 
 // resumeDir is where the session resumes. That's the Claude worktree if the
@@ -123,19 +131,18 @@ func (l *Local) worktreeTranscripts(dir string) []string {
 }
 
 // leaveClaudeWorktree appends a null worktree-state to a transcript still in
-// a Claude worktree, so it resumes as a plain session in that directory.
+// a Claude worktree, so it resumes as a plain session in that directory. It
+// decodes every line, as readClaudeTranscript does: a byte search would miss
+// a record whose JSON is spelled with escapes.
 func leaveClaudeWorktree(transcript []byte, id string) []byte {
 	in := false
 	for line := range bytes.Lines(transcript) {
-		if !bytes.Contains(line, []byte(`"worktree-state"`)) {
+		var m map[string]any
+		if json.Unmarshal(line, &m) != nil {
 			continue
 		}
-		var m struct {
-			Type string         `json:"type"`
-			WS   map[string]any `json:"worktreeSession"`
-		}
-		if json.Unmarshal(line, &m) == nil && m.Type == "worktree-state" {
-			in = m.WS["worktreePath"] != nil
+		if p, ok := worktreeState(m); ok {
+			in = p != ""
 		}
 	}
 	if !in {

@@ -286,8 +286,9 @@ func (l *Local) RemoveExtras(q RemoveExtrasReq) (RemoveExtrasResult, error) {
 }
 
 // safeDest checks that writing root/rel stays inside root: rel is relative and
-// clean, no component is ".git", and no existing component along the way
-// (including the file itself) is a symlink or a non-directory.
+// clean, no component is ".git" in any case, and no existing component along
+// the way (including the file itself) is a symlink or a non-directory. The
+// case matters on macOS, where ".GIT" names the same directory as ".git".
 func safeDest(root, rel string) error {
 	clean := filepath.Clean(rel)
 	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
@@ -296,7 +297,7 @@ func safeDest(root, rel string) error {
 	parts := strings.Split(clean, string(filepath.Separator))
 	cur := root
 	for i, part := range parts {
-		if part == ".git" {
+		if strings.EqualFold(part, ".git") {
 			return fmt.Errorf("refusing extra %q: inside .git", rel)
 		}
 		cur = filepath.Join(cur, part)
