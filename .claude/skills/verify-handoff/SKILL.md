@@ -48,7 +48,7 @@ The model covers this code, as of the sync commit below. Run `git diff <sync com
 
 If the diff changes the order of these calls, what a failure does (return, or print and continue), which machine a call runs on, what a call moves, what `Liveness` can see, when `Launch` returns, when ferry starts an agent, or what either lock excludes, the change touches the model. Changes to path rewriting, hook prompts, extras planning, git snapshots, rsync's flags, ssh options, session picking in `pick.go`, or step timing do not.
 
-**Sync commit: `7e794b7597dd46caee5ad7783b39033f3a57ecc5`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
+**Sync commit: `04459bcf801af070504c71775043d0bb5e7e23e3`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
 
 ## Run it
 
