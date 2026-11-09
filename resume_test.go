@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+// The resume command is printed to be pasted into a shell, so anything the
+// shell would split or expand is quoted, and plain words stay bare.
+func TestShellJoinQuotesWhatTheShellWouldSplit(t *testing.T) {
+	got := shellJoin([]string{"claude", "--resume", "09azAZ-_./=:", "a note with spaces", "it's", "", "$HOME"})
+	want := `claude --resume 09azAZ-_./=: 'a note with spaces' 'it'\''s' '' '$HOME'`
+	if got != want {
+		t.Fatalf("shellJoin = %s\nwant       %s", got, want)
+	}
+}
+
 // A pull run from a terminal ends in the agent, started in this terminal in
 // the worktree, instead of a command to copy.
 func TestPullResumesInThisTerminal(t *testing.T) {
@@ -41,6 +51,9 @@ func TestPullResumesInThisTerminal(t *testing.T) {
 	}
 	if r := w.record(taskKey("src/app-wt/fix-auth")); r.Owner != "laptop" || r.State != stateOwned {
 		t.Fatalf("the record wasn't finished before the agent started: %+v", r)
+	}
+	if got := w.read(wt, ".restored"); got != "restored-from\n" {
+		t.Fatalf("restore here should get FERRY_DIRECTION=from, wrote %q", got)
 	}
 }
 

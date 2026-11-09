@@ -1,0 +1,56 @@
+#!/bin/sh
+# Mutation-test one source file with gremlins: change its conditions and
+# arithmetic one at a time, run the package's tests against each change, and
+# list the changes no test noticed.
+#
+#   bin/mutate FILE.go [gremlins unleash flags]    e.g. bin/mutate pick.go --dry-run
+#
+# Gremlins runs only mutants on covered lines. TestMain builds the ferry the
+# tests run with -cover under go test -cover, so that coverage is real.
+# Each mutant runs the whole suite (about 20s, one per 4 cores); handoff.go takes
+# about an hour. A LIVED mutant is a line to read, not a test to write: most
+# change only output or can't change behavior.
+set -eu
+GREMLINS=github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+
+cd "$(dirname "$0")/.."
+[ $# -ge 1 ] || { echo "usage: bin/mutate FILE.go [gremlins unleash flags]" >&2; exit 2; }
+target=$1
+shift
+case $target in
+*_test.go | */*) echo "bin/mutate: name a source file in the repo root, like handoff.go" >&2; exit 2 ;;
+*.go) ;;
+*) echo "bin/mutate: name a source file in the repo root, like handoff.go" >&2; exit 2 ;;
+esac
+[ -f "$target" ] || { echo "bin/mutate: no $target" >&2; exit 2; }
+
+# One suite keeps about 4 cores busy, and its tests already run in parallel.
+# On a 10-core Mac, 2 suites at once finished the most per minute (3.75,
+# against 3.0 for 1 and 3.1 for 4), and 4 pushed the load average past 100,
+# where starved tests fail and count as kills. MUTATE_WORKERS overrides.
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+workers=${MUTATE_WORKERS:-$((cores / 4))}
+[ "$workers" -ge 1 ] || workers=1
+
+# Gremlins can only exclude files, so every other file is excluded.
+mkdir -p tmp
+cfg=tmp/gremlins-${target%.go}.yaml
+{
+	echo "unleash:"
+	echo "  workers: $workers"
+	echo "  exclude-files:"
+	echo "    - '^tmp/'"
+	for f in *.go; do
+		case $f in
+		*_test.go | "$target") ;;
+		*) echo "    - '^$(echo "$f" | sed 's/\./\\./')\$'" ;;
+		esac
+	done
+	echo "mutants:"
+	echo "  invert-logical:"
+	echo "    enabled: true"
+} >"$cfg"
+
+# -count=1 reaches gremlins' own go test runs. A cached coverage run takes a
+# second, and gremlins times each mutant out at a multiple of it.
+GOFLAGS=-count=1 exec go run "$GREMLINS" unleash --config "$cfg" "$@" .

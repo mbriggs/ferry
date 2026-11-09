@@ -237,6 +237,34 @@ func TestNoLaunchIntoAFolderNeitherMachineTrusts(t *testing.T) {
 	}
 }
 
+// --no-launch holds even where Rex runs and the folder is trusted, and a pull
+// to this machine outside a terminal prints the resume command: ferry only
+// launches through Rex on the other machine, and starts the agent in place
+// only on a terminal, where someone is there to use it.
+func TestNoLaunchAndPullsHereStartNothing(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("auto mode on")
+	wt := w.laptopTask()
+	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
+	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
+	w.write(w.kant, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, kwt))
+	w.write(w.root, "trusted", "")
+
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if n := countLines(log, "new "); n != 0 || !strings.Contains(out, "claude --resume") {
+		t.Fatalf("--no-launch started %d agents:\n%s", n, out)
+	}
+	ran := filepath.Join(w.root, "claude-ran")
+	writeExec(t, filepath.Join(w.root, "bin", "claude"), "#!/bin/sh\n[ \"$1\" = --resume ] || exec echo '2.1.0 (Claude Code)'\ntouch "+ran+"\n")
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	if n := countLines(log, "new "); n != 0 || !strings.Contains(out, "claude --resume") {
+		t.Fatalf("a pull here started %d agents in rex:\n%s", n, out)
+	}
+	if exists(ran) {
+		t.Fatalf("a pull outside a terminal started claude in place:\n%s", out)
+	}
+}
+
 // Turns added on the source before a rerun finishes the handoff go to the
 // receiver with it, instead of staying behind for the next pull to park.
 func TestLandingRerunSendsTurnsAddedOnTheSource(t *testing.T) {

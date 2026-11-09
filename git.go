@@ -74,6 +74,13 @@ func sharesRoot(a, b []string) bool {
 func (l *Local) InitRepo(repoRel string) error {
 	dir := l.abs(repoRel)
 	if exists(filepath.Join(dir, ".git")) {
+		// A repo with no commits yet, like a bare `git init`, has nothing to
+		// keep, but its unborn HEAD may name a branch about to arrive. Move
+		// it to the placeholder, as a new repo starts.
+		if _, err := git(dir, "rev-parse", "-q", "--verify", "HEAD"); err != nil {
+			_, err = git(dir, "symbolic-ref", "HEAD", "refs/heads/"+placeholderBranch)
+			return err
+		}
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {

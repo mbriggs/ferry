@@ -232,3 +232,97 @@ func FuzzOrderedJSON(f *testing.F) {
 		}
 	})
 }
+
+// settingsJSON is formatted the way ferry writes JSON, with a value of every
+// kind, so a round trip that changes anything but the added rule shows up.
+const settingsJSON = `{
+  "model": "opus",
+  "env": {
+    "NOTE": "a <b> & \"c\" é \\ \t"
+  },
+  "cleanupPeriodDays": 1.50,
+  "big": 1e3,
+  "flags": [
+    true,
+    false,
+    null
+  ],
+  "permissions": {
+    "deny": [],
+    "allow": [
+      "Bash(go test:*)"
+    ]
+  },
+  "hooks": {}
+}
+`
+
+// Settings are often stowed from a dotfiles repo, so ferry writes through
+// the symlink, keeps every other key and its order, keeps the file's mode,
+// and backs up the original outside the repo.
+func TestClaudeRulesEditSettingsThroughTheSymlink(t *testing.T) {
+	w := newWorld(t)
+	real := filepath.Join(w.laptop, "dotfiles", "claude-settings.json")
+	w.write(w.laptop, "dotfiles/claude-settings.json", settingsJSON)
+	os.Chmod(real, 0o600)
+	link := filepath.Join(w.laptop, ".claude", "settings.json")
+	os.MkdirAll(filepath.Dir(link), 0o755)
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	out := w.mustFerry(w.laptop, "setup", "--claude-rules")
+	want := strings.Replace(settingsJSON, `"Bash(go test:*)"`, `"Bash(go test:*)",`+"\n      "+`"`+claudeRules[0]+`"`, 1)
+	if got := w.read(w.laptop, "dotfiles/claude-settings.json"); got != want {
+		t.Fatalf("settings after setup:\n%s\nwant:\n%s", got, want)
+	}
+	if st, err := os.Lstat(link); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("settings.json is no longer a symlink")
+	}
+	if st, _ := os.Stat(real); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode became %v", st.Mode().Perm())
+	}
+	backups, _ := filepath.Glob(filepath.Join(w.laptop, ".local/state/ferry/backups/claude-settings-*.json"))
+	if len(backups) != 1 {
+		t.Fatalf("backups: %v\n%s", backups, out)
+	}
+	if b, _ := os.ReadFile(backups[0]); string(b) != settingsJSON {
+		t.Fatalf("backup isn't the original:\n%s", b)
+	}
+
+	out = w.mustFerry(w.laptop, "setup", "--claude-rules")
+	if !strings.Contains(out, "already set") || w.read(w.laptop, "dotfiles/claude-settings.json") != want {
+		t.Fatalf("a second run should change nothing:\n%s", out)
+	}
+}
+
+// A dry run writes nothing, settings ferry can't parse as one JSON object
+// stay as they were, and missing settings are created.
+func TestClaudeRulesDryRunAndBadSettingsWriteNothing(t *testing.T) {
+	w := newWorld(t)
+	settings := filepath.Join(w.laptop, ".claude", "settings.json")
+	out := w.mustFerry(w.laptop, "setup", "--claude-rules", "--dry-run")
+	if !strings.Contains(out, "dry run, nothing written") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if _, err := os.Stat(settings); !os.IsNotExist(err) {
+		t.Fatal("a dry run created settings.json")
+	}
+
+	for _, bad := range []string{`[]`, `{"a": 1} {}`, `{"a": `} {
+		w.write(w.laptop, ".claude/settings.json", bad)
+		if out, err := w.ferry(w.laptop, "setup", "--claude-rules"); err == nil {
+			t.Fatalf("setup accepted %q:\n%s", bad, out)
+		}
+		if got := w.read(w.laptop, ".claude/settings.json"); got != bad {
+			t.Fatalf("setup rewrote bad settings %q as %q", bad, got)
+		}
+	}
+
+	os.Remove(settings)
+	w.mustFerry(w.laptop, "setup", "--claude-rules")
+	want := "{\n  \"permissions\": {\n    \"allow\": [\n      \"" + claudeRules[0] + "\"\n    ]\n  }\n}\n"
+	if got := w.read(w.laptop, ".claude/settings.json"); got != want {
+		t.Fatalf("new settings:\n%s", got)
+	}
+}

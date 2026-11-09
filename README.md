@@ -84,6 +84,8 @@ Use a scratch repo:
 ## Tests
 
 - `make test` runs a round trip between two fake homes. The remote side runs as a real `ferry remote` subprocess.
+- `make cover` writes coverage to `tmp/cover/`. It counts the ferry subprocesses too, since `TestMain` builds the binary with `-cover` whenever the tests run under coverage.
+- `bin/mutate FILE.go` runs [gremlins](https://gremlins.dev) on one source file. It changes one condition or operator at a time, runs the suite against each change, and lists the changes no test caught. `handoff.go` takes about an hour. Most survivors change only output, or can't change behavior, so read each one before writing a test for it.
 - `test/e2e-local.sh` runs a real Claude session on kant through Rex, with a fake laptop home. Run `test/e2e-local.sh clean` afterwards.
 - `test/worktree.sh` tests `bin/worktree`, which gives each linked git worktree its own lane of test-script names. See `.claude/skills/worktree/SKILL.md`.
 - `test/liveness.sh` rechecks the agent internals ferry depends on. Run it after upgrading Claude Code or Codex.
