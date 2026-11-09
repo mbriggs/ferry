@@ -12,8 +12,8 @@ import (
 func TestRefusesToDropCommitsOnACleanReceiver(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	kwt := filepath.Join(w.kant, "src", "app-wt", "fix-auth")
 	w.write(kwt, "stray.txt", "committed on kant after handing off\n")
 	w.git(kwt, "add", "-A")
@@ -40,7 +40,7 @@ func TestRerunConvergesAfterTheSourceChanged(t *testing.T) {
 	// The laptop still owns the task, so work continues there.
 	w.write(wt, "more.txt", "kept working on the laptop\n")
 	want, _ := fingerprint(wt)
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if got, _ := fingerprint(filepath.Join(w.kant, "src/app-wt/fix-auth")); got != want {
 		t.Fatalf("kant has a stale tree\nwant %s\ngot  %s", want, got)
 	}
@@ -79,7 +79,7 @@ func TestRerunFinishesARepoLeftOnThePlaceholderBranch(t *testing.T) {
 	(&Local{Home: w.kant}).InitRepo("src/app")
 	w.git(wt, "push", "-q", repo, "+refs/heads/*:refs/heads/*")
 
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if head := w.git(repo, "symbolic-ref", "--short", "HEAD"); head != "main" {
 		t.Fatalf("kant's repo is on %q, want main", head)
 	}
@@ -93,7 +93,7 @@ func TestHandsOffIntoAnExistingClone(t *testing.T) {
 	wt := w.laptopTask()
 	w.git(w.root, "clone", "-q", filepath.Join(w.root, "origin.git"), filepath.Join(w.kant, "src/app"))
 	want, _ := fingerprint(wt)
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if got, _ := fingerprint(filepath.Join(w.kant, "src/app-wt/fix-auth")); got != want {
 		t.Fatalf("worktree differs\nwant %s\ngot  %s", want, got)
 	}

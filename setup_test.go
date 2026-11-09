@@ -99,7 +99,7 @@ func TestDoctorExplainsAnSSHFailure(t *testing.T) {
 func TestLsOnTheMachineThatKeepsTheRecords(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	cmd := exec.Command(ferryBin, "ls", "kant")
 	cmd.Env = w.env(w.kant)
 	out, err := cmd.CombinedOutput()

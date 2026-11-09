@@ -43,7 +43,7 @@ func (w *world) kantTool() (wt string) {
 func TestPullAWorktreeThatNeverMoved(t *testing.T) {
 	w := newWorld(t)
 	w.kantTool()
-	out := w.mustFerry(w.laptop, "from", "kant", "src/tool", "--session", kantSessionID, "--yes", "--no-launch")
+	out := w.mustFerry(w.laptop, "from", "kant", "src/tool", "--session", kantSessionID, "--yes", "--skip-scripts", "--no-launch")
 	t.Log(out)
 
 	lwt := filepath.Join(w.laptop, "src", "tool")

@@ -51,7 +51,7 @@ func TestFailurePlacingTheSessionKeepsTheSourceAndRerunFinishes(t *testing.T) {
 		t.Fatalf("record: %s owned by %s", r.State, r.Owner)
 	}
 	os.Remove(filepath.Join(w.kant, ".claude/projects"))
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !exists(kantCopy) {
 		t.Fatal("the rerun didn't put the session in place on kant")
 	}

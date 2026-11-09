@@ -56,7 +56,7 @@ type Machine interface {
 // renamed, a request or response it would misread, or an op this side now
 // needs. Adding an optional field doesn't need a bump. Both sides of a
 // handoff must agree; a peer that predates the field reports 0.
-const protocol = 6
+const protocol = 7
 
 type Info struct {
 	Name     string `json:"name"`

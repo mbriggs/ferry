@@ -17,6 +17,10 @@ const placeholderBranch = "ferry-init"
 // can't become git objects. It travels as an extra instead.
 const stateDirRel = ".ferry/state"
 
+// claudeWorktreesRel holds the worktrees Claude makes in a repo. They stay
+// where they are: neither the snapshot nor the extras carry them.
+const claudeWorktreesRel = ".claude/worktrees"
+
 // Snapshot commits are internal. They skip signing (which may need an agent
 // this process can't reach) and don't depend on the user's identity config.
 var gitEnv = []string{
@@ -156,6 +160,9 @@ func (l *Local) Snapshot(q SnapshotReq) (SnapshotResult, error) {
 	if err != nil {
 		return SnapshotResult{}, err
 	}
+	if nested := newGitlinks(dir, idxTree, wipTree); len(nested) > 0 {
+		return SnapshotResult{}, fmt.Errorf("%s holds another git checkout that isn't a submodule (%s); git can't carry it, so ignore it in .gitignore or move it out first", q.WtRel, listNames(nested))
+	}
 	wip, err := git(dir, "commit-tree", wipTree, "-p", base, "-p", idx, "-m", "ferry wip")
 	if err != nil {
 		return SnapshotResult{}, err
@@ -205,11 +212,15 @@ func worktreeTree(dir string) (string, error) {
 		os.Remove(tmp.Name())
 	}
 	// Keep .ferry/state out of the add itself, so its files never become
-	// blobs. An ignored directory is already skipped (and git rejects a
-	// pathspec naming one), so the exclude is only needed when it isn't.
-	add := []string{"add", "-A"}
-	if _, err := git(dir, "check-ignore", "-q", stateDirRel+"/"); err != nil {
-		add = append(add, "--", ".", ":(exclude)"+stateDirRel)
+	// blobs, and Claude's worktrees, each a checkout of its own that git
+	// would add as a gitlink to a commit the receiver may not have. An
+	// ignored directory is already skipped (and git rejects a pathspec
+	// naming one), so the exclude is only needed when it isn't.
+	add := []string{"add", "-A", "--", "."}
+	for _, skip := range []string{stateDirRel, claudeWorktreesRel} {
+		if _, err := git(dir, "check-ignore", "-q", skip+"/"); err != nil {
+			add = append(add, ":(exclude)"+skip)
+		}
 	}
 	if _, err := gitIndex(dir, tmp.Name(), add...); err != nil {
 		return "", err
@@ -218,6 +229,33 @@ func worktreeTree(dir string) (string, error) {
 		return "", err
 	}
 	return gitIndex(dir, tmp.Name(), "write-tree")
+}
+
+// newGitlinks lists the gitlinks in wipTree that idxTree lacks: untracked
+// checkouts inside the worktree, which `git add -A` adds as a pointer to a
+// commit only they hold. The receiver can't check one out, so Apply would
+// fail its fingerprint after changing the receiver's worktree. A submodule
+// the index already has is the repo's own business.
+func newGitlinks(dir, idxTree, wipTree string) []string {
+	links := func(tree string) map[string]bool {
+		out, _ := git(dir, "ls-tree", "-r", "-z", tree)
+		m := map[string]bool{}
+		for _, e := range strings.Split(out, "\x00") {
+			if meta, path, ok := strings.Cut(e, "\t"); ok && strings.HasPrefix(meta, "160000 ") {
+				m[path] = true
+			}
+		}
+		return m
+	}
+	have := links(idxTree)
+	var out []string
+	for p := range links(wipTree) {
+		if !have[p] {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // fingerprint identifies a worktree's full state: HEAD, the index tree, and

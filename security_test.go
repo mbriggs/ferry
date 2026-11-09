@@ -91,7 +91,7 @@ func TestSessionIDsMustBeUUIDs(t *testing.T) {
 func TestFromRefusesATamperedRecord(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 
 	// Something on kant rewrites the task record to point at a config dir.
 	recPath := filepath.Join(w.kant, ".local/state/ferry/tasks/"+taskKey("src/app-wt/fix-auth")+".json")

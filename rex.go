@@ -185,16 +185,27 @@ func (l *Local) StopAgent(q StopReq) error {
 		return fmt.Errorf("%s is mid-turn; wait for it to finish", q.Session.Agent)
 	}
 	pid := live.PID // 0 for codex, whose lock release already means it's done
-	// A Claude still in its own worktree would delete it on /exit, or ask,
-	// and Keep refiles the transcript. SIGTERM exits it with neither.
-	byTerm := q.Session.Agent == agentClaude && q.Session.ClaudeWorktree != "" && pid > 0
-	// Codex can drop input that lands as a turn finishes, so retry.
-	for range 3 {
+	// Claude stops with SIGTERM, never typed input: /exit typed after a
+	// draft left in the input box would send the draft as a prompt. SIGTERM
+	// also keeps a Claude in its own worktree from deleting it on exit, or
+	// asking, where Keep refiles the transcript.
+	byTerm := q.Session.Agent == agentClaude && pid > 0
+	if !byTerm && q.Session.Agent == agentClaude {
+		return fmt.Errorf("%s; can't find its process to stop it, so exit it by hand", live.Detail)
+	}
+	// Codex's lock holder can be a daemon serving other threads, so Codex
+	// gets /exit typed. It can drop input that lands as a turn finishes, so
+	// that's retried, but never once the agent has started a turn: then the
+	// box held a draft, and /exit went in after it.
+	for i := range 3 {
 		if byTerm {
 			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 				return err
 			}
 		} else {
+			if _, st := programStatus(q.RexSession, block); i > 0 && st == "working" {
+				return fmt.Errorf("%s started a turn after ferry typed /exit, so its input box held a draft that it's now running; let the turn finish, then exit it by hand", q.Session.Agent)
+			}
 			rexRun("", "send", "-s", q.RexSession, "-b", block, "/exit")
 			rexRun("", "send-key", "-s", q.RexSession, "-b", block, "enter")
 		}

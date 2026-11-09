@@ -13,7 +13,7 @@ func TestExtrasDeletedOnKantAreRemovedOnReturn(t *testing.T) {
 	wt := w.laptopTask()
 	w.write(wt, ".gitignore", ".env*\n.ferry/state/\nnode_modules/\n.restored\n")
 	w.write(wt, ".env.local", "LOCAL=1\n")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 
 	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
 	for _, f := range []string{".env", ".env.local"} {
@@ -26,7 +26,7 @@ func TestExtrasDeletedOnKantAreRemovedOnReturn(t *testing.T) {
 	w.write(wt, ".env.local", "LOCAL=2\n")
 	w.approve(w.kant, dehydrateScript)
 
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if exists(filepath.Join(wt, ".env")) {
 		t.Fatalf(".env came back after kant deleted it:\n%s", out)
 	}
@@ -42,9 +42,9 @@ func TestExtrasDeletedOnKantAreRemovedOnReturn(t *testing.T) {
 func TestUnchangedExtrasAreNotSentAgain(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	w.approve(w.kant, dehydrateScript)
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if !strings.Contains(out, "already on laptop, not sent: .env") {
 		t.Fatalf("the unchanged .env was sent back:\n%s", out)
 	}
@@ -60,7 +60,7 @@ func TestUnchangedExtrasAreNotSentAgain(t *testing.T) {
 func TestReplacedExtrasEndPrivate(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask() // .env is 0644 on the laptop
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	// The same size and the same whole second as the laptop's copy: rsync's
 	// default quick check would call the two files equal and skip it.
 	kenv := filepath.Join(w.kant, "src/app-wt/fix-auth", ".env")
@@ -75,7 +75,7 @@ func TestReplacedExtrasEndPrivate(t *testing.T) {
 	}
 	os.Chtimes(kenv, sameSecond, sameSecond)
 	w.approve(w.kant, dehydrateScript)
-	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if w.read(wt, ".env") != "SECRET=2\n" {
 		t.Fatal("kant's .env didn't come back")
 	}
@@ -89,11 +89,11 @@ func TestReplacedExtrasEndPrivate(t *testing.T) {
 func TestExtrasChangedOnBothSidesAreParked(t *testing.T) {
 	w := newWorld(t)
 	wt := w.laptopTask()
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	w.write(filepath.Join(w.kant, "src/app-wt/fix-auth"), ".env", "SECRET=kant\n")
 	w.write(wt, ".env", "SECRET=laptop\n")
 	w.approve(w.kant, dehydrateScript)
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	if w.read(wt, ".env") != "SECRET=kant\n" {
 		t.Fatalf("kant's .env didn't come back:\n%s", out)
 	}
@@ -117,7 +117,7 @@ func TestExtrasModesLinksAndOddNames(t *testing.T) {
 	os.Chmod(filepath.Join(wt, "bin-local/run"), 0o755)
 	os.Symlink("/etc/hosts", filepath.Join(wt, "bin-local/hosts"))
 	w.write(wt, ".env\nfake", "x\n")
-	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	kwt := filepath.Join(w.kant, "src/app-wt/fix-auth")
 	if st, err := os.Stat(filepath.Join(kwt, "bin-local/run")); err != nil || st.Mode().Perm() != 0o700 {
 		t.Fatalf("bin-local/run mode on kant: %v %v", st, err)
@@ -135,7 +135,7 @@ func TestExtrasModesLinksAndOddNames(t *testing.T) {
 		t.Fatal("the file with a newline in its name didn't arrive")
 	}
 	w.approve(w.kant, dehydrateScript)
-	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes")
+	out = w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
 	_, notSent, _ := strings.Cut(out, "already on laptop, not sent:")
 	notSent, _, _ = strings.Cut(notSent, "\n")
 	if !strings.Contains(notSent, `.env\x{a}fake`) || !strings.Contains(notSent, "bin-local/run") {

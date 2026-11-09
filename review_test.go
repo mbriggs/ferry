@@ -78,9 +78,9 @@ func TestPullRefusesBeforeStoppingTheAgent(t *testing.T) {
 func TestSessionStartedAboveTheWorktreeMakesTheReturnTrip(t *testing.T) {
 	w := newWorld(t)
 	w.kantTool()
-	w.mustFerry(w.laptop, "from", "kant", "src/tool", "--session", kantSessionID, "--yes", "--no-launch")
+	w.mustFerry(w.laptop, "from", "kant", "src/tool", "--session", kantSessionID, "--yes", "--skip-scripts", "--no-launch")
 	lwt := filepath.Join(w.laptop, "src", "tool")
-	out := w.mustFerry(lwt, "to", "kant", "--yes", "--no-launch")
+	out := w.mustFerry(lwt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "agent      claude "+short(kantSessionID)) {
 		t.Fatalf("the session didn't go back with the worktree:\n%s", out)
 	}
@@ -172,7 +172,7 @@ func TestProjectMemoryTravelsWithTheSession(t *testing.T) {
 	w.write(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/memory/MEMORY.md", "- [deploy](deploy.md)\n")
 	w.write(w.laptop, ".claude/projects/"+claudeSlug(wt)+"/memory/deploy.md", "ship on fridays\n")
 	w.write(w.kant, ".claude/projects/"+claudeSlug(kwt)+"/memory/kant-only.md", "kant knows this\n")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	mem := ".claude/projects/" + claudeSlug(kwt) + "/memory/"
 	if got := w.read(w.kant, mem+"deploy.md"); got != "ship on fridays\n" {
 		t.Fatalf("memory didn't travel: %q", got)
@@ -189,7 +189,7 @@ func TestGitHooksTravel(t *testing.T) {
 	wt := w.laptopTask()
 	lhook := filepath.Join(w.laptop, "src", "app", ".git", "hooks", "pre-commit")
 	writeExec(t, lhook, "#!/bin/sh\necho laptop\n")
-	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
 	khook := filepath.Join(w.kant, "src", "app", ".git", "hooks", "pre-commit")
 	st, err := os.Stat(khook)
 	if err != nil || st.Mode().Perm()&0o100 == 0 {
@@ -197,7 +197,7 @@ func TestGitHooksTravel(t *testing.T) {
 	}
 
 	writeExec(t, khook, "#!/bin/sh\necho kant changed this\n")
-	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--no-launch")
+	out := w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts", "--no-launch")
 	if !strings.Contains(out, "git hooks from kant: pre-commit") || !strings.Contains(out, "skipped") {
 		t.Fatalf("expected the hook to be offered and skipped without a terminal:\n%s", out)
 	}

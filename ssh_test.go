@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,5 +35,22 @@ func TestGitOverSSHUsesFerrysOptions(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("git's ssh ran without %s: %s", want, args)
 		}
+	}
+}
+
+// On kant, which has no hosts file, `ferry to rawls` fails in ssh. The
+// error says the laptop drives handoffs, and what to run there.
+func TestUnreachableUnknownHostSaysWhereToRunFerry(t *testing.T) {
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, ".config/ferry"), 0o700)
+	os.WriteFile(filepath.Join(home, ".config/ferry/name"), []byte("kant\n"), 0o600)
+	l := &Local{Home: home}
+	err := l.hostHint("rawls", errors.New("rawls: ssh: Could not resolve hostname rawls: nodename nor servname provided"))
+	if err == nil || !strings.Contains(err.Error(), "run `ferry from kant`") {
+		t.Fatalf("hint = %v", err)
+	}
+	os.WriteFile(filepath.Join(home, ".config/ferry/hosts"), []byte("rawls matt@rawls\n"), 0o600)
+	if err := l.hostHint("rawls", errors.New("rawls: ssh: connect timed out")); strings.Contains(err.Error(), "drives every handoff") {
+		t.Fatalf("a host in the hosts file got the hint: %v", err)
 	}
 }
