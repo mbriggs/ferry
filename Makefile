@@ -6,7 +6,7 @@ ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: build install dist push test
+.PHONY: build install dist push test fuzz
 
 build:
 	$(GOBUILD) -o ferry .
@@ -34,3 +34,13 @@ push: build dist
 
 test:
 	go test ./...
+
+# Run each fuzz target in turn for FUZZTIME. `go test` alone only replays the
+# saved inputs in testdata/fuzz; this looks for new ones. A failing input is
+# written there: commit it with the fix so `go test` keeps checking it.
+FUZZTIME ?= 30s
+fuzz:
+	@for t in $$(grep -ho '^func Fuzz[A-Za-z0-9_]*' *_test.go | cut -c6-); do \
+		echo "== $$t"; \
+		go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) . || exit 1; \
+	done

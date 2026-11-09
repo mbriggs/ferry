@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -190,4 +192,43 @@ func TestPushRefusesAStaleCrossBuild(t *testing.T) {
 	if out := w.mustFerry(repo, "push", "kant"); !strings.Contains(out, "installed dev ("+strings.Replace(foreign, "-", "/", 1)+")") {
 		t.Fatalf("push should install the matching build:\n%s", out)
 	}
+}
+
+// FuzzOrderedJSON checks the codec setup edits settings.json with: it accepts
+// exactly valid JSON, and its output decodes to the same keys, in the same
+// order, with the same values and number spellings, and encodes back to
+// itself.
+func FuzzOrderedJSON(f *testing.F) {
+	esc := string(rune(92)) + "u" // a JSON \u escape, spelled so editors leave it be
+	for _, s := range []string{
+		`{"permissions":{"allow":["Bash(ferry:*)"]},"model":"opus"}`,
+		`{"a":1,"a":2,"b":{}}`, `[1e400, -0, 1.50, 12345678901234567890]`,
+		`{"<k>&":"` + esc + `0000` + esc + `2028` + esc + `d800","":[[],{}]}`, `"x"`, `{"a" 1}`, `{} {}`,
+		`{"Bash(echo ` + esc + `0022hi` + esc + `0022)":{"k` + esc + `000a":1}}`,
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		v, err := decodeOrdered([]byte(in))
+		if (err == nil) != json.Valid([]byte(in)) {
+			t.Fatalf("decodeOrdered error %v for %q, json.Valid %v", err, in, json.Valid([]byte(in)))
+		}
+		if err != nil {
+			return
+		}
+		out, err := encodeOrdered(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, err := decodeOrdered(out)
+		if err != nil {
+			t.Fatalf("output doesn't decode: %v\n%s", err, out)
+		}
+		if !reflect.DeepEqual(v, back) {
+			t.Fatalf("output means something else:\n%s\n%s", in, out)
+		}
+		if again, _ := encodeOrdered(back); !bytes.Equal(out, again) {
+			t.Fatalf("encoding isn't stable:\n%s\n%s", out, again)
+		}
+	})
 }

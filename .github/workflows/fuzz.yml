@@ -1,0 +1,47 @@
+name: fuzz
+
+# Each night, search for new inputs that break a fuzz target, on both
+# platforms: the laptop's filesystem ignores case and kant's doesn't, so some
+# path bugs exist on only one. `go test` in ci.yml already replays the saved
+# inputs in testdata/fuzz on every push. Go keeps the corpus it grows in the
+# build cache, so that's carried from night to night. A failing input is
+# uploaded; add it to testdata/fuzz with the fix.
+
+on:
+  schedule:
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: time per fuzz target
+        default: 5m
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: corpus dir
+        id: corpus
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.corpus.outputs.dir }}
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ runner.os }}-
+      - run: make fuzz FUZZTIME=${{ inputs.fuzztime || '5m' }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures-${{ runner.os }}
+          path: testdata/fuzz
