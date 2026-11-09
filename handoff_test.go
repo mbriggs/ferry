@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -27,7 +30,17 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	ferryBin = filepath.Join(dir, "ferry")
-	if out, err := exec.Command("go", "build", "-o", ferryBin, ".").CombinedOutput(); err != nil {
+	build := []string{"build", "-o", ferryBin}
+	// Most tests run ferry as a subprocess, which `go test -cover` can't see
+	// on its own. Under -cover, the binary is built with coverage too and
+	// every ferry run, the kant side included, writes its counters into the
+	// directory go test merges into its report and -coverprofile.
+	flag.Parse()
+	if cov := flag.Lookup("test.gocoverdir"); testing.CoverMode() != "" && cov != nil && cov.Value.String() != "" {
+		build = append(build, "-cover", "-covermode="+testing.CoverMode())
+		os.Setenv("GOCOVERDIR", cov.Value.String())
+	}
+	if out, err := exec.Command("go", append(build, ".")...).CombinedOutput(); err != nil {
 		panic(string(out))
 	}
 	// Tests run in parallel, so they can't each t.Setenv. The process env is
@@ -184,7 +197,19 @@ func (w *world) git(dir string, args ...string) string {
 
 // ferry runs the binary as the laptop user, in dir.
 func (w *world) ferry(dir string, args ...string) (string, error) {
-	cmd := exec.Command(ferryBin, args...)
+	// A ferry that hangs (or a mutant stuck in a loop, under bin/mutate)
+	// would outlive the test binary's timeout, with the `ferry remote` it
+	// started, and keep a core busy. Each runs in its own process group,
+	// killed whole just before the test binary would give up.
+	ctx := context.Background()
+	if deadline, ok := w.t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-5*time.Second))
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, ferryBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.Dir = dir
 	cmd.Env = w.env(w.laptop)
 	var out bytes.Buffer
@@ -349,8 +374,15 @@ func TestRoundTrip(t *testing.T) {
 	if !exists(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")) {
 		t.Fatal("the laptop should keep its transcript")
 	}
-	if r := w.record(task); r.Owner != "kant" || r.State != stateOwned || r.Attempt != "" {
+	r := w.record(task)
+	if r.Owner != "kant" || r.State != stateOwned || r.Attempt != "" {
 		t.Fatalf("record after to: %+v", r)
+	}
+	// Every write moves the generation on, or a run holding a stale copy
+	// of the record could still write it.
+	firstGen := r.Generation
+	if firstGen <= 0 {
+		t.Fatalf("generation after a handoff: %d", firstGen)
 	}
 	if !strings.Contains(out, "claude --resume "+sessionID) {
 		t.Fatal("expected a resume command")
@@ -382,7 +414,7 @@ func TestRoundTrip(t *testing.T) {
 	if !exists(filepath.Join(w.kant, ".claude/projects", kslug, sessionID+".jsonl")) {
 		t.Fatal("kant should keep its transcript")
 	}
-	if r := w.record(task); r.Owner != "laptop" || r.State != stateOwned || r.Attempt != "" {
+	if r := w.record(task); r.Owner != "laptop" || r.State != stateOwned || r.Attempt != "" || r.Generation <= firstGen {
 		t.Fatalf("record after from: %+v", r)
 	}
 
@@ -410,6 +442,19 @@ func TestRefusesWhileAgentRunning(t *testing.T) {
 	}
 	if exists(filepath.Join(w.kant, "src", "app")) {
 		t.Fatal("nothing should move while the agent runs")
+	}
+}
+
+// An agent that just exited may still be writing its last lines, so a
+// transcript written moments ago is waited on, not refused or sent half done.
+func TestWaitsForAJustWrittenTranscript(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	now := time.Now()
+	os.Chtimes(filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl"), now, now)
+	out := w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if !strings.Contains(out, "waiting for it to settle") {
+		t.Fatalf("expected a wait for the transcript:\n%s", out)
 	}
 }
 
@@ -489,6 +534,78 @@ func TestCheckRunsWhileTheAgentDoes(t *testing.T) {
 	}
 	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateOwned || r.Owner != "laptop" {
 		t.Fatalf("check must not change the record: %+v", r)
+	}
+}
+
+// A repo at the same path on kant that shares no history with this one is
+// someone else's work, so the handoff stops before touching it. One with no
+// commits yet has nothing to lose, and the handoff fills it.
+func TestRepoAlreadyAtThePathOnKant(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	other := filepath.Join(w.kant, "src", "app")
+	w.git(w.root, "init", "-q", "--initial-branch=main", other)
+	w.write(other, "theirs.txt", "unrelated\n")
+	w.git(other, "add", "-A")
+	w.git(other, "commit", "-qm", "unrelated")
+	head := w.git(other, "rev-parse", "HEAD")
+	out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
+	if err == nil || !strings.Contains(out, "different repository") {
+		t.Fatalf("want a refusal, got err=%v\n%s", err, out)
+	}
+	if w.git(other, "rev-parse", "HEAD") != head || exists(filepath.Join(w.kant, "src", "app-wt")) {
+		t.Fatal("the refused handoff changed kant")
+	}
+
+	os.RemoveAll(other)
+	w.git(w.root, "init", "-q", "--initial-branch=main", other)
+	w.mustFerry(wt, "to", "kant", "--yes", "--no-launch")
+	if w.read(w.kant, "src/app-wt/fix-auth/unpushed.txt") != "local commit\n" {
+		t.Fatal("the handoff into an empty repo didn't land the code")
+	}
+}
+
+// A worktree under ~/src of a repo kept elsewhere can't be recreated at the
+// same place on kant, so it's refused like any work outside ~/src.
+func TestRefusesAWorktreeOfARepoOutsideSrc(t *testing.T) {
+	w := newWorld(t)
+	repo := filepath.Join(w.laptop, "elsewhere", "app")
+	w.git(w.root, "init", "-q", "--initial-branch=main", repo)
+	w.write(repo, "a.txt", "a\n")
+	w.git(repo, "add", "-A")
+	w.git(repo, "commit", "-qm", "initial")
+	wt := filepath.Join(w.laptop, "src", "app-wt")
+	w.git(repo, "worktree", "add", "-q", "-b", "wt", wt)
+	out, err := w.ferry(wt, "to", "kant", "--yes", "--no-launch")
+	if err == nil || !strings.Contains(out, "outside ~/src") {
+		t.Fatalf("want a refusal, got err=%v\n%s", err, out)
+	}
+}
+
+// versionLess decides whether a handoff refuses an agent older than the
+// session's, so versions of different lengths and prefixes must compare.
+func TestVersionLess(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"2.1.0", "2.1.1", true},
+		{"2.1.1", "2.1.0", false},
+		{"2.1.0", "2.1.0", false},
+		{"2.9.0", "2.10.0", true},
+		{"2.10.0", "2.9.0", false},
+		{"2.9.0", "2.8.0", false},
+		{"2.8.0", "2.9.0", true},
+		{"2.1", "2.1.0", false},
+		{"2.1.0", "2.1", false},
+		{"2.1", "2.1.1", true},
+		{"2.1.1", "2.1", false},
+		{"v2.0.0", "1.0.0", false},
+		{"1.0.0", "v2.0.0", true},
+	} {
+		if got := versionLess(c.a, c.b); got != c.want {
+			t.Errorf("versionLess(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }
 

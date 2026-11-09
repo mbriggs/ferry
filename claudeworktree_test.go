@@ -135,6 +135,22 @@ func TestToFromMainCheckoutNamesAWorktree(t *testing.T) {
 	}
 }
 
+// NAME picks a worktree from a linked worktree too, not only from the main
+// checkout: the shell you type in isn't always the one you mean to send.
+func TestToFromALinkedWorktreeNamesAnother(t *testing.T) {
+	w := newWorld(t)
+	app, _ := w.claudeWorktree("kept")
+	here := filepath.Join(app, ".claude", "worktrees", "other")
+	w.git(app, "worktree", "add", "-q", "-b", "other", here)
+	w.write(here, "other.txt", "not this one\n")
+
+	w.mustFerry(here, "to", "kant", "feat", "--yes", "--no-launch")
+	kapp := filepath.Join(w.kant, "src", "app", ".claude", "worktrees")
+	if !exists(filepath.Join(kapp, "feat", "feat.txt")) || exists(filepath.Join(kapp, "other")) {
+		t.Fatal("NAME from a linked worktree should send that worktree, and only it")
+	}
+}
+
 func TestLiveClaudeWorktreeSessionRefusesWithKeepAdvice(t *testing.T) {
 	w := newWorld(t)
 	_, wt := w.claudeWorktree("closed")

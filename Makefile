@@ -6,7 +6,7 @@ ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 GOBUILD := CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: build install dist push test fuzz
+.PHONY: build install dist push test fuzz cover
 
 build:
 	$(GOBUILD) -o ferry .
@@ -44,3 +44,14 @@ fuzz:
 		echo "== $$t"; \
 		go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) . || exit 1; \
 	done
+
+# Coverage of the test process and of every ferry binary the tests run
+# (TestMain builds ferry with -cover under go test -cover). Per-function
+# figures land in tmp/cover/func.txt; open the HTML with
+# `go tool cover -html=tmp/cover/profile.txt`.
+COVER := tmp/cover
+cover:
+	mkdir -p $(COVER)
+	go test -count=1 -coverprofile=$(COVER)/profile.txt ./...
+	go tool cover -func=$(COVER)/profile.txt > $(COVER)/func.txt
+	tail -1 $(COVER)/func.txt
