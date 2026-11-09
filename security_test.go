@@ -94,7 +94,7 @@ func TestPrepareExtrasRefusesSymlinks(t *testing.T) {
 			os.MkdirAll(root, 0o755)
 			os.MkdirAll(outside, 0o755)
 			setup(root, outside)
-			err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{"cfg/.env"}})
+			_, err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{"cfg/.env"}})
 			if err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("want a symlink refusal, got %v", err)
 			}
@@ -108,7 +108,7 @@ func TestPrepareExtrasRefusesGitDir(t *testing.T) {
 	os.MkdirAll(filepath.Join(home, "src/app/.git/hooks"), 0o755)
 	// macOS's filesystem resolves .GIT to the same directory as .git.
 	for _, p := range []string{".git/hooks/post-checkout", ".GIT/hooks/post-checkout"} {
-		err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{p}})
+		_, err := l.PrepareExtras(PrepareExtrasReq{WtRel: "src/app", Task: "t", Paths: []string{p}})
 		if err == nil || !strings.Contains(err.Error(), "inside .git") {
 			t.Errorf("%s: want a .git refusal, got %v", p, err)
 		}

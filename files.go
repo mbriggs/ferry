@@ -29,6 +29,10 @@ func (e FileEntry) matches(st fs.FileInfo) bool {
 type ExtrasList struct {
 	Files      []FileEntry `json:"files"`
 	LeftBehind []string    `json:"left_behind,omitempty"`
+	// Links are ignored symlinks. They stay: one from the other machine
+	// could point anywhere in this home, and a write through it would land
+	// there.
+	Links []string `json:"links,omitempty"`
 }
 
 // ListExtras returns the ignored files in a worktree, which travel with it
@@ -61,14 +65,20 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 	}
 	seen := map[string]bool{}
 	var entries []FileEntry
-	var left []string
+	var left, links []string
 	add := func(rel string) {
 		if seen[rel] {
 			return
 		}
-		if st, err := os.Lstat(filepath.Join(root, rel)); err == nil && st.Mode().IsRegular() {
+		st, err := os.Lstat(filepath.Join(root, rel))
+		switch {
+		case err != nil:
+		case st.Mode().IsRegular():
 			seen[rel] = true
 			entries = append(entries, FileEntry{Path: rel, Size: st.Size(), MTime: st.ModTime().UnixNano()})
+		case st.Mode()&fs.ModeSymlink != 0:
+			seen[rel] = true
+			links = append(links, rel)
 		}
 	}
 	for _, rel := range strings.Split(out, "\x00") {
@@ -95,7 +105,7 @@ func (l *Local) ListExtras(wtRel string) (ExtrasList, error) {
 		r, _ := filepath.Rel(root, p)
 		add(r)
 	})
-	return ExtrasList{Files: entries, LeftBehind: left}, nil
+	return ExtrasList{Files: entries, LeftBehind: left, Links: links}, nil
 }
 
 // inHeavyDir reports whether any directory in rel is a dependency or build
@@ -177,10 +187,11 @@ func walkIgnored(root, dir string, stays func(string) bool, add, left func(strin
 		case d.IsDir() && rel != dir && (heavyDir(rel) || stays(rel)):
 			left(filepath.ToSlash(rel) + "/")
 			return filepath.SkipDir
-		case d.Type().IsRegular() && stays(rel):
+		case !d.Type().IsRegular() && d.Type()&fs.ModeSymlink == 0:
+		case stays(rel):
 			left(filepath.ToSlash(rel))
-		case d.Type().IsRegular():
-			add(rel)
+		default:
+			add(rel) // a file, or a symlink add lists as one
 		}
 		return nil
 	})
@@ -212,31 +223,45 @@ type PrepareExtrasReq struct {
 // the other machine, so no component of a path may be a symlink (a tracked
 // symlink could otherwise redirect a write anywhere in this home), and
 // nothing goes under .git. Extras are often secrets, and rsync keeps the
-// mode of a file it replaces, so each one already here is set to 0600; safeDest
-// has checked it's a regular file, not a symlink. It also makes the private
-// directory rsync keeps its partial and temp files in.
-func (l *Local) PrepareExtras(q PrepareExtrasReq) error {
+// mode of a file it replaces until it's done, so each one already here loses
+// its group and other bits first; safeDest has checked it's a regular file,
+// not a symlink. It also makes the private directory rsync keeps its partial
+// and temp files in, and returns the listed files this machine has, so the
+// sender can tell which differ and which this machine changed.
+func (l *Local) PrepareExtras(q PrepareExtrasReq) (PrepareExtrasResult, error) {
+	var res PrepareExtrasResult
 	if !taskPattern.MatchString(q.Task) {
-		return fmt.Errorf("bad task key %q", q.Task)
+		return res, fmt.Errorf("bad task key %q", q.Task)
 	}
 	root := l.abs(q.WtRel)
 	for _, p := range q.Paths {
 		if err := safeDest(root, p); err != nil {
-			return err
+			return res, err
 		}
 	}
 	for _, p := range q.Paths {
-		if err := os.Chmod(filepath.Join(root, p), 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
+		st, err := os.Lstat(filepath.Join(root, p))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return res, err
 		}
+		if err := os.Chmod(filepath.Join(root, p), st.Mode().Perm()&0o700); err != nil {
+			return res, err
+		}
+		res.Have = append(res.Have, FileEntry{Path: p, Size: st.Size(), MTime: st.ModTime().UnixNano()})
 	}
 	work := l.abs(extrasWork(q.Task))
 	for _, d := range []string{"partial", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(work, d), 0o700); err != nil {
-			return err
+			return res, err
 		}
 	}
-	return nil
+	return res, nil
+}
+
+type PrepareExtrasResult struct {
+	Have []FileEntry `json:"have,omitempty"`
 }
 
 type RemoveExtrasReq struct {

@@ -23,7 +23,8 @@ func (w *world) fakeRex(screen string) (log string) {
 root="`+w.root+`"
 echo "$*" >> "`+log+`"
 case "$1" in
-new) n=$(grep -c '^new ' "`+log+`")
+new) if [ -e "$root/rex-fail" ]; then echo "rex: server not running" >&2; exit 1; fi
+  n=$(grep -c '^new ' "`+log+`")
   id=$(echo "$*" | sed -n 's/.* --resume \([^ ]*\).*/\1/p')
   if [ ! -e "$root/no-register" ] && [ -n "$id" ]; then
     mkdir -p "$HOME/.claude/sessions"
@@ -119,6 +120,31 @@ func TestLandingRerunLaunchesOnce(t *testing.T) {
 	}
 	if n := countLines(log, "new "); n != 1 {
 		t.Fatalf("launched %d agents, want 1", n)
+	}
+}
+
+// A launch that fails after the handoff leaves the task landing on kant, so
+// rerunning the same command retries the launch instead of refusing.
+func TestRerunRetriesAFailedLaunch(t *testing.T) {
+	w := newWorld(t)
+	log := w.fakeRex("auto mode on")
+	wt := w.laptopTask()
+	w.write(w.laptop, ".claude.json", fmt.Sprintf(`{"projects":{%q:{"hasTrustDialogAccepted":true}}}`, wt))
+	w.write(w.root, "rex-fail", "")
+	out, err := w.ferry(wt, "to", "kant", "--yes")
+	if err == nil || !strings.Contains(out, "run `ferry to kant` again to retry") {
+		t.Fatalf("the failed launch should fail the run and say how to retry:\n%s", out)
+	}
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateLanding || r.Owner != "kant" {
+		t.Fatalf("record after the failed launch: state %s, owner %s", r.State, r.Owner)
+	}
+	os.Remove(filepath.Join(w.root, "rex-fail"))
+	out = w.mustFerry(wt, "to", "kant", "--yes")
+	if n := countLines(log, "new "); n != 2 {
+		t.Fatalf("rex new ran %d times, want the failure and one retry:\n%s", n, out)
+	}
+	if r := w.record(taskKey("src/app-wt/fix-auth")); r.State != stateOwned || r.RexSession == "" {
+		t.Fatalf("record after the retry: state %s, rex session %q", r.State, r.RexSession)
 	}
 }
 
@@ -219,8 +245,8 @@ func TestLaunchKillsAnAgentThatNeverRegisters(t *testing.T) {
 	}
 
 	os.Remove(filepath.Join(w.root, "no-register"))
-	if id, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: false}); err != nil || id != "session:fake-2" {
-		t.Fatalf("Launch of an agent that registers = %q, %v", id, err)
+	if id, err := l.Launch(LaunchReq{Name: "t", Argv: []string{"claude", "--resume", sessionID}, Agent: agentClaude, Session: s, AcceptTrust: false}); err != nil || id.Session != "session:fake-2" {
+		t.Fatalf("Launch of an agent that registers = %+v, %v", id, err)
 	}
 }
 
