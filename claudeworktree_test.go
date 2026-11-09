@@ -251,3 +251,33 @@ func TestLeaveClaudeWorktree(t *testing.T) {
 		t.Fatalf("a plain session is unchanged:\n%s", got)
 	}
 }
+
+// FuzzLeaveClaudeWorktree checks that whatever transcript arrives, the copy
+// leaveClaudeWorktree makes reads as out of its worktree, and only adds to
+// the end of what was there.
+func FuzzLeaveClaudeWorktree(f *testing.F) {
+	in := `{"type":"worktree-state","worktreeSession":{"worktreePath":"/w"}}`
+	f.Add(in + "\n")
+	f.Add(`{"type":"user","cwd":"/w"}` + "\n" + in)
+	f.Add(in + "\n" + `{"type":"worktree-state","worktreeSession":null}` + "\n")
+	f.Add(`{"type":"worktree\u002dstate","worktreeSession":{"worktreePath":"/w"}}` + "\n")
+	f.Add(in + "\r\n" + `{"type":"worktree-state","worktreeSession":"x"}` + "\n")
+	dir := f.TempDir()
+	f.Fuzz(func(t *testing.T, transcript string) {
+		out := leaveClaudeWorktree([]byte(transcript), sessionID)
+		if !strings.HasPrefix(string(out), transcript) {
+			t.Fatalf("changed what was there:\n%q\n%q", transcript, out)
+		}
+		p := filepath.Join(dir, "t.jsonl")
+		if err := os.WriteFile(p, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := readClaudeTranscript(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.inWorktree {
+			t.Fatalf("still in worktree %q after leaving:\n%q", got.worktree, out)
+		}
+	})
+}
