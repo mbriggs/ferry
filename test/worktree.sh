@@ -29,7 +29,23 @@ case \$1 in
 esac
 EOF
 chmod +x "$root/bin/rex"
-export PATH=$root/bin:$PATH
+# A stub gh: one pull request, opened by `pr create`. Its state and head are
+# "OPEN x" until $root/gh-merged says otherwise. Calls are logged.
+cat > "$root/bin/fake-gh" <<EOF
+#!/bin/sh
+echo "\$*" >> "$root/gh.log"
+case "\$1 \$2" in
+  "pr create") touch "$root/gh-pr"; echo https://github.test/ferry/pull/1 ;;
+  "pr view")
+    [ -e "$root/gh-pr" ] || exit 1
+    case "\$*" in
+      *headRefOid*) cat "$root/gh-merged" 2>/dev/null || echo "OPEN x" ;;
+      *) echo https://github.test/ferry/pull/1 ;;
+    esac ;;
+esac
+EOF
+chmod +x "$root/bin/fake-gh"
+export PATH=$root/bin:$PATH WORKTREE_GH=$root/bin/fake-gh
 
 pass=0 fail=0
 check() { if eval "$2"; then echo "  ok    $1"; pass=$((pass + 1)); else echo "  FAIL  $1"; fail=$((fail + 1)); fi; }
@@ -119,19 +135,26 @@ rm "$p/tmp/worktrees/150"; rmdir /tmp/ferry-live-lane-99
 
 echo "land"
 echo change > "$a/change.txt"; g -C "$a" add change.txt; g -C "$a" commit -qm "lane change"
-check "teardown refuses a lane that isn't on main" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
-echo main-change > "$p/main.txt"; g -C "$p" add main.txt; g -C "$p" commit -qm "main moved"
-echo wip > "$p/wip.txt"
-g -C "$p" add wip.txt
-check "land refuses tracked changes in the primary" '! (cd "$p" && bin/worktree land a) 2>/dev/null'
-g -C "$p" rm -q --cached wip.txt
-check "land refuses from inside the lane" '! (cd "$a" && bin/worktree land a) 2>/dev/null'
-(cd "$p" && bin/worktree land a >/dev/null 2>&1)
-check "an untracked file in the primary didn't block land" '[[ -f $p/wip.txt ]]'
-rm "$p/wip.txt"
-check "main fast-forwarded to the rebased lane" '[[ $(g -C "$p" rev-parse main) == $(g -C "$a" rev-parse HEAD) && -f $p/change.txt && -f $a/main.txt ]]'
-check "the lane's commit kept its message" '[[ $(g -C "$p" log -1 --format=%s) == "lane change" ]]'
-check "nothing was pushed" '[[ $(g -C "$root/origin.git" rev-parse main) != $(g -C "$p" rev-parse main) ]]'
+check "teardown refuses a lane that isn't merged" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
+# origin's main moves on without the lane.
+echo main-change > "$p/main.txt"; g -C "$p" add main.txt; g -C "$p" commit -qm "main moved"; g -C "$p" push -q origin main 2>/dev/null
+local_main=$(g -C "$p" rev-parse main)
+echo wip > "$a/wip.txt"; g -C "$a" add wip.txt
+check "land refuses tracked changes in the lane" '! (cd "$a" && bin/worktree land) 2>/dev/null && ! g -C "$root/origin.git" rev-parse -q --verify refs/heads/a >/dev/null'
+g -C "$a" rm -q --cached wip.txt
+check "land without a NAME refuses in the primary" '! (cd "$p" && bin/worktree land) 2>/dev/null'
+check "land in the lane opens a pull request" '(cd "$a" && bin/worktree land) | grep -q "opened https://github.test/ferry/pull/1"'
+check "an untracked file in the lane stayed out of the push" '[[ -f $a/wip.txt ]] && ! g -C "$root/origin.git" cat-file -e a:wip.txt 2>/dev/null'
+rm "$a/wip.txt"
+check "the pushed branch is the lane rebased onto origin's main" '[[ $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) && -f $a/main.txt ]]'
+check "the lane's commit kept its message" '[[ $(g -C "$root/origin.git" log -1 --format=%s a) == "lane change" ]]'
+check "main didn't move, here or on origin" '[[ $(g -C "$p" rev-parse main) == "$local_main" && $(g -C "$root/origin.git" rev-parse main) == "$local_main" ]]'
+echo more > "$a/more.txt"; g -C "$a" add more.txt; g -C "$a" commit -qm "more"
+check "landing again from the primary updates the same pull request" '(cd "$p" && bin/worktree land a) | grep -q "open pull request" && [[ $(grep -c "pr create" "$root/gh.log") == 1 && $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) ]]'
+check "teardown refuses while the pull request is open" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
+echo "MERGED $(g -C "$a" rev-parse HEAD~1)" > "$root/gh-merged"
+check "teardown refuses when the merged head isn't the lane's HEAD" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
+echo "MERGED $(g -C "$a" rev-parse HEAD)" > "$root/gh-merged"
 
 echo "teardown NAME"
 c=$(wt c); (cd "$c" && bin/worktree setup >/dev/null); echo junk > "$c/junk.txt"
