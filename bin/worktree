@@ -9,12 +9,16 @@
 #   bin/worktree info                        this checkout's lane and the names it uses
 #   bin/worktree teardown --stale            drop the lanes whose directory is gone (hooks)
 #   bin/worktree teardown NAME [--discard]   from the primary: remove a worktree, its branch, and its lane
-#   bin/worktree land [NAME]                 rebase a lane onto origin's main, push its branch, open its PR
+#   bin/worktree land [NAME] [--message FILE] [--body FILE] [--no-verify REASON]
+#                                            push a lane's one commit and open or update its PR
+#   bin/worktree merge NAME                  from the primary: squash-merge the lane's green PR, then sync
+#   bin/worktree sync                        in the primary: fast-forward main to origin's and install it
 #   bin/worktree guard --deny|--confirm|--warn ACTION
 #
 # WORKTREE_LANE_RANGE=LO-HI narrows allocation (the script's own tests use it).
-# It can't widen the range past 0-99. WORKTREE_GH replaces the gh command
-# (the tests use a fake).
+# It can't widen the range past 0-99. WORKTREE_GH replaces the gh command,
+# WORKTREE_INSTALL the install command, and FERRY_VERIFY_EVIDENCE where
+# verify stamps are found (the tests use all three).
 set -eu
 
 die() { echo "bin/worktree: $*" >&2; exit 1; }
@@ -215,6 +219,9 @@ cmd_teardown() {
   discard=${2:-}
   [ -z "$discard" ] || [ "$discard" = --discard ] || die "unknown flag $discard"
   in_primary_on_main teardown
+  # sync first, so a lane whose PR just merged counts as landed and the
+  # install isn't forgotten. Teardown's own checks still decide.
+  ( cmd_sync ) || echo "bin/worktree: sync failed; tearing down on teardown's own checks" >&2
   wt=$(resolve "$name")
   [ "$wt" != "$primary" ] || die "won't tear down the primary checkout"
   [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
@@ -240,28 +247,154 @@ _drop() { # under reglock: drop the lane registered for PATH
 # GitHub, and that push cuts a release. With no NAME it lands the lane it
 # runs in.
 cmd_land() {
-  if [ $# -gt 0 ]; then wt=$(resolve "$1")
-  elif is_lane; then wt=$top
-  else die "usage: bin/worktree land NAME (or run it in the lane with no NAME)"; fi
+  wt= msg= body= skip=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --message|--body)
+        [ -f "${2:-}" ] || die "$1 needs a file"
+        f=$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")
+        if [ "$1" = --message ]; then msg=$f; else body=$f; fi
+        shift 2 ;;
+      --no-verify) [ -n "${2:-}" ] || die "--no-verify needs a reason"; skip=$2; shift 2 ;;
+      -*) die "unknown flag $1" ;;
+      *) [ -z "$wt" ] || die "land takes one NAME"; wt=$(resolve "$1"); shift ;;
+    esac
+  done
+  if [ -z "$wt" ]; then
+    is_lane || die "usage: bin/worktree land NAME (or run it in the lane with no NAME)"
+    wt=$top
+  fi
   [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
   dirty_tracked "$wt" && die "$wt has uncommitted changes; commit them first"
   branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
   [ "$branch" != main ] || die "$wt is on main; land pushes a lane's own branch"
   git -C "$wt" remote get-url origin >/dev/null 2>&1 || die "this repo has no origin remote; the user adds it (git remote add origin URL)"
   git -C "$wt" fetch -q origin main || die "couldn't fetch origin's main"
-  git -C "$wt" rebase -q origin/main || die "rebase of $branch onto origin/main stopped; resolve it in $wt, then land again"
-  [ -n "$(git -C "$wt" rev-list origin/main..HEAD)" ] || die "$branch has no commits that origin's main lacks"
-  # A plain push, unless the rebase rewrote commits an earlier land pushed.
+  # land doesn't rebase: a rebase changes the tree that verification stamped,
+  # and CI should test what will merge.
+  if ! git -C "$wt" merge-base --is-ancestor origin/main HEAD; then
+    tooling=$(git -C "$wt" diff --name-only HEAD...origin/main -- bin/worktree .claude/skills/worktree .claude/skills/verify-ferry | tr '\n' ' ')
+    echo "bin/worktree: $branch lacks commits from origin/main. In $wt, run git rebase origin/main, verify the result, then land again." >&2
+    [ -z "$tooling" ] || echo "bin/worktree: origin/main changed the lane tooling ($tooling). After rebasing, reread .claude/skills/worktree/SKILL.md and land with the rebased bin/worktree." >&2
+    exit 1
+  fi
+  count=$(git -C "$wt" rev-list --count origin/main..HEAD)
+  [ "$count" -gt 0 ] || die "$branch has no commits that origin's main lacks"
+  verified "$wt" "$skip"
+  # GitHub titles a squash of several commits after the branch, so a lane
+  # lands as one commit, whose message becomes the squash commit's on main.
+  if [ -n "$msg" ]; then
+    git -C "$wt" reset -q --soft origin/main
+    git -C "$wt" commit -q -F "$msg" || die "committing with $msg failed"
+  elif [ "$count" -gt 1 ]; then
+    git -C "$wt" log --oneline origin/main..HEAD >&2
+    die "$branch has $count commits. A lane lands as one: write its message to a file and pass --message FILE"
+  fi
+  # A plain push, unless this rewrites commits an earlier land pushed.
   force=
   if git -C "$wt" fetch -q origin "$branch" 2>/dev/null && ! git -C "$wt" merge-base --is-ancestor FETCH_HEAD HEAD; then
     force=--force-with-lease=$branch:$(git -C "$wt" rev-parse FETCH_HEAD)
   fi
   git -C "$wt" push -q $force -u origin "$branch:$branch" || die "pushing $branch failed"
-  if url=$(cd "$wt" && $gh pr view "$branch" --json url -q .url 2>/dev/null) && [ -n "$url" ]; then
-    echo "pushed $branch to its open pull request: $url"
+  title=$(git -C "$wt" log -1 --format=%s)
+  if [ -n "$body" ]; then text=$(cat "$body"); else text=$(git -C "$wt" log -1 --format=%b); fi
+  [ -z "$skip" ] || text="$text
+
+Not verified with verify-ferry's \`world.sh all\`: $skip"
+  num=$(cd "$wt" && $gh pr list --head "$branch" --state open --json number -q '.[0].number // empty') || die "pushed $branch, but listing its pull requests failed"
+  if [ -n "$num" ]; then
+    # REST, not gh pr edit, which also reads org data and needs read:org.
+    (cd "$wt" && $gh api -X PATCH "repos/{owner}/{repo}/pulls/$num" -f "title=$title" -f "body=$text" >/dev/null) \
+      || die "pushed $branch, but updating pull request #$num failed"
+    echo "pushed $branch and updated pull request #$num"
   else
-    url=$(cd "$wt" && $gh pr create --base main --head "$branch" --fill) || die "pushed $branch, but opening its pull request failed"
-    echo "pushed $branch and opened $url"
+    (cd "$wt" && $gh pr create --base main --head "$branch" --title "$title" --body "$text" >/dev/null) \
+      || die "pushed $branch, but opening its pull request failed"
+    echo "pushed $branch and opened its pull request"
+  fi
+  (cd "$wt" && $gh pr view "$branch" --json url -q .url)
+}
+
+# verified WORKTREE REASON: the lane's tree passed verify-ferry's `world.sh
+# all`, which stamps the tree it ran on. A change to Markdown alone needs no
+# run, and REASON (from --no-verify) skips the check and goes in the PR.
+verified() {
+  if [ -z "$(git -C "$1" diff --name-only origin/main...HEAD | grep -v '\.md$' || true)" ]; then
+    echo "only Markdown changed, so no verify run is needed"; return 0
+  fi
+  if [ -n "$2" ]; then echo "not verified: $2"; return 0; fi
+  tree=$(git -C "$1" rev-parse 'HEAD^{tree}')
+  for f in "${FERRY_VERIFY_EVIDENCE:-$HOME/.cache/ferry-verify}"/*/verified; do
+    if [ "$(cat "$f" 2>/dev/null)" = "$tree" ]; then echo "verified: world.sh all passed in $(dirname "$f")"; return 0; fi
+  done
+  die "no verify-ferry run passed on this commit's tree. With nothing uncommitted, run .claude/skills/verify-ferry/world.sh all in the lane, then land again. If the change can't affect what ferry does, pass --no-verify REASON; the reason goes in the PR."
+}
+
+# merge NAME: squash-merge the lane's pull request once its checks pass and
+# its head is the lane's HEAD, then sync. It sends the merge once, pinned to
+# that head; on a failed reply it reads the PR's state instead of retrying.
+cmd_merge() {
+  name=${1:?usage: bin/worktree merge NAME}
+  in_primary_on_main merge
+  wt=$(resolve "$name")
+  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
+  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
+  head=$(git -C "$wt" rev-parse HEAD)
+  pr=$(cd "$wt" && $gh pr view "$branch" --json number,state,headRefOid -q '"\(.number) \(.state) \(.headRefOid)"') \
+    || die "$branch has no pull request; land it first"
+  set -- $pr
+  num=$1 state=$2 prhead=$3
+  if [ "$state" = MERGED ] && [ "$prhead" = "$head" ]; then
+    echo "pull request #$num is already merged"
+  else
+    [ "$state" = OPEN ] || die "pull request #$num is $state"
+    [ "$prhead" = "$head" ] || die "pull request #$num's head is $prhead, but $wt is at $head. Land again, wait for its checks, then merge."
+    rc=0; (cd "$wt" && $gh pr checks "$branch" >/dev/null 2>&1) || rc=$?
+    case $rc in
+      0) ;;
+      8) die "pull request #$num's checks are still running. Watch them with: $gh pr checks $branch --watch" ;;
+      *) die "pull request #$num's checks didn't pass. See: $gh pr checks $branch" ;;
+    esac
+    title="$(git -C "$wt" log -1 --format=%s) (#$num)"
+    message=$(git -C "$wt" log -1 --format=%b)
+    if ! out=$(cd "$wt" && $gh api -X PUT "repos/{owner}/{repo}/pulls/$num/merge" -f merge_method=squash \
+        -f "sha=$head" -f "commit_title=$title" -f "commit_message=$message" 2>&1); then
+      state=$(cd "$wt" && $gh pr view "$branch" --json state -q .state 2>/dev/null || true)
+      [ "$state" = MERGED ] || die "merging pull request #$num failed: $out"
+    fi
+    echo "merged pull request #$num"
+  fi
+  cmd_sync
+}
+
+# sync: fast-forward the primary's main to origin's and install it, so
+# ~/.local/bin/ferry runs what merged. A marker names the last commit
+# installed, so a sync after a failed install tries again.
+cmd_sync() {
+  in_primary_on_main sync
+  dirty_tracked "$primary" && { git -C "$primary" status --short --untracked-files=no >&2; die "the primary has tracked changes"; }
+  git -C "$primary" fetch -q origin main || die "couldn't fetch origin's main"
+  if [ -n "$(git -C "$primary" rev-list origin/main..main)" ]; then
+    git -C "$primary" log --oneline origin/main..main >&2
+    die "main has commits origin/main lacks. Those need a pull request."
+  fi
+  git -C "$primary" merge -q --ff-only origin/main || die "couldn't fast-forward main"
+  after=$(git -C "$primary" rev-parse HEAD)
+  marker=$common/ferry-installed
+  last=$(cat "$marker" 2>/dev/null || true)
+  if [ "$last" = "$after" ]; then
+    echo "main is at $(git -C "$primary" log -1 --format='%h %s'), installed"; return 0
+  fi
+  echo "main is at $(git -C "$primary" log -1 --format='%h %s'); installing it"
+  command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
+  if ! (cd "$primary" && eval "${WORKTREE_INSTALL:-make -s install}"); then
+    echo "NOT INSTALLED: make install failed. Run it in $primary." >&2
+    return 1
+  fi
+  echo "$after" > "$marker"
+  proto() { git -C "$primary" show "$1:machine.go" 2>/dev/null | sed -n 's/^const protocol = //p'; }
+  if [ -n "$last" ] && [ "$(proto "$last")" != "$(proto "$after")" ]; then
+    echo "the ferry protocol went from $(proto "$last") to $(proto "$after"). Handoffs refuse until kant runs this build: run make push in $primary."
   fi
 }
 
@@ -305,6 +438,8 @@ case $cmd in
   info) cmd_info ;;
   teardown) cmd_teardown "$@" ;;
   land) cmd_land "$@" ;;
+  merge) cmd_merge "$@" ;;
+  sync) cmd_sync ;;
   guard) cmd_guard "$@" ;;
   _setup|_claim|_drop) "$cmd" "$@" ;;
   _sweep) sweep ;;

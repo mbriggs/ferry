@@ -16,7 +16,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 unset WORKTREE_LANE FERRY_LANE_SUFFIX WORKTREE_PRIMARY
 lanepaths() { for n in 97 98 99; do echo /tmp/ferry-{test,test-e2e,git,live}-lane-$n; done; }
 cleanup() { rm -rf "$root"; lanepaths | xargs rm -rf; }
-trap cleanup EXIT
+[[ -n ${KEEP:-} ]] || trap cleanup EXIT  # KEEP=1 keeps the root to debug
 cleanup; mkdir -p "$root" "$HOME/src" "$root/bin"
 for p in $(lanepaths); do [[ ! -e $p ]] || { echo "refusing: $p exists, a live lane may own it" >&2; exit 1; }; done
 
@@ -29,23 +29,50 @@ case \$1 in
 esac
 EOF
 chmod +x "$root/bin/rex"
-# A stub gh: one pull request, opened by `pr create`. Its state and head are
-# "OPEN x" until $root/gh-merged says otherwise. Calls are logged.
-cat > "$root/bin/fake-gh" <<EOF
+# A stub gh with one pull request, #1. `pr create` opens it for its --head
+# branch. $R/gh-state holds OPEN, whose head is that branch on origin, or
+# "MERGED <sha>". A squash merge commits the PR head's tree onto origin's main.
+# $R/gh-checks is the exit code of `pr checks` (0 passed, 8 pending, 1 failed),
+# and $R/gh-merge-lost makes a merge go through but report failure. Calls are
+# logged to $R/gh.log.
+cat > "$root/bin/fake-gh" <<'EOF'
 #!/bin/sh
-echo "\$*" >> "$root/gh.log"
-case "\$1 \$2" in
-  "pr create") touch "$root/gh-pr"; echo https://github.test/ferry/pull/1 ;;
+R=$FAKE_ROOT O=$FAKE_ROOT/origin.git
+echo "$*" >> "$R/gh.log"
+state() {
+  [ -e "$R/gh-state" ] || return 1
+  read -r s m < "$R/gh-state"
+  if [ "$s" = MERGED ]; then echo "MERGED $m"; else echo "OPEN $(git -C "$O" rev-parse "refs/heads/$(cat "$R/gh-branch")")"; fi
+}
+case "$1 $2" in
+  "pr create")
+    while [ $# -gt 0 ]; do [ "$1" = --head ] && echo "$2" > "$R/gh-branch"; shift; done
+    echo OPEN > "$R/gh-state"; echo https://github.test/ferry/pull/1 ;;
+  "pr list") state | grep -q '^OPEN' && echo 1; exit 0 ;;
   "pr view")
-    [ -e "$root/gh-pr" ] || exit 1
-    case "\$*" in
-      *headRefOid*) cat "$root/gh-merged" 2>/dev/null || echo "OPEN x" ;;
+    st=$(state) || exit 1
+    case "$*" in
+      *number,state,headRefOid*) echo "1 $st" ;;
+      *state,headRefOid*) echo "$st" ;;
+      *"json state "*) echo "${st%% *}" ;;
       *) echo https://github.test/ferry/pull/1 ;;
+    esac ;;
+  "pr checks") exit "$(cat "$R/gh-checks" 2>/dev/null || echo 0)" ;;
+  "api -X")
+    case "$*" in
+      *PUT*/merge*)
+        for a in "$@"; do case $a in sha=*) sha=${a#sha=} ;; commit_title=*) title=${a#commit_title=} ;; esac; done
+        new=$(git -C "$O" commit-tree "$sha^{tree}" -p refs/heads/main -m "$title") || exit 1
+        git -C "$O" update-ref refs/heads/main "$new"
+        echo "MERGED $sha" > "$R/gh-state"
+        [ ! -e "$R/gh-merge-lost" ] || { echo "HTTP 502: reply lost" >&2; exit 1; } ;;
     esac ;;
 esac
 EOF
 chmod +x "$root/bin/fake-gh"
-export PATH=$root/bin:$PATH WORKTREE_GH=$root/bin/fake-gh
+export PATH=$root/bin:$PATH WORKTREE_GH=$root/bin/fake-gh FAKE_ROOT=$root
+export FERRY_VERIFY_EVIDENCE=$root/evidence WORKTREE_INSTALL='echo x >> "$FAKE_ROOT/installs"'
+installs() { if [[ -f $root/installs ]]; then wc -l < "$root/installs" | tr -d ' '; else echo 0; fi; }
 
 pass=0 fail=0
 check() { if eval "$2"; then echo "  ok    $1"; pass=$((pass + 1)); else echo "  FAIL  $1"; fail=$((fail + 1)); fi; }
@@ -59,6 +86,7 @@ mkdir -p "$p/bin" "$p/test/lib"
 cp "$here/bin/worktree" "$p/bin/"; cp "$here/test/lib/lane.sh" "$p/test/lib/"; cp "$here/Makefile" "$here/.gitignore" "$p/"
 printf 'module ferry\n\ngo 1.21\n' > "$p/go.mod"
 printf 'package main\n\nfunc main() {}\n' > "$p/main.go"
+printf 'package main\n\nconst protocol = 1\n' > "$p/machine.go"
 cat > "$p/test/probe.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -133,40 +161,88 @@ check "an unregistered lane's leftovers are untouched" '[[ -d /tmp/ferry-live-la
 check "an out-of-range entry is ignored" '[[ -e $p/tmp/worktrees/150 ]]'
 rm "$p/tmp/worktrees/150"; rmdir /tmp/ferry-live-lane-99
 
+echo "sync"
+check "sync refuses in a lane" '! (cd "$a" && bin/worktree sync) 2>/dev/null'
+check "sync installs main the first time" '(cd "$p" && bin/worktree sync) | grep "installing it" >/dev/null && [[ $(installs) == 1 ]]'
+check "sync again doesn't reinstall" '(cd "$p" && bin/worktree sync) | grep "installed$" >/dev/null && [[ $(installs) == 1 ]]'
+echo synced > "$p/synced.txt"; g -C "$p" add synced.txt; g -C "$p" commit -qm "main moved for sync"; g -C "$p" push -q origin main 2>/dev/null
+check "a failed install says NOT INSTALLED" '! (cd "$p" && WORKTREE_INSTALL=false bin/worktree sync) 2>&1 | grep -q "NOT INSTALLED" ; [[ $(installs) == 1 ]]'
+check "the next sync installs what the failed one didn't" '(cd "$p" && bin/worktree sync) | grep "installing it" >/dev/null && [[ $(installs) == 2 ]]'
+echo local > "$p/local.txt"; g -C "$p" add local.txt; g -C "$p" commit -qm "local only"
+check "sync refuses commits origin's main lacks" '! (cd "$p" && bin/worktree sync) 2>/dev/null'
+g -C "$p" reset -q --hard origin/main
+
 echo "land"
-echo change > "$a/change.txt"; g -C "$a" add change.txt; g -C "$a" commit -qm "lane change"
-check "teardown refuses a lane that isn't merged" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
-# origin's main moves on without the lane.
-echo main-change > "$p/main.txt"; g -C "$p" add main.txt; g -C "$p" commit -qm "main moved"; g -C "$p" push -q origin main 2>/dev/null
-local_main=$(g -C "$p" rev-parse main)
+printf 'package main\n\nconst protocol = 2\n' > "$a/machine.go"
+echo change > "$a/change.txt"; g -C "$a" add change.txt machine.go; g -C "$a" commit -qm "lane change"
+check "teardown refuses a lane that isn't merged" '! (cd "$p" && bin/worktree teardown a) >/dev/null 2>&1 && [[ -d $a ]]'
 echo wip > "$a/wip.txt"; g -C "$a" add wip.txt
 check "land refuses tracked changes in the lane" '! (cd "$a" && bin/worktree land) 2>/dev/null && ! g -C "$root/origin.git" rev-parse -q --verify refs/heads/a >/dev/null'
 g -C "$a" rm -q --cached wip.txt
 check "land without a NAME refuses in the primary" '! (cd "$p" && bin/worktree land) 2>/dev/null'
-check "land in the lane opens a pull request" '(cd "$a" && bin/worktree land) | grep -q "opened https://github.test/ferry/pull/1"'
+check "land refuses a lane behind origin's main and says to rebase" \
+  '! (cd "$a" && bin/worktree land) 2>"$root/err" && grep -q "git rebase origin/main" "$root/err" && ! grep -q reread "$root/err" && ! g -C "$root/origin.git" rev-parse -q --verify refs/heads/a >/dev/null'
+g -C "$a" rebase -q origin/main
+check "land refuses a tree no verify run stamped" '! (cd "$a" && bin/worktree land) 2>"$root/err" && grep -q "world.sh all" "$root/err"'
+mkdir -p "$FERRY_VERIFY_EVIDENCE/w1"; g -C "$a" rev-parse "HEAD^{tree}" > "$FERRY_VERIFY_EVIDENCE/w1/verified"
+check "a stamped lane opens a pull request titled by its commit" \
+  '(cd "$a" && bin/worktree land) | grep "opened its pull request" >/dev/null && grep -q "pr create.*--title lane change" "$root/gh.log"'
 check "an untracked file in the lane stayed out of the push" '[[ -f $a/wip.txt ]] && ! g -C "$root/origin.git" cat-file -e a:wip.txt 2>/dev/null'
 rm "$a/wip.txt"
-check "the pushed branch is the lane rebased onto origin's main" '[[ $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) && -f $a/main.txt ]]'
-check "the lane's commit kept its message" '[[ $(g -C "$root/origin.git" log -1 --format=%s a) == "lane change" ]]'
-check "main didn't move, here or on origin" '[[ $(g -C "$p" rev-parse main) == "$local_main" && $(g -C "$root/origin.git" rev-parse main) == "$local_main" ]]'
+check "the pushed branch is the lane's HEAD" '[[ $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) ]]'
+check "main didn't move on origin" '[[ $(g -C "$root/origin.git" rev-parse main) == $(g -C "$p" rev-parse main) ]]'
 echo more > "$a/more.txt"; g -C "$a" add more.txt; g -C "$a" commit -qm "more"
-# origin's main moves again, so this land's rebase rewrites what the first pushed.
-echo again > "$p/again.txt"; g -C "$p" add again.txt; g -C "$p" commit -qm "main again"; g -C "$p" push -q origin main 2>/dev/null; local_main=$(g -C "$p" rev-parse main)
-check "landing again from the primary updates the same pull request" '(cd "$p" && bin/worktree land a) | grep -q "open pull request" && [[ $(grep -c "pr create" "$root/gh.log") == 1 && $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) ]]'
-check "teardown refuses while the pull request is open" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
-echo "MERGED $(g -C "$a" rev-parse HEAD~1)" > "$root/gh-merged"
-check "teardown refuses when the merged head isn't the lane's HEAD" '! (cd "$p" && bin/worktree teardown a) 2>/dev/null && [[ -d $a ]]'
-echo "MERGED $(g -C "$a" rev-parse HEAD)" > "$root/gh-merged"
+check "land refuses two commits without --message" '! (cd "$a" && bin/worktree land --no-verify t) >/dev/null 2>"$root/err" && grep -q "pass --message FILE" "$root/err"'
+printf 'Land the lane change\n\nWhy it changed.\n' > "$root/msg"; printf 'The PR description.\n' > "$root/body"
+check "--message squashes the lane into one commit with that message, and updates the open PR" \
+  '(cd "$p" && bin/worktree land a --message "$root/msg" --body "$root/body" --no-verify "tests only") | grep "updated pull request #1" >/dev/null && [[ $(g -C "$a" rev-list --count origin/main..HEAD) == 1 && $(g -C "$a" log -1 --format=%s) == "Land the lane change" && $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) && $(grep -c "pr create" "$root/gh.log") == 1 ]]'
+check "the PR got the new title, the --body text, and the --no-verify reason" \
+  'grep -q "api -X PATCH repos/{owner}/{repo}/pulls/1 -f title=Land the lane change -f body=The PR description." "$root/gh.log" && grep -q "Not verified with verify-ferry.*tests only" "$root/gh.log"'
+echo "# a tooling change" >> "$p/bin/worktree"; g -C "$p" commit -qam "tooling moved"; g -C "$p" push -q origin main 2>/dev/null
+check "land names a tooling change on origin's main" '! (cd "$a" && bin/worktree land --no-verify t) >/dev/null 2>"$root/err" && grep -q "reread .claude/skills/worktree/SKILL.md" "$root/err"'
+g -C "$a" rebase -q origin/main
+check "landing a rebased lane force-pushes it" '(cd "$a" && bin/worktree land --no-verify t >/dev/null) && [[ $(g -C "$root/origin.git" rev-parse a) == $(g -C "$a" rev-parse HEAD) ]]'
+
+echo "merge"
+check "merge runs only in the primary" '! (cd "$a" && bin/worktree merge a) 2>/dev/null'
+echo 8 > "$root/gh-checks"
+check "merge refuses while checks run" '! (cd "$p" && bin/worktree merge a) 2>"$root/err" && grep -q "still running" "$root/err"'
+echo 1 > "$root/gh-checks"
+check "merge refuses failed checks" '! (cd "$p" && bin/worktree merge a) 2>"$root/err" && grep -q "didn.t pass" "$root/err"'
+echo 0 > "$root/gh-checks"
+echo extra > "$a/extra.txt"; g -C "$a" add extra.txt; g -C "$a" commit -qm "not landed"
+check "merge refuses a lane that moved past its PR's head" '! (cd "$p" && bin/worktree merge a) 2>"$root/err" && grep -q "Land again" "$root/err"'
+g -C "$a" reset -q --hard HEAD~1
+check "no merge was sent yet" '! grep -q "/merge" "$root/gh.log"'
+touch "$root/gh-merge-lost"; before=$(installs)
+(cd "$p" && bin/worktree merge a) >"$root/out" 2>&1 || true
+check "a merge whose reply is lost is sent once, pinned to the lane's HEAD" \
+  '[[ $(grep -c "pulls/1/merge" "$root/gh.log") == 1 ]] && grep -q "sha=$(g -C "$a" rev-parse HEAD)" "$root/gh.log" && grep -q "merged pull request #1" "$root/out"'
+check "origin's main got one squash commit with the PR number" \
+  '[[ $(g -C "$root/origin.git" log -1 --format=%s main) == "Land the lane change (#1)" && $(g -C "$root/origin.git" rev-parse "main^{tree}") == $(g -C "$a" rev-parse "HEAD^{tree}") ]]'
+check "merge synced the primary: main fast-forwarded and installed" \
+  '[[ $(g -C "$p" rev-parse main) == $(g -C "$root/origin.git" rev-parse main) && $(installs) == $((before + 1)) ]]'
+check "sync says when the protocol changed" 'grep -q "protocol went from 1 to 2" "$root/out"'
+check "merging again reports the merge without sending another" \
+  '(cd "$p" && bin/worktree merge a) | grep "already merged" >/dev/null && [[ $(grep -c "pulls/1/merge" "$root/gh.log") == 1 ]]'
+echo extra > "$a/extra.txt"; g -C "$a" add extra.txt; g -C "$a" commit -qm "after the merge"
+check "teardown refuses when the merged head isn't the lane's HEAD" '! (cd "$p" && bin/worktree teardown a) >/dev/null 2>&1 && [[ -d $a ]]'
+g -C "$a" reset -q --hard HEAD~1
 
 echo "teardown NAME"
 c=$(wt c); (cd "$c" && bin/worktree setup >/dev/null); echo junk > "$c/junk.txt"
-check "teardown refuses uncommitted changes" '! (cd "$p" && bin/worktree teardown c) 2>/dev/null && [[ -d $c ]]'
+check "teardown refuses uncommitted changes" '! (cd "$p" && bin/worktree teardown c) >/dev/null 2>&1 && [[ -d $c ]]'
 cn=$(sed -n 's/^WORKTREE_LANE=//p' "$c/worktree.env"); mkdir -p "/tmp/ferry-git-lane-$cn"
 (cd "$p" && bin/worktree teardown c --discard >/dev/null 2>&1)
 check "--discard removes it anyway, with its branch and lane" '[[ ! -d $c && ! -e $p/tmp/worktrees/$cn && ! -d /tmp/ferry-git-lane-$cn ]] && ! g -C "$p" rev-parse -q --verify refs/heads/c >/dev/null'
 (cd "$p" && bin/worktree teardown a >/dev/null 2>&1)
 check "a landed lane tears down" '[[ ! -d $a && ! -e $p/tmp/worktrees/98 && ! -d /tmp/ferry-git-lane-98 ]] && ! g -C "$p" rev-parse -q --verify refs/heads/a >/dev/null'
 check "the registry is empty" '[[ -z $(ls "$p/tmp/worktrees") ]]'
+
+echo "land, Markdown only"
+m=$(wt m); echo docs > "$m/README.md"; g -C "$m" add README.md; g -C "$m" commit -qm "docs"
+check "a Markdown-only lane lands with no verify run" '(cd "$m" && bin/worktree land) | grep "only Markdown changed" >/dev/null'
+g -C "$p" worktree remove --force "$m"; g -C "$p" branch -q -D m
 
 echo "$pass passed, $fail failed"
 (( fail == 0 ))
