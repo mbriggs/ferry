@@ -21,10 +21,18 @@
 \* moment ferry dies (Ctrl-C, or the laptop crashing; a suspended laptop keeps
 \* its ferry and its flock). A call the dead run made on kant can still be
 \* running there: `ferry remote` finishes its work and only then fails to
-\* write its reply. Pending holds that one call. It holds the task's lock on
-\* kant (lockRemoteCall in record.go), and a rerun's first kant call waits
-\* for it, so Deliver applies it before the next run starts. You opening the
-\* session can still come first.
+\* write its reply. Pending holds that one call. A `ferry remote` call holds
+\* the task's lock on kant (lockRemoteCall in record.go), and a rerun's first
+\* kant call waits for it, so Deliver applies it before the next run starts.
+\* You opening the session can still come first.
+\*
+\* The session copy is the exception (91684d8). rsync.go runs rsync on the
+\* laptop as a child of ferry, not through `ferry remote`, so it holds no
+\* lock on either side. Ctrl-C stops the whole process group, but a file
+\* whose data had reached kant's receiver is still renamed into place. If
+\* ferry alone dies (kill, the OOM killer), rsync keeps running, in either
+\* direction, and nothing kills it (no Pdeathsig). Its copy can land at any
+\* time, during the next run too.
 \*
 \* Any run can stop between two steps. Any call to kant can fail, or do its
 \* work and lose its reply. Calls on the laptop fail only before doing their
@@ -42,8 +50,8 @@ EXTENDS Naturals
 
 \* MaxGen bounds the record's generation, MaxV the number of versions.
 \* Faults = FALSE removes every crash and failed call: the happy path.
-\* DeadKinds: which calls a dead run can leave running on kant. {} turns
-\* that off; DeadCalls is everything the flock allows.
+\* DeadKinds: which calls a dead run can leave running. {} turns that off;
+\* DeadCalls is everything the flock allows.
 CONSTANTS MaxGen, MaxV, Faults, DeadKinds
 
 DeadCalls == {"put", "stop", "import", "stage", "place", "launch"}
@@ -70,7 +78,7 @@ VARIABLES
     sessV,     \* handoff(): sess, as the version it had (0 = nil)
     instV,     \* handoff()/finish(): installed, as the staged version (0 = nil)
     rerun,     \* this run took the stateLanding branch straight into finish()
-    pending    \* a call the dead run left running on kant, or none
+    pending    \* a call the dead run left running, or none
 
 vars == <<copy, stageTmp, ready, parkedV, running, userOn, latest, lin, forked, rec, pc, src, dst, runRec, sessV, instV, rerun, pending>>
 runVars == <<pc, src, dst, runRec, sessV, instV, rerun>>
@@ -157,6 +165,10 @@ ForkedNow == \E m \in Machines :
 
 Fork == forked' = (forked \/ ForkedNow')
 
+\* A dead call that holds lockRemoteCall, which the next run's first kant
+\* call waits for. The session rsync holds no lock.
+Locked == pending.kind \in DeadCalls \ {"import"}
+
 \* ---- the run -------------------------------------------------------------
 
 \* main.go: l.lockTask (one run at a time), then handoff(): hub.RecordGet,
@@ -165,7 +177,7 @@ Fork == forked' = (forked \/ ForkedNow')
 \* (choosePull, 933f57a).
 Start(s) ==
     /\ pc = "idle"
-    /\ pending = NoPending                       \* lockRemoteCall on kant
+    /\ ~Locked                                  \* lockRemoteCall on kant
     /\ \/ /\ Faults /\ Stop                      \* RecordGet fails
        \/ LET isRerun  == rec.state = "landing" /\ rec.owner = Other(s) /\ rec.from = s
               resuming == rec.state = "handing-off" /\ rec.from = s /\ rec.to = Other(s)
@@ -248,8 +260,9 @@ Work ==
     /\ UNCHANGED <<world, rec, pending>>
     /\ Fork
 
-\* src.FindSession again, so sess is what is sent, then rsync it into
-\* in/<task>/session on dst, replacing whatever an earlier run staged.
+\* src.FindSession again, so sess is what is sent, then sendSession: rsync
+\* (rsync.go) copies it into in/<task>/session on dst, over whatever an
+\* earlier run left there.
 Transfer ==
     /\ pc = "transfer"
     /\ \/ /\ copy[src] > 0                      \* "disappeared before it was sent"
@@ -263,10 +276,10 @@ Transfer ==
 
 \* dst.StageSession. installed is set only on success. If the stage
 \* directory is gone (a dead run's StageSession moved it out and removed
-\* it), its WalkDir fails.
+\* it), its WalkDir fails, after it has already emptied ready.
 Stage ==
     /\ pc = "stage"
-    /\ stageTmp[dst] = 0 => (Stop /\ UNCHANGED <<ready, stageTmp>>)
+    /\ stageTmp[dst] = 0 => (Stop /\ ready' = [ready EXCEPT ![dst] = 0] /\ UNCHANGED stageTmp)
     /\ stageTmp[dst] > 0 => \E o \in Outcomes(dst):
          /\ IF Applied(o) THEN StageEff(dst) ELSE UNCHANGED <<ready, stageTmp>>
          /\ IF o = "ok" THEN pc' = "commit" /\ instV' = stageTmp[dst] /\ UNCHANGED <<src, dst, runRec, sessV, rerun>>
@@ -372,10 +385,9 @@ Crash ==
     /\ UNCHANGED <<world, rec, pending>>
     /\ Fork
 
-\* The laptop's ferry dies while a call on kant is running. That call will
-\* still finish on kant, at a time of its choosing. An Import into kant only
-\* finishes if the whole stream had arrived; files.go renames each file into
-\* the stage directory before it checks the sums.
+\* The laptop's ferry dies while a call is running. That call will still
+\* finish, at a time of its choosing. The session rsync lands on either
+\* machine (see the top of this file); the other calls run on kant.
 InFlight ==
     CASE pc = "claim" /\ runRec.state # "handing-off"
            -> [NoPending EXCEPT !.kind = "put", !.m = "kant", !.gen = runRec.gen, !.new = ClaimRec]
@@ -384,7 +396,7 @@ InFlight ==
       [] pc \in {"finishPut", "finishPutExec"}
            -> [NoPending EXCEPT !.kind = "put", !.m = "kant", !.gen = runRec.gen, !.new = OwnedRec]
       [] pc = "stopAgent" /\ Remote(src)   -> [NoPending EXCEPT !.kind = "stop", !.m = src]
-      [] pc = "transfer" /\ Remote(dst)    -> [NoPending EXCEPT !.kind = "import", !.m = dst, !.v = copy[src]]
+      [] pc = "transfer" /\ copy[src] > 0  -> [NoPending EXCEPT !.kind = "import", !.m = dst, !.v = copy[src]]
       [] pc = "stage" /\ Remote(dst)       -> [NoPending EXCEPT !.kind = "stage", !.m = dst]
       [] pc = "finishPlace" /\ Remote(dst) /\ instV > 0 -> [NoPending EXCEPT !.kind = "place", !.m = dst]
       [] pc = "finishLaunch" -> [NoPending EXCEPT !.kind = "launch", !.m = dst]
@@ -397,7 +409,7 @@ CrashInFlight ==
     /\ UNCHANGED <<world, rec>>
     /\ Fork
 
-\* The call left running on kant finishes, against the state it finds then.
+\* The call left running finishes, against the state it finds then.
 Deliver ==
     /\ pending # NoPending
     /\ CASE pending.kind = "put"    -> PutEff(pending.gen, pending.new) /\ UNCHANGED <<copy, stageTmp, ready, parkedV, running, userOn>>

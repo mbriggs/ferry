@@ -20,20 +20,20 @@ description: TLA+ check that a handoff never runs two agents on one session, los
 
 ## Does the change touch it?
 
-The model covers this code, as of the sync commit below. Run `git diff <sync commit> -- handoff.go record.go session.go machine.go main.go rex.go` and compare the result against this table. `formal/check.sh` prints a `WARN` line when that diff isn't empty.
+The model covers this code, as of the sync commit below. Run `git diff <sync commit> -- handoff.go record.go session.go machine.go main.go rex.go rsync.go` and compare the result against this table. `formal/check.sh` prints a `WARN` line when that diff isn't empty.
 
 | Model action | Code |
 |---|---|
-| `Start` | `main.go` `cmdTo`/`cmdFrom` (`l.lockTask`, `remote.Task`; `choosePull` can pick a task with no record), then `handoff()`: `hub.RecordGet` into this run's `rec` (`runRec`), the `stateLanding` rerun branch, and the refusals (unfinished handoff, other owner), which run before the session step. Waits for `pending`, because the first kant call waits on `lockRemoteCall` (`record.go`, taken in `serveRemote`) |
-| `RerunFind` | the rerun branch's `resendIfResumed`: `src.FindSession` for `rec.Source`. If the copy grew, `src.Liveness` refuses while an agent has it open, else `sendSession` (`Transfer`, `Stage`) and the `landing` RecordPut (`Commit`) record the newer copy |
-| `Find` | `handoff()`: `src.FindSession` (with `KnownID`, the session the task last moved with) |
-| `DstLive` | `dst.Liveness`: "already has this session loaded", before the agent is stopped |
-| `StopAgentStep` | `settle`, then on kant `src.StopAgent` (the pane comes from the agent's environment, so it needs no record; once the agent exits it closes the record's Rex session if no blocks are left, which the model leaves out), `settle`, and `FindSession` again. On the laptop: "exit the agent, then run this again" |
-| `Claim` | "--- claim ---": the `handing-off` RecordPut that records `Source`. A resumed claim skips it |
-| `Work` | dehydrate, repo, snapshot, `moveRefs`, the `Attempt` RecordPut, `Apply`, extras, git hooks |
-| `Transfer` | the second `src.FindSession` ("disappeared before it was sent"), then `sendSession`: `transfer(...)` with `Clean: true` into `in/<task>/session` |
-| `Stage` | `dst.StageSession` into `in/<task>/ready`. `installed` is set only on success |
-| `Commit` | "--- commit ---": the `landing` RecordPut, which sets `rec.Source` to the session sent and returns err on failure |
+| `Start` | `main.go` `cmdTo` (`chooseTo`)/`cmdFrom` (`unlockDeadClaude`, which the model leaves out, then `l.lockTask`, `remote.Task`; `choosePull` can pick a task with no record), then `handoff()`: `hub.RecordGet` into `m.rec` (`runRec`), the `stateLanding` rerun branch, `m.mayHandOff` (unfinished handoff, other owner), and `m.checkReceiver` (a different repo, or receiver work the handoff would overwrite; saving that work to a branch touches only git), which run before `m.stopAgent`. `--check` returns before `stopAgent` stops anything, which the model folds into a stop with no effect. Waits for a `Locked` dead call, because the first kant call waits on `lockRemoteCall` (`record.go`, taken in `serveRemote`). A dead session rsync holds no lock |
+| `RerunFind` | the rerun branch's `m.resendIfResumed`: `src.FindSession` for `rec.Source`. If the copy grew, `src.Liveness` refuses while an agent has it open, else `m.sendSession` (`Transfer`, `Stage`) and the `landing` `m.save()` (`Commit`) record the newer copy |
+| `Find` | `m.stopAgent`: `src.FindSession` (with `KnownID`, the session the task last moved with) |
+| `DstLive` | `m.stopAgent`: `dst.Liveness`, "already has this session loaded", before the agent is stopped |
+| `StopAgentStep` | `m.stopAgent`: `settle`, then on kant `src.StopAgent` (the pane comes from the agent's environment, so it needs no record; a Claude in its own worktree gets SIGTERM instead of `/exit`; once the agent exits it closes the record's Rex session if no blocks are left, which the model leaves out), `settle`, and `FindSession` again. On the laptop it refuses: "exit the agent, then run this again", or "close its pane" for a Claude in its own worktree |
+| `Claim` | `m.claim`: the `handing-off` `m.save()` that records `Source`. A resumed claim skips it |
+| `Work` | `m.dehydrate`, `m.sendCode` (repo, snapshot, `moveRefs`, the `Attempt` `m.save()`, `Apply`, `syncRemotes`), `m.sendExtras` (rsync), `m.sendGitHooks` |
+| `Transfer` | `m.stageSession`: the second `src.FindSession` ("disappeared before it was sent"), then `m.sendSession`: `rsyncTo` (`rsync.go`) into `in/<task>/session`, run on the laptop as a child of ferry |
+| `Stage` | `dst.StageSession` into `in/<task>/ready`. It empties `ready` before it walks the stage directory, so a missing stage directory fails with `ready` empty. `installed` is set only on success |
+| `Commit` | `m.commit`: the `landing` `m.save()`, which sets `rec.Source` to the session sent and returns err on failure |
 | `FinishPlace`, `PlaceEff` | `finish()`: `dst.PlaceSession`: nil if `ready` is gone, refuses while `Liveness` sees the session loaded, else parks the receiver's copy to `parked/<task>-replaced-*` and moves `ready` in. The source keeps its copy |
 | `FinishRestore` | the restore hook, then the branch: `Launch` on kant, exec here on the laptop (a terminal, no `--no-launch`), or print the resume command |
 | `ExecLive` | on the laptop, `dst.Liveness` ("already running here; not starting another"), then the confirm when the handoff changed Claude's config (`configChanges`). A no prints the resume command |
@@ -43,12 +43,12 @@ The model covers this code, as of the sync commit below. Run `git diff <sync com
 | `StageEff`, `PlaceEff`, `LaunchEff`, `StopEff` | what `session.go` and `rex.go` do when the call runs |
 | `running`, `userOn` | agents `Liveness` sees: `~/.claude/sessions/<pid>.json`, or Codex's thread lock. `userOn` marks one you opened |
 | `Outcomes`, `Remote` | `machine.go` `Remote.call`: a kant call can fail, or do its work and lose its reply |
-| `CrashInFlight`, `Deliver` | a `ferry remote` call (including an `Import` whose stream had fully arrived) still running on kant after the laptop's ferry died. It holds `lockRemoteCall` until it finishes |
+| `CrashInFlight`, `Deliver`, `Locked` | a `ferry remote` call still running on kant after the laptop's ferry died, which holds `lockRemoteCall` until it finishes. Or the session `rsync` from `sendSession`, on either machine: Ctrl-C stops it with ferry, but a file kant's receiver already has is still renamed in, and when ferry alone dies (kill, the OOM killer) rsync runs on to the end. It holds no lock, so it can land during the next run |
 | `Open`, `AgentTurn`, `AgentExit` | you opening the session between runs and leaving it open, and any agent taking a turn |
 
-If the diff changes the order of these calls, what a failure does (return, or print and continue), which machine a call runs on, what a call moves, what `Liveness` can see, when `Launch` returns, when ferry starts an agent, or what either lock excludes, the change touches the model. Changes to path rewriting, hook prompts, extras planning, git snapshots, transfer checksums, ssh options, session picking in `pick.go`, or step timing do not.
+If the diff changes the order of these calls, what a failure does (return, or print and continue), which machine a call runs on, what a call moves, what `Liveness` can see, when `Launch` returns, when ferry starts an agent, or what either lock excludes, the change touches the model. Changes to path rewriting, hook prompts, extras planning, git snapshots, rsync's flags, ssh options, session picking in `pick.go`, or step timing do not.
 
-**Sync commit: `2d5f50dfd3b61d9f6be2fedcc9feb6be4df81525`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
+**Sync commit: `7e794b7597dd46caee5ad7783b39033f3a57ecc5`.** At that commit, the model matches the code in the table. Move the sync commit forward only after you have reread every row against the code at the new commit, and confirmed that the model describes it.
 
 ## Run it
 
@@ -56,7 +56,7 @@ If the diff changes the order of these calls, what a failure does (return, or pr
 formal/check.sh
 ```
 
-It takes about 30 seconds. It needs Java 11 or later and mise, and it installs TLC 1.7.4 through mise, pinned by checksum, on the first run. Set `TLA2TOOLS=/path/to/tla2tools.jar` to skip mise. `formal/check.sh OneAgent` checks one invariant.
+It takes about a minute. It needs Java 11 or later and mise, and it installs TLC 1.7.4 through mise, pinned by checksum, on the first run. Set `TLA2TOOLS=/path/to/tla2tools.jar` to skip mise. `formal/check.sh OneAgent` checks one invariant.
 
 There are three modes:
 
@@ -91,7 +91,7 @@ Mirror the change in the matching action, keeping one action per call that can f
 
 ## Current findings
 
-None. `known-findings` lists no line.
+- **overlap NoLostTurns, held by `-import`.** A session rsync left running by a dead `ferry to` can land after the rerun's own rsync and before its `StageSession`. You run `ferry to kant`, and ferry dies while `sendSession`'s rsync copies the session, but the rsync keeps going (ferry was killed on its own, not by Ctrl-C). You open the session on the laptop, add a turn, and exit. You rerun `ferry to kant`. It finds the newer copy and rsyncs it into `in/<task>/session`, and then the old rsync renames the older copy over it. `StageSession` stages the older copy, `m.commit` records the newer one as `Source`, and `PlaceSession` makes the older copy live on kant. The agent on kant resumes without your turn. The laptop still has it, until the next `ferry from kant` parks the laptop's copy. Nothing notices: `resendIfResumed` runs only on a rerun of a `landing` record. Since 91684d8, which replaced the `ferry remote import` call (under `lockRemoteCall`) with rsync. The window needs ferry killed without its process group, and the old rsync still running after you have added a turn and rerun, so a large session on a slow link.
 
 Fixed or gone since the first version of this model:
 
@@ -106,8 +106,9 @@ Fixed or gone since the first version of this model:
 ## What it leaves out
 
 - The transcript is one file, the main `.jsonl`, and each call that moves it is one `os.Rename`. Subagent directories, file history, and the project memory folder aren't modeled.
-- A dead run's call lands all at once, before the next run starts, so the model doesn't split a call against your own steps.
+- A dead run's call lands all at once. A `ferry remote` call lands before the next run starts; the session rsync can land at any step. The model doesn't split a call against your own steps, and while one dead call is pending, a second crash leaves nothing running.
 - You open the session only between runs. It doesn't model `--force`, or you opening an agent while a ferry run is in progress (the liveness checks are for that). It also leaves out more than one call left running on kant at once, the restore hook running twice, the difference between Codex's lock and Claude's registry file, `StageSession` finding its stage directory present but empty, and an agent writing during the transfer.
 - `pick.go` (which task and session `ferry from` picks) and `FindSession`'s choice between the worktree's newest session and the one the task last moved with. The model has one session.
+- A machine with copies of one Claude transcript in two project folders, which Claude leaves when it refiles a worktree session (6f2e31c). `FindSession` by id takes the newest, and `PlaceSession` parks the others. The model has one copy per machine.
 - Code, extras, git hooks and the restore and dehydrate hooks are folded into `Work` and `FinishRestore`.
 - `known-findings` holds at the default bounds. `MAXGEN=18 formal/check.sh` checks three round trips. A new failure there means two round trips hid something: read it before you change any line.
