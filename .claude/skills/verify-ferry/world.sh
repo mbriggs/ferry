@@ -7,7 +7,8 @@
 # wrong host name or a missing --no-launch fails instead of reaching a real
 # machine, Rex, or a real agent.
 #
-# usage: world.sh new [--hooks]          create a world, print its root
+# usage: world.sh all                    check the core journeys in a new world; stamp the tree for land
+#        world.sh new [--hooks]          create a world, print its root
 #        world.sh doctor ROOT            health check; changes nothing a later check reads
 #        world.sh rebuild ROOT           rebuild the binary after editing ferry's source
 #        world.sh ferry ROOT [--as laptop|kant] [-C DIR] ARGS...
@@ -170,7 +171,7 @@ cmd_doctor() {
     && ok "machine names laptop / kant" || no "machine names wrong"
   [[ $(cat "$laptop/.config/ferry/hosts") == "kant exec:$kant" ]] \
     && ok "laptop reaches kant through exec:, not ssh" || no "laptop hosts file doesn't point into this world"
-  if out=$(detached env HOME="$laptop" PATH="$root/bin:$PATH" "$ferry" ls kant </dev/null 2>&1); then ok "ferry ls kant: $(echo "$out" | head -1)"
+  if out=$(detached env HOME="$laptop" SHELL= PATH="$root/bin:$PATH" "$ferry" ls kant </dev/null 2>&1); then ok "ferry ls kant: $(echo "$out" | head -1)"
   else no "ferry ls kant failed: $out"; fi
   if tmux -L "$sock" has-session 2>/dev/null; then
     ok "tmux server -L $sock is up (pane: $(tmux -L "$sock" display -p -t ferry '#{pane_current_command}' 2>/dev/null))"
@@ -185,7 +186,7 @@ cmd_ferry() {
   log=$ev/$(seq_next)-$as-ferry-$(label_of "${args[*]}").log
   echo "\$ cd $dir && HOME=$h ferry ${args[*]}" > "$log"
   # detached: no controlling terminal, so ferry's /dev/tty prompts answer no.
-  (cd "$dir" && detached env HOME="$h" PATH="$root/bin:$PATH" "$ferry" "${args[@]}" </dev/null >>"$log" 2>&1) || rc=$?
+  (cd "$dir" && detached env HOME="$h" SHELL= PATH="$root/bin:$PATH" "$ferry" "${args[@]}" </dev/null >>"$log" 2>&1) || rc=$?
   echo "[exit $rc]" >> "$log"
   cat "$log"
   return $rc
@@ -198,7 +199,7 @@ cmd_tty() {
   for a in "${args[@]}"; do q+=("$(printf '%q' "$a")"); done
   tmux -L "$sock" kill-session -t ferry 2>/dev/null || true
   tmux -L "$sock" new-session -d -s ferry -x 200 -y 50 -c "$dir" \
-    "env HOME=$(printf %q "$h") PATH=$(printf %q "$root/bin:$PATH") $ferry ${q[*]}; echo \"[exit \$?]\"; sleep 86400"
+    "env HOME=$(printf %q "$h") SHELL= PATH=$(printf %q "$root/bin:$PATH") $ferry ${q[*]}; echo \"[exit \$?]\"; sleep 86400"
   echo "started in tmux -L $sock (session ferry); read it with: world.sh screen $root"
 }
 
@@ -277,8 +278,75 @@ cmd_clean() {
   echo "removed $root; evidence kept in $ev"
 }
 
+# all: drive hand-off, bring-back and remotes in a new world with no
+# terminal, checking both homes after each step. When every check passes it
+# writes the committed tree it built from to $ev/verified, the stamp
+# bin/worktree land looks for, and cleans the world. A failure keeps it.
+cmd_all() {
+  [[ -z $(cd "$repo" && git status --porcelain) ]] \
+    || die "all stamps the committed tree, so commit or drop every change in $repo first"
+  local tree r out rc fails=0 rec t
+  tree=$(cd "$repo" && git rev-parse 'HEAD^{tree}')
+  r=$(cmd_new | tail -1)
+  load "$r"
+  check() {
+    local line="ok    $1"
+    eval "$2" || { line="FAIL  $1"; fails=$((fails + 1)); }
+    echo "$line" | tee -a "$ev/all.txt"
+  }
+  step() { rc=0; out=$(cmd_ferry "$root" "$@" 2>&1) || rc=$?; }
+  record() { jq -r "$1" "$kant"/.local/state/ferry/tasks/*.json; }
+  t() { echo "$1/.claude/projects/$(slug "$2")/$SID.jsonl"; }
+
+  check "doctor passes" 'cmd_doctor "$root" >/dev/null'
+  local before_status before_staged before_unstaged
+  before_status=$(g -C "$wt" status --porcelain) before_staged=$(g -C "$wt" diff --cached) before_unstaged=$(g -C "$wt" diff)
+
+  step to kant --yes --no-launch
+  check "to-code: ferry to kant exits 0" '[[ $rc == 0 ]] && grep -q "kant owns demo" <<<"$out"'
+  check "to-code: kant has the laptop's HEAD, index and working tree" \
+    '[[ $(g -C "$kwt" rev-parse HEAD) == $(g -C "$wt" rev-parse HEAD) && $(g -C "$kwt" status --porcelain) == "$before_status" && $(g -C "$kwt" diff --cached) == "$before_staged" && $(g -C "$kwt" diff) == "$before_unstaged" ]]'
+  check "to-extras: .env arrived 0600 and node_modules stayed" '[[ $(mode_of "$kwt/.env") == 600 && ! -e $kwt/node_modules ]]'
+  check "to-session: kant's transcript has only kant cwds; the laptop kept its own" \
+    '! grep -q "\"cwd\":\"$wt" "$(t "$kant" "$kwt")" && grep -q "\"cwd\":\"$kwt\"" "$(t "$kant" "$kwt")" && [[ -f $(t "$laptop" "$wt") ]]'
+  check "to-record: kant owns the task" '[[ $(record "[.owner,.state]|join(\" \")") == "kant owned" ]]'
+  check "remotes-fresh: kant has origin and main tracks origin/main" \
+    '[[ $(g -C "$kwt" remote get-url origin) == "$root/origin.git" && $(g -C "$kwt" rev-parse --abbrev-ref "main@{upstream}") == origin/main ]]'
+
+  step to kant --yes --no-launch
+  check "to-refuse-owner: a second ferry to kant refuses" '[[ $rc != 0 ]] && grep -q "kant owns demo, not laptop" <<<"$out"'
+
+  cmd_kant_work "$root" >/dev/null
+  rm "$kwt/.env"
+  step -C /tmp from kant demo --yes
+  check "from-code: ferry from kant exits 0" '[[ $rc == 0 ]] && grep -q "laptop owns demo" <<<"$out"'
+  check "from-code: kant's commit and edit came back, the laptop's index survived" \
+    '[[ $(g -C "$wt" log -1 --format=%s) == "work on kant" && $(tail -1 "$wt/app.txt") == "v4 edited on kant" && $(g -C "$wt" diff --cached --name-only | xargs) == "app.txt gone.txt" && -f $wt/untracked.txt ]]'
+  check "from-extras-delete: .env is gone from the laptop and parked" \
+    '[[ ! -e $wt/.env ]] && find "$laptop/.local/state/ferry/parked" -name .env | grep -q .'
+  check "from-session: the laptop's transcript has kant's turn with a laptop cwd" \
+    'tail -1 "$(t "$laptop" "$wt")" | grep -q "The codeword is HERON" && tail -1 "$(t "$laptop" "$wt")" | grep -q "\"cwd\":\"$wt\""'
+  check "from-record: the laptop owns the task" '[[ $(record .owner) == laptop ]]'
+  check "remotes-quiet: nothing to sync prints no remotes line" '! grep -q "^remotes" <<<"$out"'
+
+  step to kant --yes --no-launch
+  g -C "$kwt" remote set-url origin https://example.invalid/elsewhere.git
+  step -C /tmp from kant demo --yes
+  check "remotes-declined: a URL kant changed doesn't reach the laptop with --yes" \
+    '[[ $rc == 0 && $(g -C "$wt" remote get-url origin) == "$root/origin.git" ]] && grep -q "kept laptop'"'"'s remotes" <<<"$out"'
+
+  if (( fails )); then
+    echo "$fails checks failed; the world is kept at $root, evidence in $ev" >&2
+    return 1
+  fi
+  echo "$tree" > "$ev/verified"
+  echo "all checks passed; stamped tree $tree in $ev/verified"
+  cmd_clean "$root" >/dev/null
+}
+
 c=${1:-}; shift || true
 case $c in
+  all) cmd_all "$@" ;;
   new) cmd_new "$@" ;;
   doctor) cmd_doctor "$@" ;;
   rebuild) cmd_rebuild "$@" ;;
@@ -292,5 +360,5 @@ case $c in
   state) cmd_state "$@" ;;
   backdate) backdate "$@" ;;
   clean) cmd_clean "$@" ;;
-  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

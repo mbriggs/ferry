@@ -1,0 +1,6 @@
+interface:
+  display_name: "Worktree lanes"
+  short_description: "Work in a ferry lane, land it as one PR, then clean it up"
+  default_prompt: "Use $worktree to make this change in its own lane and land it as a PR."
+policy:
+  allow_implicit_invocation: true

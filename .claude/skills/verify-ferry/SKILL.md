@@ -95,6 +95,12 @@ A proof:
 
 `--no-launch` skips only the Rex launch: ferry prints the `resume` line instead. Every other step, including hooks and the session install, runs normally.
 
+## The landing check
+
+`bin/worktree land` refuses a commit whose tree no `world.sh all` run has passed, unless the commit changes only Markdown. `$W all` builds a new world, drives hand-off, bring-back, and remotes with no terminal, and checks both homes after each step. When every check passes, it writes the tree to `<evidence>/verified` and cleans the world. When a check fails, it keeps the world and names it.
+
+Run it last, after the feature files your change touches, with nothing uncommitted, since it stamps `HEAD`'s tree. A rebase changes the tree, so rebase first and run it again. It covers the journeys every change can break. It doesn't replace driving the features your change touches, or the prompts that need the tmux pane.
+
 ## Cleanup
 
 ```
