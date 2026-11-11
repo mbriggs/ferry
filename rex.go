@@ -35,10 +35,14 @@ type LaunchResult struct {
 // AcceptTrust is set (the folder was trusted on the sending machine), it
 // answers the agent's folder-trust prompt, which would otherwise leave an
 // unattended agent waiting. Claude's prompt defaults to "No, exit", so it
-// needs Down before Enter; Codex defaults to trusting.
+// needs Down before Enter; Codex defaults to trusting. A sandbox (see
+// isSandbox) answers the prompt for any folder.
 func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
 	cwd := l.abs(q.CwdRel)
 	trusted := (q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))
+	if l.isSandbox() {
+		q.AcceptTrust = true
+	}
 	if trusted {
 		q.AcceptTrust = false // there's no prompt to answer
 	} else if !q.AcceptTrust {
@@ -56,12 +60,19 @@ func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
 // register within launchTimeout has its Rex session killed, and the launch
 // fails.
 func (l *Local) launchRex(q LaunchReq) (string, error) {
-	// finish() checks this too, but a Launch left running by a ferry that
-	// died can reach here after you opened the session yourself.
-	if live, err := l.Liveness(q.Session); err != nil {
-		return "", err
-	} else if live.Live && !live.Settling {
-		return "", fmt.Errorf("%s is already running here (%s); not starting another", short(q.Session.ID), live.Detail)
+	// A new task (--prompt) has no session yet: nothing to check for or to
+	// wait on.
+	fresh := q.Session.ID == ""
+	if !fresh {
+		// finish() checks this too, but a Launch left running by a ferry that
+		// died can reach here after you opened the session yourself.
+		live, err := l.Liveness(q.Session)
+		if err != nil {
+			return "", err
+		}
+		if live.Live && !live.Settling {
+			return "", fmt.Errorf("%s is already running here (%s); not starting another", short(q.Session.ID), live.Detail)
+		}
 	}
 	args := append([]string{"new", q.Name, "-c", l.abs(q.CwdRel), "--window", q.Agent, "--json", "--"}, q.Argv...)
 	out, err := rexRun(l.Home, args...)
@@ -79,6 +90,9 @@ func (l *Local) launchRex(q LaunchReq) (string, error) {
 	}
 	if q.AcceptTrust && len(created.InitialWindows) > 0 && len(created.InitialWindows[0].BlockIDs) > 0 {
 		answerTrust(created.SessionID, created.InitialWindows[0].BlockIDs[0], q.Agent)
+	}
+	if fresh {
+		return created.SessionID, nil
 	}
 	deadline := time.Now().Add(launchTimeout)
 	for {
