@@ -28,8 +28,10 @@ dist:
 	cd dist && shasum -a 256 ferry-* > SHA256SUMS
 
 # Rebuild for every platform and put this build on each host in
-# ~/.config/ferry/hosts that runs a different one.
+# ~/.config/ferry/hosts that runs a different one. The hosts are real
+# machines, so a lane asks first.
 push: build dist
+	$(ROOT)/bin/worktree guard --confirm "make push"
 	./ferry push
 
 test:

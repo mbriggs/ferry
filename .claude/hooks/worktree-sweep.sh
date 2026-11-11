@@ -11,6 +11,7 @@ cat >/dev/null
 mkdir -p "$root/tmp"
 
 if [ "$1" = "--later" ]; then
+  # shellcheck disable=SC2016 # the inner shell expands $1
   nohup sh -c 'sleep 30; cd "$1" && bin/worktree teardown --stale' sh "$root" \
     >>"$root/tmp/worktree-sweep.log" 2>&1 </dev/null &
   exit 0
