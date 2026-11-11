@@ -1,0 +1,4 @@
+go test fuzz v1
+string("{\"q\":\"/home/m/\",\"q\":\"\"}")
+string("/home")
+string("/0")
