@@ -152,7 +152,7 @@ func handoff(src, dst, hub Machine, t task, opts handoffOpts) error {
 	// lands, so finish() can tell what the handoff changed.
 	var cfgBefore map[string]string
 	if lm, ok := dst.(*Local); ok && sess != nil && sess.Agent == agentClaude {
-		cfgBefore = claudeConfig(claudeDirs(lm.abs(t.WtRel), lm.abs(mustRel(m.si.Home, sess.Cwd))))
+		cfgBefore = claudeConfig(lm.Home, claudeDirs(lm.abs(t.WtRel), lm.abs(mustRel(m.si.Home, sess.Cwd))))
 	}
 
 	if err := m.dehydrate(); err != nil {
@@ -214,7 +214,14 @@ func (m *move) mayHandOff() (bool, error) {
 	case rec.State == stateHandingOff && !m.opts.Force:
 		return false, fmt.Errorf("a handoff %s -> %s is unfinished; finish it from that direction, or pass --force", rec.From, rec.To)
 	case rec.State == stateLanding && !m.opts.Force:
-		return false, fmt.Errorf("the handoff %s -> %s hasn't finished; rerun it first", rec.From, rec.To)
+		// Landing means the task moved and only the launch is left, which a
+		// rerun retries. One that keeps failing (an agent waiting at a
+		// prompt) ends with --no-launch, which finishes without starting it.
+		finish := "ferry to " + fmt.Sprint(m.hub)
+		if rec.To != fmt.Sprint(m.hub) {
+			finish = "ferry from " + fmt.Sprint(m.hub) + " " + t.Name
+		}
+		return false, fmt.Errorf("the handoff %s -> %s hasn't finished; rerun `%s` first, or `%s --no-launch` to finish it without starting the agent", rec.From, rec.To, finish, finish)
 	case rec.Owner != si.Name && !m.opts.Force:
 		return false, fmt.Errorf("%s owns %s, not %s; use `ferry from %s %s`", rec.Owner, t.Name, si.Name, rec.Owner, t.Name)
 	}
@@ -332,6 +339,9 @@ func (m *move) stopAgent() (*Session, error) {
 		return nil, fmt.Errorf("%s already has this session loaded (%s)", di.Name, live.Detail)
 	}
 	have, want := agentVersion(si, sess.Agent), agentVersion(di, sess.Agent)
+	if sess.Version != "" {
+		have = sess.Version
+	}
 	switch {
 	case have == "" || want == "":
 		warn("versions", "%s version unknown on one side (here %q, %s %q); not checked", sess.Agent, si.Claude+si.Codex, di.Name, want)
@@ -429,6 +439,12 @@ func (m *move) sendCode() (SnapshotResult, error) {
 	if ds.Exists && len(ds.Roots) > 0 && !sharesRoot(ss.Roots, ds.Roots) {
 		return SnapshotResult{}, m.differentRepo()
 	}
+	// The snapshot comes first: it can refuse (a detached HEAD, a nested
+	// checkout git can't carry), and a refusal shouldn't leave a new repo on dst.
+	snap, err := src.Snapshot(SnapshotReq{WtRel: t.WtRel, Task: t.Key})
+	if err != nil {
+		return SnapshotResult{}, err
+	}
 	// A repo still on the placeholder branch was created by an earlier,
 	// interrupted run; finish creating it the same way.
 	fresh := !ds.Exists || len(ds.Roots) == 0 || ds.Branch == placeholderBranch
@@ -445,10 +461,6 @@ func (m *move) sendCode() (SnapshotResult, error) {
 		}
 	} else {
 		step("repo", "%s: %s exists, same history", di.Name, t.RepoRel)
-	}
-	snap, err := src.Snapshot(SnapshotReq{WtRel: t.WtRel, Task: t.Key})
-	if err != nil {
-		return SnapshotResult{}, err
 	}
 	step("snapshot", "branch %s at %s, %d changed paths", snap.Branch, snap.Base[:7], snap.Dirty)
 	ref := "+refs/ferry/" + t.Key + "/*:refs/ferry/" + t.Key + "/*"
@@ -925,7 +937,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 		// changed what it loads here, starting it needs a yes on this run.
 		var changed []string
 		if lm, ok := dst.(*Local); ok && installed.Agent == agentClaude {
-			changed = configChanges(lm.Home, cfgBefore, claudeConfig(claudeDirs(lm.abs(t.WtRel), installed.Cwd)))
+			changed = configChanges(lm.Home, cfgBefore, claudeConfig(lm.Home, claudeDirs(lm.abs(t.WtRel), installed.Cwd)))
 			if len(changed) > 0 {
 				warn("claude", "config Claude loads here, changed by the handoff: %s", listNames(changed))
 			}
@@ -968,7 +980,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 			// the launch. A rerun that finds the agent running, because it
 			// was started by hand on di, just finishes.
 			bad("launch", "failed: %v", err)
-			warn("next", "run `%s` again to retry, or on %s: cd ~/%s && %s", m.command(), di.Name, cwdRel, resumeCommand(argv))
+			warn("next", "run `%s` again to retry, `%s --no-launch` to finish without starting it, or on %s: cd ~/%s && %s", m.command(), m.command(), di.Name, cwdRel, resumeCommand(argv))
 			return errors.New("the task moved but the agent didn't start")
 		}
 		rexSession = launched.Session

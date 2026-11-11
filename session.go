@@ -41,6 +41,10 @@ type Session struct {
 	Model          string   `json:"model,omitempty"`
 	Trusted        bool     `json:"trusted"`
 	Size           int64    `json:"size"`
+	// Version is the newest agent version that wrote the transcript, ""
+	// when it doesn't say. Claude can update itself while a session runs,
+	// so this, not the installed binary, is what the receiver must match.
+	Version string `json:"version,omitempty"`
 }
 
 type FindSessionReq struct {
@@ -199,7 +203,7 @@ func (l *Local) findClaude(q FindSessionReq) (*Session, error) {
 		cwd = l.abs(q.CwdRel)
 	}
 	rel := func(p string) string { r, _ := filepath.Rel(l.Home, p); return r }
-	s := &Session{Agent: agentClaude, ID: id, Cwd: cwd, WorkDir: info.lastCwd, Files: []string{rel(transcript)}}
+	s := &Session{Agent: agentClaude, ID: id, Cwd: cwd, WorkDir: info.lastCwd, Files: []string{rel(transcript)}, Version: info.version}
 	if proj := rel(filepath.Dir(transcript)); proj != filepath.Join(".claude", "projects", claudeSlug(cwd)) {
 		s.ProjDir = proj
 	}
@@ -358,16 +362,55 @@ func (l *Local) claudeTrusted(cwd string) bool {
 	if json.Unmarshal(data, &cfg) != nil {
 		return false
 	}
-	// Claude trusts a folder inside a trusted one, such as a worktree under
-	// the repo's .claude/worktrees, without asking.
+	trusted := func(dir string) bool { return cfg.Projects[dir].HasTrustDialogAccepted }
+	// Claude trusts a folder inside a trusted one, but inside a git checkout
+	// it looks no higher than the checkout's root: a repo in a trusted ~/src
+	// still asks, and a plain folder there doesn't. A linked worktree counts
+	// as its main checkout, so a session in one of Claude's worktrees under
+	// .claude/worktrees starts without asking once the repo is trusted.
+	top, main := gitRoots(cwd)
+	if main != "" {
+		// git resolves symlinks in main; the keys are the paths Claude ran in.
+		for dir, p := range cfg.Projects {
+			if p.HasTrustDialogAccepted && sameDir(dir, main) {
+				return true
+			}
+		}
+	}
 	for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
-		if cfg.Projects[dir].HasTrustDialogAccepted {
+		if trusted(dir) {
 			return true
 		}
-		if dir == filepath.Dir(dir) {
+		if dir == filepath.Dir(dir) || (top != "" && sameDir(dir, top)) {
 			return false
 		}
 	}
+}
+
+// gitRoots returns the root of the git checkout holding dir and, for a
+// linked worktree, its main checkout's root. Both are "" outside git.
+func gitRoots(dir string) (top, main string) {
+	out, err := git(dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")
+	if err != nil {
+		return "", ""
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		return "", ""
+	}
+	top = lines[0]
+	if common := lines[1]; filepath.Base(common) == ".git" && !sameDir(filepath.Dir(common), top) {
+		main = filepath.Dir(common)
+	}
+	return top, main
+}
+
+// sameDir reports whether a and b name the same folder, through symlinks
+// like macOS's /var -> /private/var, which git resolves and Claude's paths may not.
+func sameDir(a, b string) bool {
+	sa, errA := os.Stat(a)
+	sb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(sa, sb)
 }
 
 // codexTrusted reads `[projects."<cwd>"] trust_level = "trusted"` from

@@ -11,19 +11,19 @@ Don't use `/exit` and don't call `ExitWorktree` in this flow. If this session ma
 
 The laptop drives every handoff, in both directions, and only the laptop has `~/.config/ferry/hosts`. If that file is missing, or doesn't name HOST, this session runs on kant or another machine that doesn't drive handoffs. Stop, and tell the user to run `ferry from THIS-MACHINE TASK` on the laptop, with THIS-MACHINE from `cat ~/.config/ferry/name` (or `hostname -s`) and TASK the worktree's folder name. Don't try other host names, and don't suggest changing ssh or Remote Login settings.
 
-Claude Code's worktree isolation refuses a `rex run` whose arguments come from shell variables. So read the values first with `printenv REX_SESSION CLAUDE_PID CLAUDE_CODE_SESSION_ID`, and type them into the commands below as literal text. Below, SESSION, PID and ID stand for those three values, and WORKTREE for the worktree's path.
+Claude Code's worktree isolation refuses a `rex run` whose arguments come from shell variables, and one that runs `sh`. So read the values first with `printenv REX_SESSION; printenv CLAUDE_PID; printenv CLAUDE_CODE_SESSION_ID`, one name per call because macOS's printenv ignores every name after the first, and type them into the commands below as literal text. Below, SESSION, PID and ID stand for those three values, and WORKTREE for the worktree's path.
 
 1. Find the worktree: `git rev-parse --show-toplevel`. It must be under `~/src`. HOST is the machine the user named, usually kant.
 2. Check, and stop to tell the user if any check fails:
    - `command -v ferry` and `command -v rex` succeed.
-   - `printenv REX_SESSION CLAUDE_PID CLAUDE_CODE_SESSION_ID` prints all three.
+   - `printenv REX_SESSION; printenv CLAUDE_PID; printenv CLAUDE_CODE_SESSION_ID` prints all three.
    - `~/.claude/sessions/PID.json` names ID.
    - `ferry to HOST --session ID --check`, run in the worktree, succeeds. It runs every check that can refuse the handoff (ssh, ferry and agent versions, rsync on both machines, the task's owner) and stops before it stops anything. If it reports that HOST has work the handoff would overwrite, tell the user: the tab will offer to save that work to a branch on HOST first.
 3. Finish or stop your own background work (background Bash, Monitors, subagents). SIGTERM ends all of it. Uncommitted changes are fine; ferry moves them.
 4. Open the tab, on one line, with HOME as your home directory spelled out:
 
    ```
-   rex run -s SESSION -c WORKTREE --label "ferry to HOST" --keep-open --focus=false -- sh HOME/.claude/skills/ferry/after-exit.sh HOST PID ID WORKTREE
+   rex run -s SESSION -c WORKTREE --label "ferry to HOST" --keep-open --focus=false -- HOME/.claude/skills/ferry/after-exit.sh HOST PID ID WORKTREE
    ```
 
 5. End your turn at once, with one line: "A 'ferry to HOST' tab stops this session when this reply ends, then hands it off; its prompts are in that tab." Run no more tools.

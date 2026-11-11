@@ -23,8 +23,9 @@ import (
 // claudeConfig fingerprints that config for the project folders in dirs:
 // every file under <dir>/.claude except Claude's own worktrees,
 // <dir>/.mcp.json, and the files its settings and MCP servers run
-// (hookFiles). Keys are absolute paths, values sha256.
-func claudeConfig(dirs []string) map[string]string {
+// (hookFiles). Keys are absolute paths, values sha256. home is the home
+// that "~/" and $HOME name in those commands.
+func claudeConfig(home string, dirs []string) map[string]string {
 	out := map[string]string{}
 	for _, dir := range dirs {
 		cdir := filepath.Join(dir, ".claude")
@@ -45,7 +46,7 @@ func claudeConfig(dirs []string) map[string]string {
 		if sum, err := fileSHA(filepath.Join(dir, ".mcp.json")); err == nil {
 			out[filepath.Join(dir, ".mcp.json")] = sum
 		}
-		for _, f := range hookFiles(dir) {
+		for _, f := range hookFiles(home, dir) {
 			if sum, err := fileSHA(f); err == nil {
 				out[f] = sum
 			}
@@ -62,12 +63,12 @@ func claudeConfig(dirs []string) map[string]string {
 // count; a path like "$HERE/lib/env.sh" or "$(dirname "$0")/lib.sh" is
 // tried without its prefix.
 // Code a hook reaches without naming a file (make's Makefile, a package
-// script) isn't found.
-func hookFiles(dir string) []string {
+// script, a glob) isn't found.
+func hookFiles(home, dir string) []string {
 	var out, queue []string
 	seen := map[string]bool{}
 	add := func(text, base string) {
-		for _, p := range fileRefs(text, dir, base) {
+		for _, p := range fileRefs(text, home, dir, base) {
 			if !seen[p] && len(seen) < maxHookFiles {
 				seen[p] = true
 				out = append(out, p)
@@ -134,6 +135,7 @@ var (
 	pathToken = regexp.MustCompile(`[A-Za-z0-9_.~/+@%\\-]+`)
 	// What a script puts in front of a path to find its own folder or the
 	// project: "$HERE/", "${BASH_SOURCE%/*}/", "$(dirname "$0")/".
+	pyModule  = regexp.MustCompile(`(?:^|[\s,\[])-m[\s,]+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)`)
 	varPrefix = regexp.MustCompile("(\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[^}]*\\}|\\$\\([^()]*\\)|`[^`]*`)/")
 )
 
@@ -142,12 +144,25 @@ var (
 // dir that text names, because "cd tools && ./run.sh" runs tools/run.sh.
 // A name with a backslash counts both as written and as the shell reads it,
 // so `back\slash.sh` names backslash.sh too.
-func fileRefs(text, dir, base string) []string {
+func fileRefs(text, home, dir, base string) []string {
 	// Quotes go first: "$CLAUDE_PROJECT_DIR"/bin/x is one path.
-	text = strings.NewReplacer(`"`, "", "'", "", "${CLAUDE_PROJECT_DIR}", dir, "$CLAUDE_PROJECT_DIR", dir).Replace(text)
+	vars := []string{`"`, "", "'", "", "${CLAUDE_PROJECT_DIR}", dir, "$CLAUDE_PROJECT_DIR", dir}
+	if home != "" {
+		vars = append(vars, "${HOME}", home, "$HOME", home)
+	}
+	text = strings.NewReplacer(vars...).Replace(text)
+	// "python3 -m tools.server" runs tools/server.py, or a package's
+	// __main__.py; the dotted name never appears as a path.
+	for _, m := range pyModule.FindAllStringSubmatch(text, -1) {
+		mod := strings.ReplaceAll(m[1], ".", "/")
+		text += " " + mod + ".py " + mod + "/__main__.py " + mod + "/__init__.py"
+	}
 	text = varPrefix.ReplaceAllString(text, "")
 	var toks []string
 	for _, tok := range pathToken.FindAllString(text, -1) {
+		if home != "" && strings.HasPrefix(tok, "~/") {
+			tok = filepath.Join(home, tok[2:])
+		}
 		toks = append(toks, tok)
 		if u := shellUnescape(tok); u != tok {
 			toks = append(toks, u)
@@ -173,6 +188,24 @@ func fileRefs(text, dir, base string) []string {
 			}
 		}
 	}
+	// A named folder can be what runs: "node tools/server" runs its
+	// index.js, and a "directory" plugin marketplace's path holds plugins
+	// whose hooks Claude runs. So every file in one counts too.
+	var named []string
+	for _, b := range bases[2:] {
+		filepath.WalkDir(b, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || len(named) >= maxHookFiles {
+				return filepath.SkipDir
+			}
+			if d.IsDir() && (d.Name() == ".git" || d.Name() == "node_modules") {
+				return filepath.SkipDir
+			}
+			if d.Type().IsRegular() {
+				named = append(named, p)
+			}
+			return nil
+		})
+	}
 	var out []string
 	seen := map[string]bool{}
 	for _, tok := range toks {
@@ -184,6 +217,12 @@ func fileRefs(text, dir, base string) []string {
 			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
 				out = append(out, p)
 			}
+		}
+	}
+	for _, p := range named {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
 		}
 	}
 	return out

@@ -107,7 +107,18 @@ func TestHookWithARepoInterpreterNeverRuns(t *testing.T) {
 	os.MkdirAll(filepath.Join(wt, ".ferry"), 0o755)
 	os.MkdirAll(filepath.Join(wt, "tools"), 0o755)
 	os.WriteFile(filepath.Join(wt, "tools/interp"), []byte("#!/bin/sh\ntouch \"$HOME/pwned\"\n"), 0o755)
-	for _, shebang := range []string{"#!./tools/interp", "#!" + filepath.Join(wt, "tools/interp"), "#!/usr/bin/env ./tools/interp", "#!/usr/bin/env -S sh ./tools/interp"} {
+	// The same file by other names: a symlink outside the home that points
+	// into it, and on macOS /private/var (t.TempDir is under /var) and the
+	// /System/Volumes/Data firmlink, neither of which starts with the home's path.
+	link := filepath.Join(t.TempDir(), "link")
+	os.Symlink(home, link)
+	shebangs := []string{"#!./tools/interp", "#!" + filepath.Join(wt, "tools/interp"), "#!/usr/bin/env ./tools/interp", "#!/usr/bin/env -S sh ./tools/interp", "#!" + filepath.Join(link, "src/app/tools/interp")}
+	for _, prefix := range []string{"/private", "/System/Volumes/Data", "/System/Volumes/Data/private"} {
+		if p := prefix + filepath.Join(wt, "tools/interp"); exists(p) {
+			shebangs = append(shebangs, "#!"+p)
+		}
+	}
+	for _, shebang := range shebangs {
 		hook := shebang + "\necho harmless\n"
 		os.WriteFile(filepath.Join(wt, ".ferry/restore"), []byte(hook), 0o755)
 		l.Approve(hashHook([]byte(hook)))
