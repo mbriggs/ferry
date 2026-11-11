@@ -98,9 +98,17 @@ A proof:
 
 ## The landing check
 
-`bin/worktree land` refuses a commit whose tree no `world.sh all` run has passed, unless the commit changes only Markdown. `$W all` builds a new world, drives hand-off, bring-back, and remotes with no terminal, and checks both homes after each step. When every check passes, it writes the tree to `<evidence>/verified` and cleans the world. When a check fails, it keeps the world and names it.
+Every change needs a passing `all` run before it lands. `bin/worktree land` refuses a commit whose tree no `world.sh all` run has passed, unless the commit changes only Markdown. Run it from the checkout:
 
-Run it last, after the feature files your change touches, with nothing uncommitted, since it stamps `HEAD`'s tree. A rebase changes the tree, so rebase first and run it again. It covers the journeys every change can break. It doesn't replace driving the features your change touches, or the prompts that need the tmux pane.
+```
+.claude/skills/verify-ferry/world.sh all
+```
+
+It refuses to start while anything is uncommitted, untracked files included, since it stamps the committed tree, `HEAD^{tree}`. It then builds a new world, drives hand-off, bring-back, and remotes with no terminal, and checks both homes after each step. Each check prints `ok` or `FAIL` and goes into `<evidence>/all.txt`. When every check passes, it writes the tree to `<evidence>/verified`, the stamp `land` looks for, and cleans the world. When a check fails, it keeps the world and names it, and writes no stamp.
+
+`all` doesn't read this machine's setup. It runs with a new empty `HOME`, so git reads no user config, and `GIT_CONFIG_NOSYSTEM` drops the system's. It also sets `GOENV=off` and an empty `SHELL`, so ferry never asks a login shell for `PATH`. Its `PATH` holds only the directories of `go`, `git`, `rsync`, `jq`, and `perl`, then the system's own. It carries over only Go's toolchain and caches and the evidence root. Since the user's global gitignore doesn't apply, a file only that ignore hides counts as uncommitted.
+
+Run it last, after the feature files your change touches. A rebase changes the tree, so rebase first and run it again. It covers the journeys every change can break. It doesn't replace driving the features your change touches, or the prompts that need the tmux pane. The verify-handoff skill's TLA+ model check is separate and not part of landing.
 
 ## Cleanup
 

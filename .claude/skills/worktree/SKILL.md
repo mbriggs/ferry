@@ -7,6 +7,8 @@ description: Work on ferry in a worktree lane. Use before the first file write i
 
 A lane is a linked git worktree of ferry with its own names for everything the test scripts create. It has its own `./ferry` binary and its own `/tmp/ferry-*-lane-<n>` scratch directories. Its e2e probe is `~/src/ferry-e2e-probe-lane-<n>`, with that name's task record, and its Rex sessions are named `ferry-*-lane-<n>`. The primary checkout keeps the plain names. `bin/worktree info` prints the names the current checkout uses.
 
+`bin/worktree` is the shared script from the create-worktree-lanes skill. Don't edit it here; what ferry's lanes get lives in `bin/worktree.lane`.
+
 Make every change in a lane, not in the primary checkout.
 
 ## Creating a lane
@@ -18,14 +20,15 @@ Make every change in a lane, not in the primary checkout.
 
 ## Provisioning
 
-The first Bash command in a new worktree runs `bin/worktree setup`, which registers the lane, runs `make build`, and writes `worktree.env`. The hook then reports the lane's names. If setup fails, that one command is blocked and `tmp/worktree-setup.failed` holds the log. Read it, fix the cause (usually a build error at this commit), and run `bin/worktree setup` again. Until it succeeds, every script in `test/` that sources `test/lib/lane.sh` refuses to start.
+The first Bash command in a new worktree runs `bin/worktree setup`, which registers the lane, runs `make build`, and writes `worktree.env` with `FERRY_LANE_SUFFIX=-lane-<n>`. The hook then reports the lane's names. If setup fails, that one command is blocked and `tmp/worktree-setup.failed` holds the log. Read it, fix the cause (usually a build error at this commit), and run `bin/worktree setup` again. Until it succeeds, every script in `test/` that sources `test/lib/lane.sh` refuses to start.
 
 ## Commands in a lane
 
 - `make build`, `make test`, `go test ./...`, `make dist`, `formal/check.sh`, and the verify-ferry `world.sh` already write only inside the checkout or under `mktemp` names. They need nothing from the lane.
-- `test/e2e-local.sh`, `test/claude-resume.sh`, `test/codex-*.sh`, `test/git-snapshot.sh`, and `test/liveness.sh` source `test/lib/lane.sh` and use the lane's suffixed names. Teardown kills their Rex sessions by label and deletes what they left.
-- `make install` replaces `~/.local/bin/ferry`, the binary every real handoff runs. In a lane it asks for the branch name on the terminal, so it always refuses for an agent. In the primary, `bin/worktree sync` runs it after a merge.
-- Don't run the lane's `./ferry setup`, `ferry to`, or `ferry from` against the real home or kant. They act on real state, and nothing guards them. Use the verify-ferry skill's fake homes.
+- `test/e2e-local.sh`, `test/claude-resume.sh`, `test/claude-worktree.sh`, `test/codex-*.sh`, `test/git-snapshot.sh`, and `test/liveness.sh` source `test/lib/lane.sh` and use the lane's suffixed names. Teardown kills their Rex sessions by label and deletes what the scripts left behind.
+- `make install` replaces `~/.local/bin/ferry`, the binary every real handoff runs. In a lane it asks for the branch name on the terminal, so it always refuses for an agent. In the primary, `bin/worktree sync` runs it after `main` moves.
+- `make push` puts the lane's build on every host in `~/.config/ferry/hosts`. In a lane it asks for the branch name on the terminal, so it always refuses for an agent. Send the user to the primary.
+- Don't run the lane's `./ferry setup`, `ferry to`, `ferry from`, or `./ferry push` against the real home or kant. They act on real state, and nothing guards them. Use the verify-ferry skill's fake homes.
 
 ## The working directory
 
@@ -33,25 +36,28 @@ The env hook loads `worktree.env` for the checkout a command starts in. `cd <lan
 
 ## Commands that run in the primary
 
-A session isolated to a worktree can't run git against the primary. Call `ExitWorktree` with `keep`, run the command from the primary, then re-enter the lane with `EnterWorktree` and its path.
+`merge`, `sync`, and `teardown NAME` run in the primary. A session isolated to a worktree can't run git against the primary. If this session entered the lane with `EnterWorktree`, call `ExitWorktree` with `keep`, run the command from the primary, then re-enter the lane with `EnterWorktree` and its path. A subagent returns the command to its parent to run. A session started with `claude --worktree` asks the user to run it from the primary.
 
 ## Landing
 
 A lane lands as one commit, through a pull request that you own until it merges. Don't commit, merge, or push to the primary's `main` by hand. `bin/worktree land`, `merge`, and `sync` do those in the steps below.
 
-1. In the lane, run `git fetch origin`, then `git rebase origin/main` if the lane is behind. `land` refuses a lane that's behind, because a rebase changes the tree that verification stamped. When `origin/main` changed `bin/worktree` or this skill, `land` says so. Reread this file after rebasing, because the copy you started from is stale.
-2. With nothing uncommitted, run `.claude/skills/verify-ferry/world.sh all` in the lane (see verify-ferry's "The landing check"). `land` refuses a tree that no passing run stamped. A change to Markdown alone needs no run. For a change that can't affect what the ferry binary does, like one only to `bin/worktree` or `test/`, pass `--no-verify REASON` to `land` instead, and the reason goes in the PR.
-3. Write the commit message you want on `main` to a file. Write the PR description to a second file, for a reviewer who never saw this session. Keep both outside the checkout, or `land` counts them as changes.
-4. In the lane, run `bin/worktree land --message MSG --body DESC`. It squashes the lane into one commit with that message and pushes the branch. Then it opens the PR, or sets the open PR's title and description through the REST API. Pass both files on every land, including re-lands.
-5. Watch CI on the lane's branch: run `/opt/hallpass/bin/hallpass gh pr checks BRANCH --watch` in the background, and it ends when every check has finished. If a check fails, read `gh run view RUN --log-failed`, fix the cause in the lane, and start again from step 1. Handle a review comment that asks for changes the same way, then reply to it. If you can't fix a failure, tell the user what failed.
-6. When every check passes and no review asks for changes, merge the PR. The user asked for this in this repo, though merging pushes `main` and cuts a release. To merge, call `ExitWorktree` with `keep`, then run `bin/worktree merge NAME` in the primary. `merge` refuses unless the checks passed and the PR's head is the lane's HEAD. It sends one squash merge, pinned to that head. Don't retry it by hand. If the merge reply fails, `merge` reads the PR's state, and running `merge` again reports a merge that already happened. After merging, it runs `sync`.
-7. `sync` fast-forwards the primary's `main` and runs `make install`, so `~/.local/bin/ferry` runs what merged. When the user merged the PR, run `bin/worktree sync` in the primary yourself. If `sync` prints `NOT INSTALLED`, tell the user to run `make install` in the primary. If `sync` prints `the ferry protocol went from`, tell the user to run `make push` in the primary. Until they do, every handoff to kant refuses.
+1. In the lane, run `git fetch origin`, then `git rebase origin/main` if the lane is behind. `land` refuses a lane that's behind, because a rebase changes the tree that verification stamped.
+2. If `land` said `origin/main` changed the lane tooling, reread this file after rebasing, because the copy you started from is stale.
+3. With nothing uncommitted, run `.claude/skills/verify-ferry/world.sh all` in the lane (see verify-ferry's "The landing check"). It writes a stamp only when every check passes, and `land` refuses a tree that no passing run stamped. A change to Markdown alone needs no run. Every other change needs one, so don't pass `--no-verify` unless the user tells you to. If the run fails, fix the cause, commit, and run it again. The verify-handoff TLA+ check isn't part of landing.
+4. Write the commit message you want on `main` to a file. Write the PR description to a second file with the prose skill, for a reviewer who never saw this session, and use the show-me skill for the views that make the change clear. Keep both files outside the checkout, or `land` counts them as changes.
+5. In the lane, run `bin/worktree land --message MSG --body DESC`. It squashes the lane into one commit with that message and pushes the branch. Then it opens the PR, or sets the open PR's title and description through the REST API. Pass both files on every land, including re-lands.
+6. Watch CI on the lane's branch: run `/opt/hallpass/bin/hallpass gh pr checks BRANCH --watch` in the background, and it ends when every check has finished. If a check fails, read `gh run view RUN --log-failed`, fix the cause in the lane, and start again from step 1. Handle a review comment that asks for changes the same way, then reply to it. If you can't fix a failure, tell the user what failed.
+7. When every check passes and no review asks for changes, merge the PR. The user asked for this in this repo, though merging pushes `main` and cuts a release. Merge only through `bin/worktree merge NAME`, run in the primary, never a hand-run `gh pr merge`. `merge` refuses unless the checks passed and the PR's head is the lane's HEAD. It sends one squash merge, pinned to that head. Don't retry it by hand. If the merge reply fails, `merge` reads the PR's state, and running `merge` again reports a merge that already happened. After merging, it runs `sync`.
+8. `sync` fast-forwards the primary's `main` and runs `make install`, so `~/.local/bin/ferry` runs what merged. When the user merged the PR, run `bin/worktree sync` in the primary yourself. If `sync` prints `NOT INSTALLED`, tell the user to run `make install` in the primary. If `sync` prints `the ferry protocol went from`, tell the user to run `make push` in the primary. Until they do, every handoff to kant refuses.
 
 To keep working in the lane after a squash merge, run `git rebase --onto origin/main <merged PR head>`. A plain rebase replays the squashed commits.
 
 ## Cleanup
 
-Ask the user before you remove a lane. Call `ExitWorktree` with `keep`, never `remove`. `remove` refuses any worktree with commits made since it was created, even landed ones. Then run `bin/worktree teardown NAME` from the primary. It runs `sync` first, and then refuses a lane with uncommitted changes, or one whose HEAD is neither on `main` or `origin/main` nor the head of a merged pull request. `--discard` skips both checks, but only pass it after the user agrees to lose the work. Teardown removes the worktree, deletes the branch, and drops the lane.
+Ask the user before you remove a lane. In a session that entered the lane with `EnterWorktree`, call `ExitWorktree` with `keep`, never `remove`. `remove` refuses any worktree with commits made since it was created, even landed ones. Then run `bin/worktree teardown NAME` from the primary. It refuses a lane with uncommitted changes, untracked files included, or one whose HEAD is neither on `main` nor the head of a merged pull request. `--discard` skips both checks, but only pass it after the user agrees to lose the work. Teardown removes the worktree, deletes the branch, and drops the lane.
+
+Teardown never syncs. When it says `main` is behind `origin/main`, run `bin/worktree sync` in the primary.
 
 Running teardown from inside the lane leaves the directory behind, and the next command there provisions the lane again.
 

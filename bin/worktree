@@ -1,253 +1,398 @@
 #!/bin/sh
-# Lanes: each linked git worktree of ferry gets an index n (0-99) and its own
-# names for everything the shell test scripts would otherwise share with the
-# primary checkout and other lanes. Every name ends in FERRY_LANE_SUFFIX
-# (-lane-<n>), so teardown finds a lane's leftovers after its directory is gone.
-# The primary checkout keeps the unsuffixed names.
+# Lanes: each linked git worktree gets an index n and its own copy of whatever
+# the repo isolates, beside the primary checkout and the other lanes. This file
+# is the same in every repo (from the create-worktree-lanes skill). What this
+# repo isolates lives in bin/worktree.lane, which this file sources if present.
 #
 #   bin/worktree setup                       provision this worktree's lane
-#   bin/worktree info                        this checkout's lane and the names it uses
+#   bin/worktree info                        this checkout's lane and the values it uses
 #   bin/worktree teardown --stale            drop the lanes whose directory is gone (hooks)
 #   bin/worktree teardown NAME [--discard]   from the primary: remove a worktree, its branch, and its lane
-#   bin/worktree land [NAME] [--message FILE] [--body FILE] [--no-verify REASON]
-#                                            push a lane's one commit and open or update its PR
-#   bin/worktree merge NAME                  from the primary: squash-merge the lane's green PR, then sync
-#   bin/worktree sync                        in the primary: fast-forward main to origin's and install it
+#   bin/worktree land [--message FILE] [--body FILE] [--no-verify REASON]
+#                                            PR policy, from a lane: push one commit, open or update its PR
+#   bin/worktree merge NAME                  PR policy with MERGE=yes: squash-merge a green PR, then sync
+#   bin/worktree sync                        PR policy, in the primary: fast-forward main, migrate, install
+#   bin/worktree land NAME [--no-verify REASON]
+#                                            local policy, in the primary: fast-forward main to the lane
 #   bin/worktree guard --deny|--confirm|--warn ACTION
 #
-# WORKTREE_LANE_RANGE=LO-HI narrows allocation (the script's own tests use it).
-# It can't widen the range past 0-99. WORKTREE_GH replaces the gh command,
-# WORKTREE_INSTALL the install command, and FERRY_VERIFY_EVIDENCE where
-# verify stamps are found (the tests use all three).
+# For this script's tests: WORKTREE_LANE_RANGE=LO-HI narrows allocation and the
+# sweep (it can't widen them), WORKTREE_GH replaces gh, WORKTREE_INSTALL the
+# install command, and WORKTREE_STAMPS the glob of verify stamps.
 set -eu
 
 die() { echo "bin/worktree: $*" >&2; exit 1; }
-MAX=99
+warn() { echo "bin/worktree: $*" >&2; }
+usage() { sed -n '2,/^$/s/^#   //p' "$self" >&2; exit 2; }
 
 self=$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")
-# A production script calls guard by its own checkout's path, and may run from
-# another directory, so guard judges the checkout that holds this file.
-[ "${1:-}" = guard ] && cd "$(dirname "$self")"
-top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git checkout"
-common=$(git rev-parse --path-format=absolute --git-common-dir)
+# Every command judges the checkout that holds this file, not the working
+# directory. Otherwise a lane's production script, run from the primary's
+# directory, passes guard as the primary.
+cd "$(dirname "$self")"
+top=$(git rev-parse --show-toplevel 2>/dev/null) || die "$(dirname "$self") is not in a git checkout"
+top=$(cd "$top" && pwd -P)
+cd "$top"
+# The primary is found through the git common dir, so every command works the
+# same from the primary and from any lane.
+common=$(cd "$(git rev-parse --path-format=absolute --git-common-dir)" && pwd -P)
 primary=$(dirname "$common")
-reg=$primary/tmp/worktrees
-is_lane() { [ -f "$top/.git" ]; }
-if [ -n "${WORKTREE_GH:-}" ]; then gh=$WORKTREE_GH
-elif [ -x /opt/hallpass/bin/hallpass ]; then gh="/opt/hallpass/bin/hallpass gh"
-else gh=gh; fi
+is_lane() { [ -f "$1/.git" ]; }   # only a linked worktree has a .git file
 
-# lane_dirs N: every path a lane's test scripts create, one per line.
-lane_dirs() {
-  s=-lane-$1
-  printf '%s\n' "/tmp/ferry-test$s" "/tmp/ferry-test-e2e$s" "/tmp/ferry-git$s" "/tmp/ferry-live$s" \
-    "$HOME/src/ferry-e2e-probe$s"
-  # Records, parked state, and transcripts the e2e and claude-resume scripts leave in the real home.
-  for f in "$HOME"/.local/state/ferry/tasks/src-ferry-e2e-probe"$s"-*.json \
-           "$HOME"/.local/state/ferry/parked/src-ferry-e2e-probe"$s"-* \
-           "$HOME"/.claude/projects/*-src-ferry-e2e-probe"$s" \
-           "$HOME"/.claude/projects/-tmp-ferry-test"$s"-* \
-           "$HOME"/.claude/projects/-private-tmp-ferry-test"$s"-* \
-           "$HOME"/.claude/projects/-tmp-ferry-test-e2e"$s"-* \
-           "$HOME"/.claude/projects/-private-tmp-ferry-test-e2e"$s"-*; do
-    [ -e "$f" ] && printf '%s\n' "$f"
-  done
-  return 0
+# guard reads no settings and no environment: an agent could set either.
+cmd_guard() {
+  mode=${1:-} action=${2:-}
+  case $mode in --deny|--confirm|--warn) ;; *) usage ;; esac
+  [ -n "$action" ] && [ $# -eq 2 ] || usage
+  is_lane "$top" || return 0
+  case $mode in
+    --deny)
+      echo "$action refuses to run in a lane ($top). Run it from the primary checkout, $primary." >&2
+      exit 3 ;;
+    --warn)
+      echo "warning: $action is running in a lane ($top), not the primary checkout." >&2 ;;
+    --confirm)
+      branch=$(git symbolic-ref --short -q HEAD || echo HEAD)
+      # Writing the prompt is the terminal check: /dev/tty can open and still
+      # fail every write (EIO on GitHub's runners), and a failed redirection
+      # must refuse rather than end the script some other way.
+      if ! { printf '%s is about to run in lane %s (branch %s), not the primary.\nType the branch name to go ahead: ' \
+          "$action" "$top" "$branch" >/dev/tty; } 2>/dev/null; then
+        echo "$action needs confirmation on a terminal to run in a lane, and there is none. Run it from $primary." >&2
+        exit 3
+      fi
+      read -r answer </dev/tty || answer=
+      [ "$answer" = "$branch" ] || { echo "$action: not confirmed" >&2; exit 3; } ;;
+  esac
 }
-# lane_sessions N: labels of the Rex sessions a lane's scripts start.
-lane_sessions() { printf '%s\n' "ferry-e2e-probe-lane-$1" "ferry-liveness-test-lane-$1"; }
-rex_ids() { # rex_ids LABEL: ids of running Rex sessions with that label
-  command -v rex >/dev/null 2>&1 || return 0
-  rex ls 2>/dev/null | awk -v l="$1" '$1 == l {print $2}'
-}
-in_use() { # in_use N: true if anything named for lane N exists
-  [ -n "$(lane_dirs "$1" | while read -r d; do [ -e "$d" ] && echo x; done)" ] && return 0
-  for l in $(lane_sessions "$1"); do [ -n "$(rex_ids "$l")" ] && return 0; done
-  return 1
+if [ "${1:-}" = guard ]; then shift; cmd_guard "$@"; exit 0; fi
+
+# --- settings and the lane file -------------------------------------------
+
+LANE_MAX=99      # lane indexes run 0..LANE_MAX
+LANDING='pr'     # pr or local
+MERGE=no         # yes: agents may merge a green PR through bin/worktree merge
+INSTALL=         # what sync runs in the primary after main moves, if its build runs live
+VERIFY=          # the landing check's command, for messages; empty means no check
+STAMPS=          # glob of stamp files, expanded at land time with worktree.env loaded
+SKILL=.claude/skills/worktree/SKILL.md
+TOOLING=         # paths whose change on main means: reread the skill
+lane_in_use() { return 1; }
+lane_provision() { :; }
+lane_drop() { :; }
+lane_info() { :; }
+lane_migrate() { :; }
+lane_installed() { :; }
+lanefile=$(dirname "$self")/worktree.lane
+# shellcheck source=/dev/null
+if [ -f "$lanefile" ]; then . "$lanefile"; fi
+[ -n "$TOOLING" ] || TOOLING="bin/worktree bin/worktree.lane .claude/hooks $(dirname "$SKILL")"
+case $LANDING in pr|local) ;; *) die "LANDING in $lanefile must be pr or local" ;; esac
+case $MERGE in yes|no) ;; *) die "MERGE in $lanefile must be yes or no" ;; esac
+
+index_ok() { case $1 in ''|*[!0-9]*|0?*) return 1 ;; esac; [ "$1" -le "$LANE_MAX" ]; }
+index_ok "$LANE_MAX" || die "LANE_MAX must be a number"
+lo=0 hi=$LANE_MAX
+if [ -n "${WORKTREE_LANE_RANGE:-}" ]; then
+  l=${WORKTREE_LANE_RANGE%%-*} h=${WORKTREE_LANE_RANGE#*-}
+  if ! index_ok "$l" || ! index_ok "$h" || [ "$l" -gt "$h" ]; then
+    die "WORKTREE_LANE_RANGE must be LO-HI within 0-$LANE_MAX. It narrows the range and can't widen it."
+  fi
+  lo=$l hi=$h
+fi
+
+gh_() {
+  if [ -n "${WORKTREE_GH:-}" ]; then $WORKTREE_GH "$@"
+  elif [ -x /opt/hallpass/bin/hallpass ]; then /opt/hallpass/bin/hallpass gh "$@"
+  else gh "$@"; fi
 }
 
-# --- the registry: tmp/worktrees/<n> in the primary holds the worktree's path
+# try CMD...: run CMD in a subshell with set -e in force, and set rc to its
+# status. Never call it in a condition (if, !, ||, &&): the shell turns set -e
+# off inside those, and a lane function would run on past its failed command.
+try() { set +e; ( set -e; "$@" ); rc=$?; set -e; }
 
-# locked FILE ARGS...: rerun this script with ARGS while holding an exclusive
-# lock on FILE. macOS has no flock(1), so perl takes it; the kernel releases it
-# when the holder dies, so a crashed run never leaves a stale lock behind.
+# locked FILE ARGS...: rerun this script with ARGS while holding a kernel lock
+# on FILE. macOS has no flock(1), so perl takes it. A lock directory with a pid
+# file fails instead: two waiters both find the holder dead, and the second
+# deletes the lock the first just took. The kernel releases this one when its
+# holder dies. perl keeps the lock fd to itself, so a daemon a lane function
+# starts doesn't inherit it and hold the lock forever.
 locked() {
-  f=$1; shift
-  mkdir -p "$(dirname "$f")"
+  lockf=$1; shift
+  mkdir -p "$(dirname "$lockf")"
   perl -MFcntl=:flock -e '
     open(my $l, ">>", shift) or die "bin/worktree: $!\n";
     flock($l, LOCK_EX) or die "bin/worktree: $!\n";
     system(@ARGV);
-    exit($? == -1 || $? & 127 ? 1 : $? >> 8);' "$f" "$self" "$@"
+    exit($? == -1 ? 1 : $? & 127 ? 128 + ($? & 127) : $? >> 8);' "$lockf" "$self" "$@"
 }
+
+# --- the registry: tmp/worktrees/<n> in the primary holds the lane's path ---
+
+reg=$primary/tmp/worktrees
 reglock=$primary/tmp/worktrees.lock
 
-valid_index() { case $1 in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -le $MAX ]; }
-entries() { # entries: registered lane indexes
+entries() { # entries [all]: registered lane indexes, in the narrowed range unless all
   for f in "$reg"/*; do
-    [ -f "$f" ] || continue
-    n=${f##*/}
-    if valid_index "$n"; then echo "$n"; else echo "bin/worktree: ignoring $f, not a lane index 0-$MAX" >&2; fi
+    e=${f##*/}
+    if [ -f "$f" ] && index_ok "$e"; then
+      if [ "${1:-}" = all ] || { [ "$e" -ge "$lo" ] && [ "$e" -le "$hi" ]; }; then echo "$e"; fi
+    fi
   done
 }
-lane_of() { # lane_of PATH: the index registered for PATH, if any
-  for n in $(entries); do [ "$(cat "$reg/$n")" = "$1" ] && { echo "$n"; return 0; }; done
+lane_of() { # lane_of PATH: the index registered for PATH
+  for e in $(entries all); do
+    if [ "$(cat "$reg/$e")" = "$1" ]; then echo "$e"; return 0; fi
+  done
   return 1
 }
 
-# drop_lane N: stop the lane's Rex sessions, delete what it created, then its registry entry.
-drop_lane() {
-  for l in $(lane_sessions "$1"); do
-    for id in $(rex_ids "$l"); do rex kill "$id" >/dev/null 2>&1 || true; done
-  done
-  lane_dirs "$1" | while read -r d; do rm -rf "$d"; done
+# drop N, under the registry lock: stop and delete lane N's resources, then
+# its entry. The entry goes last and stays when lane_drop fails (a database
+# server or Docker that is down), so the next sweep retries.
+drop() {
+  try lane_drop "$1"
+  if [ "$rc" -ne 0 ]; then
+    warn "lane $1: dropping its resources failed (exit $rc); kept its registry entry, so the next sweep retries"
+    return 0
+  fi
   rm -f "$reg/$1"
   echo "dropped lane $1"
 }
 
-sweep() { # under reglock: drop lanes whose directory is gone
-  for n in $(entries); do
-    p=$(cat "$reg/$n")
-    [ -d "$p" ] && continue
-    echo "lane $n: $p is gone"
-    drop_lane "$n"
+# sweep, under the registry lock: drop the lanes whose directory is gone. Only
+# the registry decides. A resource with no entry means a wiped registry, not a
+# dead lane, so it stays.
+sweep() {
+  for f in "$reg"/*; do
+    if [ -f "$f" ] && ! index_ok "${f##*/}"; then warn "ignoring $f: not a lane index in 0-$LANE_MAX"; fi
+  done
+  for e in $(entries); do
+    p=$(cat "$reg/$e")
+    if [ -n "$p" ] && [ -d "$p" ]; then continue; fi
+    echo "lane $e: ${p:-(no path)} is gone"
+    drop "$e"
   done
   git -C "$primary" worktree prune
 }
 
-range() {
-  lo=0 hi=$MAX
-  if [ -n "${WORKTREE_LANE_RANGE:-}" ]; then
-    l=${WORKTREE_LANE_RANGE%-*} h=${WORKTREE_LANE_RANGE#*-}
-    valid_index "$l" && valid_index "$h" || die "WORKTREE_LANE_RANGE must be LO-HI within 0-$MAX"
-    [ "$l" -gt $lo ] && lo=$l
-    [ "$h" -lt $hi ] && hi=$h
-  fi
-  echo "$lo $hi"
-}
-
-allocate() {
-  r=$(range) || exit 1
-  set -- $r
-  n=$1
-  while [ "$n" -le "$2" ]; do
-    if [ ! -e "$reg/$n" ] && ! in_use "$n"; then echo "$n"; return 0; fi
-    n=$((n + 1))
-  done
-  die "no free lane in $1-$2"
-}
-
-# --- commands
+# --- setup ------------------------------------------------------------------
 
 cmd_setup() {
-  is_lane || die "setup runs in a linked worktree; this is the primary checkout"
-  # Parallel first commands each fire the hook; the second waits, then finds worktree.env.
+  is_lane "$top" || die "setup runs in a linked worktree; this is the primary checkout"
+  # Parallel Bash calls in a new worktree each fire the hook, so setups race.
+  # The second waits here, then finds worktree.env and returns.
   locked "$top/tmp/worktree-setup.lock" _setup
 }
 
 _setup() {
-  if [ -f "$top/worktree.env" ]; then echo "lane already provisioned in $top"; return 0; fi
-  n=$(locked "$reglock" _claim)
-
-  # Build the lane's own binary; scripts in test/ run ./ferry.
-  command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
-  (cd "$top" && make -s build) || die "make build failed in $top"
-
+  if [ -f "$top/worktree.env" ]; then echo "lane $(env_get "$top" WORKTREE_LANE) is already provisioned in $top"; return 0; fi
+  lane=$(locked "$reglock" _claim)
   tmpf=$top/worktree.env.tmp.$$
-  {
-    echo "# Written by bin/worktree setup. Loaded by .claude/hooks/worktree-env.sh and test/lib/lane.sh."
-    echo "WORKTREE_LANE=$n"
-    echo "FERRY_LANE_SUFFIX=-lane-$n"
-    printf "WORKTREE_PRIMARY='%s'\n" "$(printf '%s' "$primary" | sed "s/'/'\\\\''/g")"
-  } > "$tmpf"
-  mv "$tmpf" "$top/worktree.env"
+  trap 'rm -f "$tmpf"' EXIT
+  rm -f "$tmpf"
+  echo "# Written by bin/worktree setup. Its presence means the lane is provisioned." > "$tmpf"
+  env_line WORKTREE_LANE "$lane"
+  env_line WORKTREE_PRIMARY "$primary"
+  # The loaders refuse to start in a linked worktree with no worktree.env.
+  # This lets the entry points that lane_provision calls, like a migration,
+  # start anyway.
+  WORKTREE_PROVISIONING=$top; export WORKTREE_PROVISIONING
+  try lane_provision "$lane"
+  unset WORKTREE_PROVISIONING
+  [ "$rc" -eq 0 ] || die "lane_provision $lane failed (exit $rc); worktree.env not written"
+  envkeys=$(sed -n 's/=.*//p' "$tmpf" | grep -v '^WORKTREE_' | tr '\n' , || true)
+  # sync unsets these before it migrates or installs: an agent that just left
+  # a lane still has the lane's database name in its environment.
+  env_line WORKTREE_KEYS "WORKTREE_LANE,WORKTREE_PRIMARY,WORKTREE_KEYS${envkeys:+,${envkeys%,}}"
+  # Written last, through a rename, so a crash never leaves a half-written file
+  # that the hooks would take for a provisioned lane.
+  mv -f "$tmpf" "$top/worktree.env"
   rm -f "$top/tmp/worktree-setup.failed"
-  echo "lane $n ready in $top"
+  echo "lane $lane ready in $top"
 }
 
-_claim() { # under reglock: sweep, then print this worktree's lane, registering one if needed
+# lane_set KEY VALUE: for lane_provision, one line of worktree.env.
+lane_set() {
+  case $1 in
+    ''|[0-9]*|*[!A-Z0-9_]*) die "lane_set: $1 must be an upper-case variable name" ;;
+    WORKTREE_*|LANE_MAX|LANDING|MERGE|INSTALL|VERIFY|STAMPS|SKILL|TOOLING) die "lane_set: $1 is reserved for bin/worktree" ;;
+  esac
+  if grep -q "^$1=" "$tmpf"; then die "lane_set: $1 is set twice"; fi
+  env_line "$1" "$2"
+}
+# The env hook sources worktree.env and other loaders split it on "=", so the
+# values stay unquoted and limited to characters both read the same way.
+env_line() {
+  case $2 in *[!A-Za-z0-9_./:@%+,=-]*) die "the value of $1 ('$2') has a character worktree.env can't hold unquoted" ;; esac
+  printf '%s=%s\n' "$1" "$2" >> "$tmpf"
+}
+# load_env FILE: export FILE's KEY=VALUE lines without sourcing it, the way
+# the loaders and the env hook read it.
+load_env() {
+  while IFS= read -r l; do
+    case $l in [A-Z_]*=*) ;; *) continue ;; esac
+    k=${l%%=*} v=${l#*=}
+    case $k in *[!A-Z0-9_]*) continue ;; esac
+    case $v in *[!A-Za-z0-9_./:@%+,=-]*) continue ;; esac
+    export "$k=$v"
+  done < "$1"
+}
+env_get() { sed -n "s/^$2=//p" "$1/worktree.env" 2>/dev/null; }
+
+_claim() { # under the registry lock: sweep, then reuse this worktree's lane or register a free one
   mkdir -p "$reg"
   sweep >&2
-  n=$(lane_of "$top") || { n=$(allocate); printf '%s\n' "$top" > "$reg/$n"; }
-  echo "$n"
+  if e=$(lane_of "$top"); then echo "$e"; return 0; fi
+  e=$lo
+  while [ "$e" -le "$hi" ]; do
+    # -L too: -e misses a dangling symlink.
+    if [ ! -e "$reg/$e" ] && [ ! -L "$reg/$e" ] && ! ( lane_in_use "$e" ) >/dev/null 2>&1; then
+      # The entry goes in before any resource exists, so the sweep can tell a
+      # wiped registry from a dead lane.
+      printf '%s\n' "$top" > "$reg/$e"
+      echo "$e"
+      return 0
+    fi
+    e=$((e + 1))
+  done
+  die "no free lane in $lo-$hi; see $reg"
 }
+
+# --- info ---------------------------------------------------------------------
 
 cmd_info() {
-  if is_lane; then
-    [ -f "$top/worktree.env" ] || die "this worktree has no lane yet; run bin/worktree setup"
-    n=$(sed -n 's/^WORKTREE_LANE=//p' "$top/worktree.env")
-    echo "checkout          $top (lane $n)"
-    echo "primary           $primary"
-    echo "WORKTREE_LANE     $n"
-    echo "FERRY_LANE_SUFFIX -lane-$n"
+  [ $# -eq 0 ] || usage
+  if is_lane "$top"; then
+    [ -f "$top/worktree.env" ] || die "$top has no lane yet; run bin/worktree setup"
+    lane=$(env_get "$top" WORKTREE_LANE)
+    echo "checkout  $top (lane $lane)"
+    echo "primary   $primary"
+    grep -v -e '^#' -e '^WORKTREE_' "$top/worktree.env" || true
   else
-    n="" ; echo "checkout          $top (primary)"
-    echo "FERRY_LANE_SUFFIX (empty)"
+    lane=
+    echo "checkout  $top (primary; it keeps the project's defaults)"
   fi
-  s=${n:+-lane-$n}
-  echo "binary            $top/ferry (make build); make install asks first in a lane"
-  echo "test scratch      /tmp/ferry-test$s, /tmp/ferry-test-e2e$s, /tmp/ferry-git$s, /tmp/ferry-live$s"
-  echo "e2e probe         ~/src/ferry-e2e-probe$s, Rex session ferry-e2e-probe$s"
-  echo "liveness          Rex session ferry-liveness-test$s"
+  try lane_info "$lane"
+  [ "$rc" -eq 0 ] || die "lane_info failed (exit $rc)"
 }
 
-resolve() { # resolve NAME: a worktree path from a name under .claude/worktrees or a path
+# --- teardown -----------------------------------------------------------------
+
+resolve() { # resolve NAME: set wt to the worktree that NAME names
   case $1 in
-    */*) (cd "$1" 2>/dev/null && pwd -P) || die "no worktree at $1" ;;
-    *) [ -d "$primary/.claude/worktrees/$1" ] || die "no worktree $primary/.claude/worktrees/$1"
-       (cd "$primary/.claude/worktrees/$1" && pwd -P) ;;
+    */*) d=$1 ;;
+    *) d=$primary/.claude/worktrees/$1 ;;
   esac
+  wt=$(cd "$d" 2>/dev/null && pwd -P) || die "no worktree at $d. NAME is a name under .claude/worktrees/ or a path."
+  is_lane "$wt" || die "$wt is not a linked worktree"
+  [ "$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)" && pwd -P)" = "$common" ] \
+    || die "$wt is not a worktree of $primary"
 }
-in_primary_on_main() {
-  [ "$top" = "$primary" ] || die "$1 runs in the primary checkout ($primary)"
-  [ "$(git symbolic-ref --short HEAD 2>/dev/null)" = main ] || die "$1 needs the primary on main"
+need_primary() {
+  [ "$top" = "$primary" ] || die "$1 runs in the primary checkout. Run $primary/bin/worktree $1 there."
 }
-# Teardown counts untracked files, since removing the worktree deletes them.
-# land counts only tracked changes: untracked files don't go in the push.
+need_main() {
+  b=$(git symbolic-ref --short -q HEAD || true)
+  [ "$b" = main ] || die "$1 needs the primary on main; it is on ${b:-a detached HEAD}"
+}
+# Teardown counts untracked files, because removing the worktree deletes
+# them. land and sync count only tracked changes: a push and a fast-forward
+# leave untracked files alone, and git refuses a fast-forward that would
+# overwrite one.
 dirty() { [ -n "$(git -C "$1" status --porcelain)" ]; }
 dirty_tracked() { [ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]; }
-registered_path() { # the path as the registry and git record it
-  for p in "$1" "$(git -C "$1" rev-parse --show-toplevel)"; do
-    lane_of "$p" >/dev/null && { echo "$p"; return 0; }
-  done
-  git -C "$1" rev-parse --show-toplevel
-}
 
 cmd_teardown() {
-  if [ "${1:-}" = --stale ]; then locked "$reglock" _sweep; return; fi
-  name=${1:?usage: bin/worktree teardown NAME [--discard] | --stale}
-  discard=${2:-}
-  [ -z "$discard" ] || [ "$discard" = --discard ] || die "unknown flag $discard"
-  in_primary_on_main teardown
-  # sync first, so a lane whose PR just merged counts as landed and the
-  # install isn't forgotten. Teardown's own checks still decide.
-  ( cmd_sync ) || echo "bin/worktree: sync failed; tearing down on teardown's own checks" >&2
-  wt=$(resolve "$name")
-  [ "$wt" != "$primary" ] || die "won't tear down the primary checkout"
-  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
-  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [ -z "$discard" ]; then
-    dirty "$wt" && die "$wt has uncommitted changes; commit them, or pass --discard once the user agrees to lose them"
-    landed "$wt" "$branch" \
-      || die "$wt isn't merged: land it (bin/worktree land $name) and wait for its pull request to merge, or pass --discard once the user agrees"
+  case ${1:-} in
+    --stale) [ $# -eq 1 ] || usage; locked "$reglock" _sweep; return 0 ;;
+    ''|-*) usage ;;
+  esac
+  discard='' stale_main=''
+  case ${2:-} in '') ;; --discard) discard=1 ;; *) usage ;; esac
+  [ $# -le 2 ] || usage
+  [ "$top" = "$primary" ] || die "teardown NAME runs in the primary checkout, $primary. Run from inside the lane, it would leave the directory, and the next command would provision the lane again."
+  resolve "$1"
+  branch=$(git -C "$wt" symbolic-ref --short -q HEAD || true)
+  if [ "$LANDING" = pr ]; then
+    # Don't sync here: sync migrates the primary and installs, which is more
+    # than a command named teardown should do. Say so when main is behind,
+    # since a lane whose PR just merged usually leaves it there.
+    if git fetch -q origin main 2>/dev/null && [ -n "$(git rev-list main..origin/main 2>/dev/null)" ]; then stale_main=1; fi
   fi
-  path=$(registered_path "$wt")
+  head=$(git -C "$wt" rev-parse HEAD)
+  on_main=
+  if git merge-base --is-ancestor "$head" main; then on_main=1; fi
+  if [ -z "$discard" ]; then
+    if dirty "$wt"; then
+      git -C "$wt" status --short >&2
+      die "$wt has uncommitted changes, counting untracked files, and removing it deletes them. Commit them, or pass --discard once the user agrees they can go."
+    fi
+    if [ -z "$on_main" ] && ! merged_pr_head; then
+      die "$wt's HEAD ($head) isn't on main${branch:+ or the head of a merged PR}. Land it, or pass --discard once the user agrees the work can go."
+    fi
+  fi
+  lane=$(lane_of "$wt" || true)
   if [ -n "$discard" ]; then git worktree remove --force "$wt"; else git worktree remove "$wt"; fi
-  # -D: a squash or rebase merge leaves the branch unmerged as far as git
-  # knows, and landed has already checked it.
-  [ -z "$branch" ] || git branch -q -D "$branch"
-  locked "$reglock" _drop "$path"
+  if [ -n "$branch" ]; then
+    # -D past a squash merge: git branch -d can't see one, and merged_pr_head
+    # has already checked it.
+    if [ -n "$on_main" ]; then git branch -q -d "$branch"; else git branch -q -D "$branch"; fi
+  fi
+  echo "removed $wt${branch:+ and branch $branch}"
+  if [ -n "$lane" ]; then locked "$reglock" _drop "$lane"; fi
+  if [ -n "$stale_main" ]; then warn "main is behind origin/main. Run bin/worktree sync to fast-forward it, migrate, and install."; fi
 }
 
-_drop() { # under reglock: drop the lane registered for PATH
-  if n=$(lane_of "$1"); then drop_lane "$n"; else echo "no lane was registered for $1"; fi
+# merged_pr_head: under the PR policy, HEAD is exactly the head of a merged PR.
+# A squash merge never puts the lane's commits into main's history. Comparing
+# HEAD with the merged head, not just the PR's state, keeps commits made after
+# the merge blocking teardown.
+merged_pr_head() {
+  [ "$LANDING" = pr ] && [ -n "$branch" ] || return 1
+  heads=$(gh_ pr list --head "$branch" --state merged --json headRefOid -q '.[].headRefOid' 2>/dev/null) || return 1
+  printf '%s\n' "$heads" | grep -qxF "$head"
 }
 
-# land never touches main: main moves only when a pull request merges on
-# GitHub, and that push cuts a release. With no NAME it lands the lane it
-# runs in.
-cmd_land() {
-  wt= msg= body= skip=
+# --- landing ------------------------------------------------------------------
+
+# behind WT BASE: refuse a lane that lacks commits from BASE. Don't rebase for
+# the agent: a rebase changes the tree the landing check stamped.
+behind() {
+  # shellcheck disable=SC2086 # TOOLING is a list of pathspecs
+  tooling=$(git -C "$1" diff --name-only "HEAD...$2" -- $TOOLING | tr '\n' ' ')
+  warn "$branch lacks commits from $2. In $1, run git rebase $2, verify again if the repo has a landing check, then land again."
+  # A lane's copy of the tooling dates from where it branched. Without this
+  # line the agent lands by stale instructions.
+  [ -z "$tooling" ] || warn "$2 changed the lane tooling (${tooling% }). After rebasing, reread $SKILL."
+  exit 1
+}
+
+# verified WT BASE REASON: the landing check passed on WT's committed tree.
+verified() {
+  [ -n "$VERIFY" ] || return 0
+  if [ -z "$(git -C "$1" diff --name-only "$2...HEAD" | grep -v '\.md$' || true)" ]; then
+    echo "only Markdown changed, so no $VERIFY run is needed"; return 0
+  fi
+  if [ -n "$3" ]; then echo "not verified: $3"; return 0; fi
+  tree=$(git -C "$1" rev-parse 'HEAD^{tree}')
+  stamps=${WORKTREE_STAMPS:-$STAMPS}
+  # The run writes a stamp holding HEAD^{tree} only when every check passes.
+  found=$(
+    cd "$1"
+    if [ -f worktree.env ]; then load_env ./worktree.env; fi
+    eval "set -- $stamps"
+    for f in "$@"; do
+      if [ "$(cat "$f" 2>/dev/null)" = "$tree" ]; then echo "$f"; break; fi
+    done
+  )
+  [ -n "$found" ] || die "no passing $VERIFY run stamped this commit's tree. With nothing uncommitted, run $VERIFY in $1, then land again. If the change can't affect what the check covers, pass --no-verify REASON; the reason goes in the PR."
+  echo "verified: $found"
+}
+
+cmd_land_pr() {
+  msg='' body='' skip=''
   while [ $# -gt 0 ]; do
     case $1 in
       --message|--body)
@@ -256,92 +401,70 @@ cmd_land() {
         if [ "$1" = --message ]; then msg=$f; else body=$f; fi
         shift 2 ;;
       --no-verify) [ -n "${2:-}" ] || die "--no-verify needs a reason"; skip=$2; shift 2 ;;
-      -*) die "unknown flag $1" ;;
-      *) [ -z "$wt" ] || die "land takes one NAME"; wt=$(resolve "$1"); shift ;;
+      *) usage ;;
     esac
   done
-  if [ -z "$wt" ]; then
-    is_lane || die "usage: bin/worktree land NAME (or run it in the lane with no NAME)"
-    wt=$top
-  fi
-  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
-  dirty_tracked "$wt" && die "$wt has uncommitted changes; commit them first"
-  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
-  [ "$branch" != main ] || die "$wt is on main; land pushes a lane's own branch"
-  git -C "$wt" remote get-url origin >/dev/null 2>&1 || die "this repo has no origin remote; the user adds it (git remote add origin URL)"
-  git -C "$wt" fetch -q origin main || die "couldn't fetch origin's main"
-  # land doesn't rebase: a rebase changes the tree that verification stamped,
-  # and CI should test what will merge.
-  if ! git -C "$wt" merge-base --is-ancestor origin/main HEAD; then
-    tooling=$(git -C "$wt" diff --name-only HEAD...origin/main -- bin/worktree .claude/skills/worktree .claude/skills/verify-ferry | tr '\n' ' ')
-    echo "bin/worktree: $branch lacks commits from origin/main. In $wt, run git rebase origin/main, verify the result, then land again." >&2
-    [ -z "$tooling" ] || echo "bin/worktree: origin/main changed the lane tooling ($tooling). After rebasing, reread .claude/skills/worktree/SKILL.md and land with the rebased bin/worktree." >&2
-    exit 1
-  fi
-  count=$(git -C "$wt" rev-list --count origin/main..HEAD)
-  [ "$count" -gt 0 ] || die "$branch has no commits that origin's main lacks"
-  verified "$wt" "$skip"
-  # GitHub titles a squash of several commits after the branch, so a lane
-  # lands as one commit, whose message becomes the squash commit's on main.
+  is_lane "$top" || die "land runs from a lane, not the primary checkout"
+  if dirty_tracked "$top"; then git status --short --untracked-files=no >&2; die "commit or drop the tracked changes first"; fi
+  branch=$(git symbolic-ref --short -q HEAD) || die "HEAD is detached; land needs the lane's branch"
+  [ "$branch" != main ] || die "this lane is on main; land pushes a branch of its own"
+  git remote get-url origin >/dev/null 2>&1 || die "this repo has no origin remote"
+  # Fetch before comparing, so CI tests what will merge.
+  git fetch -q origin main || die "couldn't fetch origin's main"
+  git merge-base --is-ancestor origin/main HEAD || behind "$top" origin/main
+  count=$(git rev-list --count origin/main..HEAD)
+  [ "$count" -gt 0 ] || die "$branch has no commits that origin/main lacks"
+  verified "$top" origin/main "$skip"
+  # GitHub titles a squash of several commits after the branch name, so a
+  # lane lands as one commit, whose message becomes the squash commit's.
   if [ -n "$msg" ]; then
-    git -C "$wt" reset -q --soft origin/main
-    git -C "$wt" commit -q -F "$msg" || die "committing with $msg failed"
+    git reset -q --soft origin/main
+    git commit -q -F "$msg" || die "committing with $msg failed; the lane's changes are staged"
   elif [ "$count" -gt 1 ]; then
-    git -C "$wt" log --oneline origin/main..HEAD >&2
-    die "$branch has $count commits. A lane lands as one: write its message to a file and pass --message FILE"
+    git log --oneline origin/main..HEAD >&2
+    die "$branch has $count commits, and a lane lands as one. Write its message to a file and pass --message FILE."
   fi
-  # A plain push, unless this rewrites commits an earlier land pushed.
-  force=
-  if git -C "$wt" fetch -q origin "$branch" 2>/dev/null && ! git -C "$wt" merge-base --is-ancestor FETCH_HEAD HEAD; then
-    force=--force-with-lease=$branch:$(git -C "$wt" rev-parse FETCH_HEAD)
-  fi
-  git -C "$wt" push -q $force -u origin "$branch:$branch" || die "pushing $branch failed"
-  title=$(git -C "$wt" log -1 --format=%s)
-  if [ -n "$body" ]; then text=$(cat "$body"); else text=$(git -C "$wt" log -1 --format=%b); fi
-  [ -z "$skip" ] || text="$text
+  # The lease pins what an earlier land pushed, or that the branch is new.
+  expect=
+  if git fetch -q origin "refs/heads/$branch" 2>/dev/null; then expect=$(git rev-parse FETCH_HEAD); fi
+  git push -q --force-with-lease="refs/heads/$branch:$expect" -u origin "HEAD:refs/heads/$branch" || die "pushing $branch failed"
+  title=$(git log -1 --format=%s)
+  # The description is its own document, for reviewers; the commit message
+  # stays a commit message.
+  if [ -n "$body" ]; then text=$(cat "$body"); else text=$(git log -1 --format=%b); fi
+  if [ -n "$skip" ]; then text="$text
 
-Not verified with verify-ferry's \`world.sh all\`: $skip"
-  num=$(cd "$wt" && $gh pr list --head "$branch" --state open --json number -q '.[0].number // empty') || die "pushed $branch, but listing its pull requests failed"
+Not verified with \`$VERIFY\`: $skip"; fi
+  num=$(gh_ pr list --head "$branch" --state open --json number -q '.[0].number // empty') \
+    || die "pushed $branch, but listing its pull requests failed"
   if [ -n "$num" ]; then
-    # REST, not gh pr edit, which also reads org data and needs read:org.
-    (cd "$wt" && $gh api -X PATCH "repos/{owner}/{repo}/pulls/$num" -f "title=$title" -f "body=$text" >/dev/null) \
+    # REST, not gh pr edit, which also reads org data and fails under a token
+    # without read:org.
+    gh_ api -X PATCH "repos/{owner}/{repo}/pulls/$num" -f "title=$title" -f "body=$text" >/dev/null \
       || die "pushed $branch, but updating pull request #$num failed"
     echo "pushed $branch and updated pull request #$num"
   else
-    (cd "$wt" && $gh pr create --base main --head "$branch" --title "$title" --body "$text" >/dev/null) \
+    gh_ pr create --base main --head "$branch" --title "$title" --body "$text" >/dev/null \
       || die "pushed $branch, but opening its pull request failed"
     echo "pushed $branch and opened its pull request"
   fi
-  (cd "$wt" && $gh pr view "$branch" --json url -q .url)
+  gh_ pr view "$branch" --json url -q .url
 }
 
-# verified WORKTREE REASON: the lane's tree passed verify-ferry's `world.sh
-# all`, which stamps the tree it ran on. A change to Markdown alone needs no
-# run, and REASON (from --no-verify) skips the check and goes in the PR.
-verified() {
-  if [ -z "$(git -C "$1" diff --name-only origin/main...HEAD | grep -v '\.md$' || true)" ]; then
-    echo "only Markdown changed, so no verify run is needed"; return 0
-  fi
-  if [ -n "$2" ]; then echo "not verified: $2"; return 0; fi
-  tree=$(git -C "$1" rev-parse 'HEAD^{tree}')
-  for f in "${FERRY_VERIFY_EVIDENCE:-$HOME/.cache/ferry-verify}"/*/verified; do
-    if [ "$(cat "$f" 2>/dev/null)" = "$tree" ]; then echo "verified: world.sh all passed in $(dirname "$f")"; return 0; fi
-  done
-  die "no verify-ferry run passed on this commit's tree. With nothing uncommitted, run .claude/skills/verify-ferry/world.sh all in the lane, then land again. If the change can't affect what ferry does, pass --no-verify REASON; the reason goes in the PR."
-}
-
-# merge NAME: squash-merge the lane's pull request once its checks pass and
-# its head is the lane's HEAD, then sync. It sends the merge once, pinned to
-# that head; on a failed reply it reads the PR's state instead of retrying.
+# merge NAME: squash-merge the lane's PR once it is open, its checks passed,
+# and its head is the lane's HEAD, then sync. A merge isn't safe to send twice,
+# so a failed reply reads the PR's state instead of sending it again.
 cmd_merge() {
-  name=${1:?usage: bin/worktree merge NAME}
-  in_primary_on_main merge
-  wt=$(resolve "$name")
-  [ -f "$wt/.git" ] || die "$wt is not a linked worktree"
-  branch=$(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) || die "$wt has a detached HEAD"
+  [ "$LANDING" = pr ] && [ "$MERGE" = yes ] || die "this repo has no merge command; the user merges PRs, then an agent runs bin/worktree sync"
+  [ $# -eq 1 ] || usage
+  need_primary merge
+  need_main merge
+  resolve "$1"
+  branch=$(git -C "$wt" symbolic-ref --short -q HEAD) || die "$wt has a detached HEAD"
   head=$(git -C "$wt" rev-parse HEAD)
-  pr=$(cd "$wt" && $gh pr view "$branch" --json number,state,headRefOid -q '"\(.number) \(.state) \(.headRefOid)"') \
+  pr=$(cd "$wt" && gh_ pr view "$branch" --json number,state,headRefOid -q '"\(.number) \(.state) \(.headRefOid)"') \
     || die "$branch has no pull request; land it first"
+  # shellcheck disable=SC2086 # split the PR fields
   set -- $pr
   num=$1 state=$2 prhead=$3
   if [ "$state" = MERGED ] && [ "$prhead" = "$head" ]; then
@@ -349,99 +472,127 @@ cmd_merge() {
   else
     [ "$state" = OPEN ] || die "pull request #$num is $state"
     [ "$prhead" = "$head" ] || die "pull request #$num's head is $prhead, but $wt is at $head. Land again, wait for its checks, then merge."
-    rc=0; (cd "$wt" && $gh pr checks "$branch" >/dev/null 2>&1) || rc=$?
+    rc=0
+    (cd "$wt" && gh_ pr checks "$branch" >/dev/null 2>&1) || rc=$?
     case $rc in
       0) ;;
-      8) die "pull request #$num's checks are still running. Watch them with: $gh pr checks $branch --watch" ;;
-      *) die "pull request #$num's checks didn't pass. See: $gh pr checks $branch" ;;
+      8) die "pull request #$num's checks are still running. Watch them with: gh pr checks $branch --watch" ;;
+      *) die "pull request #$num's checks didn't pass. See: gh pr checks $branch" ;;
     esac
     title="$(git -C "$wt" log -1 --format=%s) (#$num)"
     message=$(git -C "$wt" log -1 --format=%b)
-    if ! out=$(cd "$wt" && $gh api -X PUT "repos/{owner}/{repo}/pulls/$num/merge" -f merge_method=squash \
+    if ! out=$(cd "$wt" && gh_ api -X PUT "repos/{owner}/{repo}/pulls/$num/merge" -f merge_method=squash \
         -f "sha=$head" -f "commit_title=$title" -f "commit_message=$message" 2>&1); then
-      state=$(cd "$wt" && $gh pr view "$branch" --json state -q .state 2>/dev/null || true)
+      state=$(cd "$wt" && gh_ pr view "$branch" --json state -q .state 2>/dev/null || true)
       [ "$state" = MERGED ] || die "merging pull request #$num failed: $out"
+      echo "the merge reply failed, but pull request #$num is merged"
     fi
     echo "merged pull request #$num"
   fi
   cmd_sync
 }
 
-# sync: fast-forward the primary's main to origin's and install it, so
-# ~/.local/bin/ferry runs what merged. A marker names the last commit
-# installed, so a sync after a failed install tries again.
 cmd_sync() {
-  in_primary_on_main sync
-  dirty_tracked "$primary" && { git -C "$primary" status --short --untracked-files=no >&2; die "the primary has tracked changes"; }
-  git -C "$primary" fetch -q origin main || die "couldn't fetch origin's main"
-  if [ -n "$(git -C "$primary" rev-list origin/main..main)" ]; then
-    git -C "$primary" log --oneline origin/main..main >&2
+  [ "$LANDING" = pr ] || die "this repo lands locally: run bin/worktree land NAME in the primary"
+  need_primary sync
+  need_main sync
+  if dirty_tracked "$primary"; then git status --short --untracked-files=no >&2; die "the primary has tracked changes"; fi
+  git fetch -q origin main || die "couldn't fetch origin's main"
+  if [ -n "$(git rev-list origin/main..main)" ]; then
+    git log --oneline origin/main..main >&2
     die "main has commits origin/main lacks. Those need a pull request."
   fi
-  git -C "$primary" merge -q --ff-only origin/main || die "couldn't fast-forward main"
-  after=$(git -C "$primary" rev-parse HEAD)
-  marker=$common/ferry-installed
-  last=$(cat "$marker" 2>/dev/null || true)
-  if [ "$last" = "$after" ]; then
-    echo "main is at $(git -C "$primary" log -1 --format='%h %s'), installed"; return 0
-  fi
-  echo "main is at $(git -C "$primary" log -1 --format='%h %s'); installing it"
-  command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
-  if ! (cd "$primary" && eval "${WORKTREE_INSTALL:-make -s install}"); then
-    echo "NOT INSTALLED: make install failed. Run it in $primary." >&2
-    return 1
-  fi
-  echo "$after" > "$marker"
-  proto() { git -C "$primary" show "$1:machine.go" 2>/dev/null | sed -n 's/^const protocol = //p'; }
-  if [ -n "$last" ] && [ "$(proto "$last")" != "$(proto "$after")" ]; then
-    echo "the ferry protocol went from $(proto "$last") to $(proto "$after"). Handoffs refuse until kant runs this build: run make push in $primary."
-  fi
+  git merge -q --ff-only origin/main || die "couldn't fast-forward main to origin/main"
+  after_ff
 }
 
-# landed WORKTREE BRANCH: the lane's HEAD is on main or origin's main, or is
-# the head of a merged pull request (a squash or rebase merge leaves it off
-# main).
-landed() {
-  head=$(git -C "$1" rev-parse HEAD)
-  git merge-base --is-ancestor "$head" main && return 0
-  if git remote get-url origin >/dev/null 2>&1; then
-    git fetch -q origin main 2>/dev/null || true
-    git merge-base --is-ancestor "$head" origin/main 2>/dev/null && return 0
+# land NAME, local policy: fast-forward the primary's main to the lane.
+cmd_land_local() {
+  name='' skip=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --no-verify) [ -n "${2:-}" ] || die "--no-verify needs a reason"; skip=$2; shift 2 ;;
+      -*) usage ;;
+      *) [ -z "$name" ] || usage; name=$1; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: bin/worktree land NAME, in the primary checkout"
+  need_primary "land $name"
+  need_main "land"
+  resolve "$name"
+  branch=$(git -C "$wt" symbolic-ref --short -q HEAD) || die "$wt has a detached HEAD"
+  [ "$branch" != main ] || die "$wt is on main"
+  for c in "$primary" "$wt"; do
+    if dirty_tracked "$c"; then git -C "$c" status --short --untracked-files=no >&2; die "$c has tracked changes"; fi
+  done
+  if ! git -C "$wt" merge-base --is-ancestor main HEAD; then
+    if [ -n "$VERIFY" ]; then behind "$wt" main; fi
+    git -C "$wt" rebase -q main >&2 || die "rebasing $branch onto main stopped. Resolve it in $wt (or git rebase --abort there), then land again."
   fi
-  [ -n "$2" ] && [ "$(cd "$1" && $gh pr view "$2" --json state,headRefOid -q '.state+" "+.headRefOid' 2>/dev/null)" = "MERGED $head" ]
+  [ -n "$(git -C "$wt" rev-list main..HEAD)" ] || die "$branch has no commits that main lacks"
+  verified "$wt" main "$skip"
+  git merge -q --ff-only "$branch" || die "couldn't fast-forward main to $branch"
+  echo "main fast-forwarded to $branch; the user pushes it"
+  after_ff
 }
 
-cmd_guard() {
-  mode=${1:-} action=${2:?usage: bin/worktree guard --deny|--confirm|--warn ACTION}
-  is_lane || return 0
-  case $mode in
-    --deny) echo "$action refuses to run in a lane ($top). Run it from the primary checkout, $primary." >&2; exit 3 ;;
-    --warn) echo "warning: running $action from a lane ($top), not the primary checkout." >&2 ;;
-    --confirm)
-      branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo HEAD)
-      # A subshell: in POSIX sh, a failed redirection on a special builtin like
-      # `:` ends the whole script with status 1 instead of failing the test.
-      if ! ( : </dev/tty ) 2>/dev/null; then
-        echo "$action refuses to run in a lane ($top) without a terminal to confirm on. Run it from $primary." >&2; exit 3
-      fi
-      printf '%s runs from lane %s (branch %s), not the primary.\nType the branch name to go ahead: ' "$action" "$top" "$branch" >/dev/tty
-      read -r answer </dev/tty || answer=
-      [ "$answer" = "$branch" ] || { echo "$action: not confirmed" >&2; exit 3; } ;;
-    *) die "usage: bin/worktree guard --deny|--confirm|--warn ACTION" ;;
-  esac
+# after_ff, in the primary after main moved: migrate, then install. Each step
+# writes the commit it finished to a marker in the git directory, so a run
+# after a failed step tries again though main hasn't moved.
+after_ff() {
+  now=$(git rev-parse HEAD)
+  install=${WORKTREE_INSTALL:-$INSTALL}
+  echo "main is at $(git log -1 --format='%h %s')"
+  clear_lane_env
+  done_at=$(cat "$common/worktree-migrated" 2>/dev/null || true)
+  if [ "$done_at" != "$now" ]; then
+    try lane_migrate "$done_at" "$now"
+    [ "$rc" -eq 0 ] || die "NOT MIGRATED: migrating the primary's database failed. Fix the cause, then run bin/worktree sync again."
+    echo "$now" > "$common/worktree-migrated"
+    # A migration that rewrites a tracked schema file means the primary's
+    # database had drifted from the committed schema.
+    if dirty_tracked "$primary"; then
+      git status --short --untracked-files=no >&2
+      warn "migrating changed tracked files in $primary, so its database differs from the schema main records. Look before the next land."
+    fi
+  fi
+  [ -n "$install" ] || return 0
+  last=$(cat "$common/worktree-installed" 2>/dev/null || true)
+  if [ "$last" = "$now" ]; then echo "installed"; return 0; fi
+  echo "installing: $install"
+  try eval "$install"
+  if [ "$rc" -ne 0 ]; then
+    echo "NOT INSTALLED: '$install' failed. The user runs it in $primary: cd $primary && $(echo "$install" | sed 's/sudo -n /sudo /')" >&2
+    exit 1
+  fi
+  echo "$now" > "$common/worktree-installed"
+  try lane_installed "$last" "$now"
+  [ "$rc" -eq 0 ] || warn "lane_installed failed (exit $rc)"
+}
+
+# An agent that just left a lane still has the lane's values exported, like
+# its database name. WORKTREE_KEYS, which worktree.env sets, names them all.
+clear_lane_env() {
+  ks=${WORKTREE_KEYS:-} oldifs=$IFS
+  IFS=,
+  for k in $ks; do
+    case $k in ''|[0-9]*|*[!A-Z0-9_]*) ;; *) unset "$k" 2>/dev/null || true ;; esac
+  done
+  IFS=$oldifs
+  unset WORKTREE_LANE WORKTREE_PRIMARY WORKTREE_KEYS
 }
 
 cmd=${1:-}
-[ $# -gt 0 ] && shift
+[ $# -eq 0 ] || shift
 case $cmd in
-  setup) cmd_setup ;;
-  info) cmd_info ;;
+  setup) [ $# -eq 0 ] || usage; cmd_setup ;;
+  info) cmd_info "$@" ;;
   teardown) cmd_teardown "$@" ;;
-  land) cmd_land "$@" ;;
+  land) if [ "$LANDING" = local ]; then cmd_land_local "$@"; else cmd_land_pr "$@"; fi ;;
   merge) cmd_merge "$@" ;;
-  sync) cmd_sync ;;
-  guard) cmd_guard "$@" ;;
-  _setup|_claim|_drop) "$cmd" "$@" ;;
-  _sweep) sweep ;;
-  *) sed -n '/^#   bin/s/^#   //p' "$0" >&2; exit 2 ;;
+  sync) [ $# -eq 0 ] || usage; cmd_sync ;;
+  _setup|_claim) "$cmd" ;;
+  _sweep) mkdir -p "$reg"; sweep ;;
+  _drop) drop "$1" ;;
+  *) usage ;;
 esac

@@ -1,0 +1,97 @@
+# bin/worktree.lane: what a lane isolates in ferry. bin/worktree (shared, from
+# the create-worktree-lanes skill) sources this file. A lane gets its own
+# ./ferry binary and its own names for everything the shell scripts in test/
+# create: each name ends in FERRY_LANE_SUFFIX (-lane-<n>), which those scripts
+# read through test/lib/lane.sh. The primary keeps the unsuffixed names.
+# go test, make dist, formal/check.sh, and verify-ferry's world.sh write only
+# inside the checkout or under mktemp names, so they need nothing here.
+
+LANDING=pr
+# The user asked agents to merge their own green PRs here, through
+# bin/worktree merge. A merge to main cuts a release.
+MERGE=yes
+# ~/.local/bin/ferry, which every real handoff runs, is the primary's build.
+INSTALL='make -s install'
+VERIFY='.claude/skills/verify-ferry/world.sh all'
+STAMPS='${FERRY_VERIFY_EVIDENCE:-$HOME/.cache/ferry-verify}/*/verified'
+# verify-ferry defines the landing check, so a change to it also means: reread
+# the skill and land with the rebased tooling.
+TOOLING='bin/worktree bin/worktree.lane .claude/hooks .claude/skills/worktree .claude/skills/verify-ferry'
+
+# The hooks run bin/worktree on the PATH Claude Code started with, which may
+# lack mise's shims, and setup and sync both run make.
+command -v go >/dev/null 2>&1 || PATH=$HOME/.local/share/mise/shims:$PATH
+
+# lane_paths N: every path lane N's test scripts create that exists now, one
+# per line. Each glob ends at the suffix or at a dash after it, so lane 8's
+# patterns never match lane 80's names.
+lane_paths() {
+  s=-lane-$1
+  for f in "/tmp/ferry-test$s" "/tmp/ferry-test-e2e$s" "/tmp/ferry-git$s" "/tmp/ferry-live$s" \
+           "/tmp/ferry-claude-worktree$s" "$HOME/src/ferry-e2e-probe$s" \
+           "$HOME"/.local/state/ferry/tasks/src-ferry-e2e-probe"$s"-*.json \
+           "$HOME"/.local/state/ferry/parked/src-ferry-e2e-probe"$s"-* \
+           "$HOME"/.claude/projects/*-src-ferry-e2e-probe"$s" \
+           "$HOME"/.claude/projects/-tmp-ferry-test"$s"-* \
+           "$HOME"/.claude/projects/-private-tmp-ferry-test"$s"-* \
+           "$HOME"/.claude/projects/-tmp-ferry-test-e2e"$s"-* \
+           "$HOME"/.claude/projects/-private-tmp-ferry-test-e2e"$s"-* \
+           "$HOME"/.claude/projects/-tmp-ferry-claude-worktree"$s" \
+           "$HOME"/.claude/projects/-tmp-ferry-claude-worktree"$s"-* \
+           "$HOME"/.claude/projects/-private-tmp-ferry-claude-worktree"$s" \
+           "$HOME"/.claude/projects/-private-tmp-ferry-claude-worktree"$s"-*; do
+    if [ -e "$f" ]; then printf '%s\n' "$f"; fi
+  done
+}
+# lane_sessions N: labels of the Rex sessions lane N's test scripts start.
+lane_sessions() {
+  printf '%s\n' "ferry-e2e-probe-lane-$1" "ferry-liveness-test-lane-$1" "ferry-claude-worktree-lane-$1"
+}
+rex_ids() { # rex_ids LABEL: ids of running Rex sessions with that label
+  command -v rex >/dev/null 2>&1 || return 0
+  rex ls 2>/dev/null | awk -v l="$1" '$1 == l {print $2}'
+}
+
+lane_in_use() {
+  [ -n "$(lane_paths "$1")" ] && return 0
+  for l in $(lane_sessions "$1"); do
+    [ -n "$(rex_ids "$l")" ] && return 0
+  done
+  return 1
+}
+
+lane_provision() {
+  # The scripts in test/ run ./ferry, so the lane builds its own from its source.
+  make -s build
+  lane_set FERRY_LANE_SUFFIX "-lane-$1"
+}
+
+lane_drop() {
+  for l in $(lane_sessions "$1"); do
+    for id in $(rex_ids "$l"); do rex kill "$id" >/dev/null 2>&1 || true; done
+  done
+  # Listed into a variable first, so a failed listing fails lane_drop and the
+  # registry entry stays for the next sweep.
+  paths=$(lane_paths "$1")
+  printf '%s\n' "$paths" | while IFS= read -r p; do
+    if [ -n "$p" ]; then rm -rf "$p"; fi
+  done
+}
+
+lane_info() {
+  s=${1:+-lane-$1}
+  if [ -z "$1" ]; then echo "FERRY_LANE_SUFFIX (empty)"; fi
+  echo "binary    $top/ferry (make build); make install asks first in a lane"
+  echo "scratch   /tmp/ferry-test$s, /tmp/ferry-test-e2e$s, /tmp/ferry-git$s, /tmp/ferry-live$s, /tmp/ferry-claude-worktree$s"
+  echo "e2e probe ~/src/ferry-e2e-probe$s, Rex session ferry-e2e-probe$s"
+  echo "Rex       ferry-liveness-test$s, ferry-claude-worktree$s"
+}
+
+# After make install: kant must run a build with the same protocol, or every
+# handoff refuses.
+lane_installed() {
+  proto() { git show "$1:machine.go" 2>/dev/null | sed -n 's/^const protocol = //p'; }
+  if [ -n "$1" ] && [ "$(proto "$1")" != "$(proto "$2")" ]; then
+    echo "the ferry protocol went from $(proto "$1") to $(proto "$2"). Handoffs refuse until kant runs this build: run make push in $primary."
+  fi
+}

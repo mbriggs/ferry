@@ -382,9 +382,34 @@ cmd_all() {
   cmd_clean "$root" >/dev/null
 }
 
+# all runs in an environment it builds, so it passes or fails on the checkout,
+# not on this machine's setup. HOME is a new empty directory, so git reads no
+# user config, and GIT_CONFIG_NOSYSTEM drops the system's. go runs with
+# GOENV=off and only its toolchain and caches carried over. PATH holds the
+# directories of go, git, rsync, jq and perl, then the system's own, so a bare
+# `ferry` finds nothing. No login shell runs (SHELL is empty), and nothing else
+# from the caller's environment comes along.
+hermetic_all() {
+  local goroot gocache gomod p t d home rc=0
+  goroot=$(go env GOROOT) && gocache=$(go env GOCACHE) && gomod=$(go env GOMODCACHE) \
+    || die "all needs go on PATH"
+  p=$goroot/bin
+  for t in git rsync jq perl; do
+    d=$(command -v "$t") || die "all needs $t on PATH"
+    p=$p:$(dirname "$d")
+  done
+  home=$(mktemp -d)
+  env -i HOME="$home" PATH="$p:/usr/bin:/bin:/usr/sbin:/sbin" SHELL= \
+    FERRY_VERIFY_EVIDENCE="$evroot" FERRY_VERIFY_HERMETIC=1 \
+    GIT_CONFIG_NOSYSTEM=1 GOENV=off GOROOT="$goroot" GOCACHE="$gocache" GOMODCACHE="$gomod" \
+    "$BASH" "$0" all "$@" || rc=$?
+  rm -rf "$home"
+  return $rc
+}
+
 c=${1:-}; shift || true
 case $c in
-  all) cmd_all "$@" ;;
+  all) if [[ -n ${FERRY_VERIFY_HERMETIC:-} ]]; then cmd_all "$@"; else hermetic_all "$@"; fi ;;
   new) cmd_new "$@" ;;
   doctor) cmd_doctor "$@" ;;
   rebuild) cmd_rebuild "$@" ;;
