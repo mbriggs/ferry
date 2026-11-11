@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -46,8 +49,8 @@ func TestRewriteHomeLinesRejectsBadJSON(t *testing.T) {
 
 // FuzzRewriteHome checks, for any pair of homes, that valid JSON stays
 // valid, that every string under the old home and nothing else changes, and
-// that rewriting back restores the document, key order and number spellings
-// included. The round trip only holds when nothing was under the new home
+// that rewriting back restores the document, key order, repeated keys, and
+// number spellings included. The round trip only holds when nothing was under the new home
 // already, so those documents are skipped.
 func FuzzRewriteHome(f *testing.F) {
 	const matt, fresh = "/Users/matt", "/zz-fresh"
@@ -57,12 +60,13 @@ func FuzzRewriteHome(f *testing.F) {
 	f.Add(`{"p":"/home/mbriggs/x","n":1.50}`, "/home/mbriggs", "/home/m")
 	f.Add(`["/a b/\"q\"/c"]`, `/a b/"q"`, "/Users/<x>&é")
 	f.Add(`[{"a":"é\"/Users/matt/x"}]`, matt, fresh)
+	f.Add(`{"p":"/home/m/","p":""}`, "/home", "/0")
 	f.Fuzz(func(t *testing.T, in, oldHome, newHome string) {
 		if !isHome(oldHome) || !isHome(newHome) {
 			return
 		}
-		doc, err := decodeOrdered([]byte(in))
-		if err != nil || countUnder(doc, newHome) > 0 {
+		toks, err := jsonTokens([]byte(in))
+		if err != nil || countUnder(toks, newHome) > 0 {
 			return
 		}
 		out, n, err := rewriteHome([]byte(in), oldHome, newHome)
@@ -72,14 +76,14 @@ func FuzzRewriteHome(f *testing.F) {
 		if !json.Valid(out) {
 			t.Fatalf("invalid output %q", out)
 		}
-		if want := countUnder(doc, oldHome); n != want {
+		if want := countUnder(toks, oldHome); n != want {
 			t.Fatalf("rewrote %d strings, want %d:\n%s\n%s", n, want, in, out)
 		}
 		back, _, err := rewriteHome(out, newHome, oldHome)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := decodeOrdered(back); !reflect.DeepEqual(doc, got) {
+		if got, _ := jsonTokens(back); !reflect.DeepEqual(toks, got) {
 			t.Fatalf("round trip changed the document:\n%s\n%s", in, back)
 		}
 	})
@@ -91,26 +95,36 @@ func isHome(h string) bool {
 	return filepath.IsAbs(h) && filepath.Clean(h) == h && h != "/" && utf8.ValidString(h)
 }
 
-// countUnder counts the strings in a decoded document, keys included, that
-// are home or a path under it.
-func countUnder(v any, home string) int {
-	switch x := v.(type) {
-	case string:
-		if x == home || strings.HasPrefix(x, home+"/") {
-			return 1
-		}
-	case []any:
-		n := 0
-		for _, e := range x {
-			n += countUnder(e, home)
-		}
-		return n
-	case *ordered:
-		n := 0
-		for _, k := range x.keys {
-			n += countUnder(k, home) + countUnder(x.vals[k], home)
-		}
-		return n
+// jsonTokens returns every token of one JSON document in order, numbers as
+// spelled. Unlike a decoded value it keeps each copy of a repeated key, and
+// rewriteHome rewrites every string literal, duplicates included.
+func jsonTokens(data []byte) ([]json.Token, error) {
+	if !json.Valid(data) {
+		return nil, errors.New("not valid JSON")
 	}
-	return 0
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var toks []json.Token
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return toks, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		toks = append(toks, tok)
+	}
+}
+
+// countUnder counts the string tokens, keys included, that are home or a
+// path under it.
+func countUnder(toks []json.Token, home string) int {
+	n := 0
+	for _, tok := range toks {
+		if s, ok := tok.(string); ok && (s == home || strings.HasPrefix(s, home+"/")) {
+			n++
+		}
+	}
+	return n
 }
