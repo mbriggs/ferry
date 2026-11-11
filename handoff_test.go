@@ -678,3 +678,28 @@ func TestCodexSession(t *testing.T) {
 		t.Fatal("the laptop should keep its rollout")
 	}
 }
+
+// Claude updates itself while a session runs, so the version a receiver
+// must match is the newest one that wrote the transcript, not the binary
+// installed now. Both fake machines run claude 2.1.0, so a transcript last
+// written by 2.1.5 is refused, and one written by 2.0.9 goes.
+func TestVersionCheckUsesTheTranscriptsVersion(t *testing.T) {
+	for _, tc := range []struct {
+		wrote  string
+		refuse bool
+	}{{"2.1.5", true}, {"2.0.9", false}} {
+		w := newWorld(t)
+		wt := w.laptopTask()
+		p := filepath.Join(w.laptop, ".claude/projects", claudeSlug(wt), sessionID+".jsonl")
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(f, `{"type":"assistant","cwd":%q,"version":%q}`+"\n", wt, tc.wrote)
+		f.Close()
+		out, err := w.ferry(wt, "to", "kant", "--check")
+		if refused := strings.Contains(out, "older than "+tc.wrote); refused != tc.refuse || (err != nil) != tc.refuse {
+			t.Errorf("transcript written by %s: refused=%v err=%v, want refused=%v\n%s", tc.wrote, refused, err, tc.refuse, out)
+		}
+	}
+}

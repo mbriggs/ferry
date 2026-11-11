@@ -45,6 +45,9 @@ func TestNestedCheckoutIsRefusedBeforeKantChanges(t *testing.T) {
 	if exists(filepath.Join(w.kant, "src", "app-wt", "fix-auth")) {
 		t.Fatal("kant's worktree was created before the refusal")
 	}
+	if exists(filepath.Join(w.kant, "src", "app")) {
+		t.Fatal("kant's repo was created before the refusal")
+	}
 }
 
 // claudeWorktree builds ~/src/app with a Claude worktree .claude/worktrees/feat

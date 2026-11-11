@@ -38,11 +38,16 @@ type claudeTranscript struct {
 	// inWorktree says the session hasn't left it.
 	worktree   string
 	inWorktree bool
+	// version is the newest Claude version that wrote a line.
+	version string
 }
 
 func readClaudeTranscript(path string) (claudeTranscript, error) {
 	var t claudeTranscript
 	err := scanJSONL(path, func(m map[string]any) bool {
+		if v, _ := m["version"].(string); v != "" && (t.version == "" || versionLess(t.version, v)) {
+			t.version = v
+		}
 		if cwd, _ := m["cwd"].(string); cwd != "" {
 			if t.firstCwd == "" {
 				t.firstCwd = cwd

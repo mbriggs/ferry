@@ -93,12 +93,37 @@ func (l *Local) checkInterpreter(data []byte) error {
 			if !strings.Contains(w, "/") {
 				continue
 			}
-			if !filepath.IsAbs(w) || within(filepath.Clean(w), l.Home) {
+			if !filepath.IsAbs(w) || l.inHome(w) {
 				return fmt.Errorf("its #! line runs %s, a file the other machine can change; use an interpreter outside your home, like #!/bin/sh or #!/usr/bin/env NAME", w)
 			}
 		}
 	}
 	return nil
+}
+
+// inHome reports whether path is in this home by any name: as written, or
+// through a symlink or a macOS firmlink like /System/Volumes/Data/Users/NAME,
+// which names the same folder as /Users/NAME without sharing its prefix.
+func (l *Local) inHome(path string) bool {
+	path = filepath.Clean(path)
+	if within(path, l.Home) {
+		return true
+	}
+	paths := []string{path}
+	if real, err := filepath.EvalSymlinks(path); err == nil && real != path {
+		paths = append(paths, real)
+	}
+	for _, p := range paths {
+		for dir := p; ; dir = filepath.Dir(dir) {
+			if within(dir, l.Home) || sameDir(dir, l.Home) {
+				return true
+			}
+			if dir == filepath.Dir(dir) {
+				break
+			}
+		}
+	}
+	return false
 }
 
 func hashHook(data []byte) string {
