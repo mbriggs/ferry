@@ -12,7 +12,7 @@ ferry ls kant
 
 ## Sandboxes
 
-`--sandbox` hands the task to a fresh [punchclock](../punchclock) box on the host instead of to the host itself: a VM with no network device, made for this one task, where Claude runs without permission prompts. ferry reaches it as the ssh host `TASK.HOST.box`, which the laptop's ssh config routes through `punchclock proxy` (see punchclock's README for the block). `ferry from` deletes the box once the task is back.
+`--sandbox` hands the task to a fresh [bunk](../bunk) box on the host instead of to the host itself: a VM with no network device, made for this one task, where Claude runs without permission prompts. ferry reaches it as the ssh host `TASK.HOST.box`, which the laptop's ssh config routes through `bunk proxy` (see bunk's README for the block). `ferry from` deletes the box once the task is back.
 
 ```
 ferry to kant --sandbox                       # this task, into a new box on kant
@@ -20,7 +20,7 @@ ferry from fix-auth.kant.box                  # bring it back; the box is delete
 ferry to kant --sandbox --prompt "Fix it."    # a new task: a worktree with no session yet
 ```
 
-`--prompt` starts Claude in the box with the prompt instead of moving a session, so you can fan out: make a worktree per task and run it in each. The host can be the laptop itself when it runs punchclock.
+`--prompt` starts Claude in the box with the prompt instead of moving a session, so you can fan out: make a worktree per task and run it in each. The host can be the laptop itself when it runs bunk.
 
 ## Worktrees Claude made
 

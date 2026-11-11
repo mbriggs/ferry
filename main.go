@@ -32,7 +32,7 @@ whose record names another owner, and overwrites work the receiving machine
 hasn't handed off without saving it (HOST for "to", this machine for "from");
 --force-version resumes on an older agent. --check runs the checks that can
 refuse a handoff, and stops before it stops an agent, records anything, or
-touches either worktree. --sandbox creates a fresh punchclock box on HOST,
+touches either worktree. --sandbox creates a fresh bunk box on HOST,
 named after the task, and hands off into it; bring the task back with
 "ferry from TASK.HOST.box", which removes the box once the task is back.
 --prompt starts a new task instead of moving a session: in a worktree with no
@@ -119,7 +119,7 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.BoolVar(&o.SkipScripts, "skip-scripts", false, "skip .ferry/dehydrate and .ferry/restore when they would ask first; without a terminal to ask at, ferry stops instead")
 	fs.BoolVar(&o.Check, "check", false, "run the checks that can refuse the handoff, then stop before stopping an agent or touching a worktree")
 	if name == "to" {
-		fs.BoolVar(&o.Sandbox, "sandbox", false, "create a fresh punchclock box on HOST and hand off into it")
+		fs.BoolVar(&o.Sandbox, "sandbox", false, "create a fresh bunk box on HOST and hand off into it")
 		fs.StringVar(&o.Prompt, "prompt", "", "start a new task: move a worktree with no session and start Claude there with this prompt")
 	}
 	return fs

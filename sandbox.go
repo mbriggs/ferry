@@ -11,17 +11,17 @@ import (
 	"strings"
 )
 
-// A sandbox is a punchclock box on a build host: a throwaway VM, one per
+// A sandbox is a bunk box on a build host: a throwaway VM, one per
 // task, that ferry reaches as the ssh host NAME.HOST.box. The laptop's ssh
 // config routes those names through the build host:
 //
 //	Host *.kant.box
-//	  UserKnownHostsFile ~/.ssh/punchclock/%h
+//	  UserKnownHostsFile ~/.ssh/bunk/%h
 //	  StrictHostKeyChecking yes
-//	  ProxyCommand ssh mbriggs@kant .local/bin/punchclock proxy %h
+//	  ProxyCommand ssh mbriggs@kant .local/bin/bunk proxy %h
 //
 // so git, rsync, and ferry's own calls all get there with no hosts-file entry.
-// `punchclock up` prints the box's freshly generated host key, which
+// `bunk up` prints the box's freshly generated host key, which
 // startSandbox pins before anything connects. Each box has a known_hosts file
 // of its own (the %h), so parallel handoffs never rewrite a shared one.
 
@@ -50,9 +50,9 @@ func removeSandbox(l *Local, target string) error {
 	if err != nil {
 		return err
 	}
-	cmd := punchclock(l, host, "rm", name)
+	cmd := bunk(l, host, "rm", name)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: punchclock rm %s: %s", host, name, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%s: bunk rm %s: %s", host, name, strings.TrimSpace(string(out)))
 	}
 	if err := os.Remove(knownHosts); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -71,15 +71,15 @@ func startSandbox(l *Local, host string, t task) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := punchclock(l, host, "up", name)
+	cmd := bunk(l, host, "up", name)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: punchclock up %s: %s", host, name, strings.TrimSpace(errb.String()))
+		return "", fmt.Errorf("%s: bunk up %s: %s", host, name, strings.TrimSpace(errb.String()))
 	}
 	key := strings.TrimSpace(out.String())
 	if !strings.HasPrefix(key, "ssh-ed25519 ") {
-		return "", fmt.Errorf("%s: punchclock up %s printed %q, not a host key", host, name, key)
+		return "", fmt.Errorf("%s: bunk up %s printed %q, not a host key", host, name, key)
 	}
 	// The file holds only this box's key; writing it whole replaces one a
 	// box made earlier under this name, and removed without ferry, left.
@@ -93,13 +93,13 @@ func startSandbox(l *Local, host string, t task) (string, error) {
 	return target, nil
 }
 
-// punchclock runs punchclock on host: over ssh, or directly when host is
+// bunk runs bunk on host: over ssh, or directly when host is
 // this machine, so a laptop can sandbox its own tasks. It's found in
-// ~/.local/bin or ~/.local/share/punchclock/bin, or else on PATH.
-func punchclock(l *Local, host string, args ...string) *exec.Cmd {
+// ~/.local/bin or ~/.local/share/bunk/bin, or else on PATH.
+func bunk(l *Local, host string, args ...string) *exec.Cmd {
 	if l.isSelf(host) {
-		bin := "punchclock"
-		for _, p := range []string{l.abs(".local/bin/punchclock"), l.abs(".local/share/punchclock/bin/punchclock")} {
+		bin := "bunk"
+		for _, p := range []string{l.abs(".local/bin/bunk"), l.abs(".local/share/bunk/bin/bunk")} {
 			if exists(p) {
 				bin = p
 				break
@@ -110,11 +110,11 @@ func punchclock(l *Local, host string, args ...string) *exec.Cmd {
 	target, _, _ := l.hostEntry(host)
 	// ssh runs this in the remote user's shell, which may not have either
 	// install location on PATH.
-	remote := "PATH=$HOME/.local/bin:$HOME/.local/share/punchclock/bin:$PATH punchclock " + shellJoin(args)
+	remote := "PATH=$HOME/.local/bin:$HOME/.local/share/bunk/bin:$PATH bunk " + shellJoin(args)
 	return exec.Command("ssh", append(append([]string{}, sshOptions...), target, remote)...)
 }
 
-// sandboxSSHConfig checks that ssh routes target through punchclock, and
+// sandboxSSHConfig checks that ssh routes target through bunk, and
 // returns the known_hosts file it checks the box's key against.
 func sandboxSSHConfig(target string) (string, error) {
 	out, err := exec.Command("ssh", "-G", target).Output()
@@ -133,10 +133,10 @@ func sandboxSSHConfig(target string) (string, error) {
 	}
 	host := strings.TrimSuffix(target[strings.Index(target, ".")+1:], ".box")
 	// The known_hosts file must name the box (%h), so each box has its own.
-	if !strings.Contains(proxy, "punchclock proxy") || !strings.Contains(filepath.Base(knownHosts), target) {
-		return "", fmt.Errorf("ssh doesn't route %s through punchclock with a known_hosts file per box; add this to ~/.ssh/config, with your user and key:\n\n"+
-			"Host *.%s.box\n  UserKnownHostsFile ~/.ssh/punchclock/%%h\n  StrictHostKeyChecking yes\n"+
-			"  ProxyCommand ssh %s .local/bin/punchclock proxy %%h", target, host, host)
+	if !strings.Contains(proxy, "bunk proxy") || !strings.Contains(filepath.Base(knownHosts), target) {
+		return "", fmt.Errorf("ssh doesn't route %s through bunk with a known_hosts file per box; add this to ~/.ssh/config, with your user and key:\n\n"+
+			"Host *.%s.box\n  UserKnownHostsFile ~/.ssh/bunk/%%h\n  StrictHostKeyChecking yes\n"+
+			"  ProxyCommand ssh %s .local/bin/bunk proxy %%h", target, host, host)
 	}
 	return knownHosts, nil
 }
