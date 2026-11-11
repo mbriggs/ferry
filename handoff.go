@@ -25,6 +25,12 @@ type handoffOpts struct {
 	// Check runs every check that can refuse the handoff, then stops before
 	// anything is stopped, recorded, or moved.
 	Check bool
+	// Sandbox makes "to" create a fresh punchclock box on the host and hand
+	// off into it instead of to the host itself.
+	Sandbox bool
+	// Prompt starts a new task: "to" moves a worktree that has no session
+	// yet and starts Claude there with this prompt.
+	Prompt string
 }
 
 // task identifies the worktree being moved. Paths are relative to home so
@@ -303,6 +309,11 @@ func (m *move) differentRepo() error {
 	return fmt.Errorf("%s:%s is a different repository (no shared root commit); move it aside first", m.di.Name, m.t.RepoRel)
 }
 
+// errHasSession refuses --prompt for a worktree that already has session s.
+func errHasSession(t task, s *Session) error {
+	return fmt.Errorf("~/%s already has a session (%s %s); --prompt starts a new task, so hand this one off without it", t.WtRel, s.Agent, short(s.ID))
+}
+
 // stopAgent finds the session to move and makes sure no agent has it
 // loaded, stopping an idle one in Rex on kant. It returns nil when the
 // worktree has no session, and the code moves alone.
@@ -323,8 +334,15 @@ func (m *move) stopAgent() (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sess != nil && m.opts.Prompt != "" {
+		return nil, errHasSession(t, sess)
+	}
 	if sess == nil {
-		note("agent", "no Claude or Codex session found for this worktree; moving code only")
+		if m.opts.Prompt != "" {
+			note("agent", "new task: Claude starts on %s with the prompt", di.Name)
+		} else {
+			note("agent", "no Claude or Codex session found for this worktree; moving code only")
+		}
 		return nil, nil
 	}
 	if err := sessionFits(si.Home, *sess, t); err != nil {
@@ -927,6 +945,25 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 	rexSession := ""
 	var here []string // the agent to run in this terminal once the record is written
 	switch {
+	case installed == nil && opts.Prompt != "":
+		argv := []string{"claude", opts.Prompt}
+		if dst.IsLocal() || opts.NoLaunch || !di.Rex {
+			step("start", "cd ~/%s && %s", t.WtRel, shellJoin(argv))
+			break
+		}
+		launched, err := dst.Launch(LaunchReq{Name: t.Name, CwdRel: t.WtRel, Argv: argv, Agent: agentClaude})
+		if err == nil && launched.Untrusted {
+			warn("launch", "%s doesn't trust ~/%s; not starting an agent that would wait at the trust prompt", di.Name, t.WtRel)
+			warn("start", "on %s: cd ~/%s && %s", di.Name, t.WtRel, shellJoin(argv))
+			break
+		}
+		if err != nil {
+			bad("launch", "failed: %v", err)
+			warn("next", "run `%s --prompt ...` again to retry, or on %s: cd ~/%s && %s", m.command(), di.Name, t.WtRel, shellJoin(argv))
+			return errors.New("the task moved but the agent didn't start")
+		}
+		rexSession = launched.Session
+		step("launch", "%s: rex session %q running claude with the prompt", di.Name, t.Name)
 	case installed == nil:
 		step("done", "code is on %s at ~/%s", di.Name, t.WtRel)
 	default:
@@ -986,7 +1023,7 @@ func (m *move) finish(sess, installed *Session, cfgBefore map[string]string) err
 		rexSession = launched.Session
 		step("launch", "%s: rex session %q running %s --resume %s", di.Name, t.Name, installed.Agent, short(installed.ID))
 	}
-	if installed != nil && rexSession != "" {
+	if rexSession != "" {
 		clock.lap("launch")
 	}
 	rec.State, rec.RexSession = stateOwned, rexSession

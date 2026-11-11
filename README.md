@@ -10,6 +10,18 @@ ferry from kant               # pick from the agents running on kant
 ferry ls kant
 ```
 
+## Sandboxes
+
+`--sandbox` hands the task to a fresh [punchclock](../punchclock) box on the host instead of to the host itself: a VM with no network device, made for this one task, where Claude runs without permission prompts. ferry reaches it as the ssh host `TASK.HOST.box`, which the laptop's ssh config routes through `punchclock proxy` (see punchclock's README for the block). `ferry from` deletes the box once the task is back.
+
+```
+ferry to kant --sandbox                       # this task, into a new box on kant
+ferry from fix-auth.kant.box                  # bring it back; the box is deleted
+ferry to kant --sandbox --prompt "Fix it."    # a new task: a worktree with no session yet
+```
+
+`--prompt` starts Claude in the box with the prompt instead of moving a session, so you can fan out: make a worktree per task and run it in each. The host can be the laptop itself when it runs punchclock.
+
 ## Worktrees Claude made
 
 A worktree from `claude --worktree NAME` or the EnterWorktree tool belongs to Claude: when its session ends with `/exit`, Claude deletes the worktree if it has no changes and no commits, and otherwise asks Keep or Remove. Keep moves the transcript into the main checkout's project folder. ferry finds the session either way, resumes it in the worktree, and sends it as a plain session, so its next `/exit` on the other machine leaves the worktree alone.
