@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,7 +12,7 @@ import (
 
 const usage = `usage:
   ferry to HOST [NAME] [--agent claude|codex] [--session ID] [--yes] [--no-launch]
-               [--force] [--force-version] [--check] [--sandbox] [--prompt TEXT]
+               [--force] [--force-version] [--check] [--prompt TEXT]
   ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version] [--check]
   ferry ls HOST
   ferry setup HOST [USER@HOST] [--dry-run]
@@ -32,13 +31,12 @@ whose record names another owner, and overwrites work the receiving machine
 hasn't handed off without saving it (HOST for "to", this machine for "from");
 --force-version resumes on an older agent. --check runs the checks that can
 refuse a handoff, and stops before it stops an agent, records anything, or
-touches either worktree. --sandbox creates a fresh punchclock box on HOST,
-named after the task, and hands off into it; bring the task back with
-"ferry from TASK.HOST.box", which removes the box once the task is back.
---prompt starts a new task instead of moving a session: in a worktree with no
-session, it moves the code and starts Claude on HOST with TEXT. To fan out,
-make a worktree per task (git worktree add) and run "ferry to HOST --sandbox
---prompt TEXT" in each; "ferry from" brings each back with its session.
+touches either worktree. --prompt starts a new task instead of moving a
+session: in a worktree with no session, it moves the code and starts Claude
+on HOST with TEXT. To fan out, make a worktree per task (git worktree add)
+and run "ferry to HOST --prompt TEXT" in each; "ferry from" brings each back
+with its session. A HOST with ~/.config/ferry/launch puts that command in
+front of every agent ferry starts there: "bunk run" runs each in a sandbox.
 `
 
 func main() {
@@ -119,7 +117,6 @@ func handoffFlags(name string, o *handoffOpts) *flag.FlagSet {
 	fs.BoolVar(&o.SkipScripts, "skip-scripts", false, "skip .ferry/dehydrate and .ferry/restore when they would ask first; without a terminal to ask at, ferry stops instead")
 	fs.BoolVar(&o.Check, "check", false, "run the checks that can refuse the handoff, then stop before stopping an agent or touching a worktree")
 	if name == "to" {
-		fs.BoolVar(&o.Sandbox, "sandbox", false, "create a fresh punchclock box on HOST and hand off into it")
 		fs.StringVar(&o.Prompt, "prompt", "", "start a new task: move a worktree with no session and start Claude there with this prompt")
 	}
 	return fs
@@ -135,12 +132,9 @@ func cmdTo(l *Local, args []string) int {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
 	}
-	// A sandbox may be on this machine; it's the box that's the far side.
-	var remote *Remote
-	if !o.Sandbox || !l.isSelf(pos[0]) {
-		if remote, err = l.host(pos[0]); err != nil {
-			return fail(err)
-		}
+	remote, err := l.host(pos[0])
+	if err != nil {
+		return fail(err)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -162,26 +156,6 @@ func cmdTo(l *Local, args []string) int {
 		return fail(err)
 	}
 	defer release()
-	if o.Sandbox {
-		if o.Check {
-			return fail(errors.New("--check can't be combined with --sandbox: making the box is a change"))
-		}
-		if o.Prompt != "" {
-			// handoff refuses this too, but by then the box would exist.
-			if s, err := l.FindSession(FindSessionReq{CwdRel: t.WtRel}); err != nil {
-				return fail(err)
-			} else if s != nil {
-				return fail(errHasSession(t, s))
-			}
-		}
-		target, err := startSandbox(l, pos[0], t)
-		if err != nil {
-			return fail(err)
-		}
-		if remote, err = NewRemote(target, target, ""); err != nil {
-			return fail(err)
-		}
-	}
 	remote.Task = t.Key
 	if err := handoff(l, remote, remote, t, o); err != nil {
 		return fail(l.hostHint(pos[0], err))
@@ -230,14 +204,6 @@ func cmdFrom(l *Local, args []string) int {
 	remote.Task = t.Key
 	if err := handoff(remote, l, remote, t, o); err != nil {
 		return fail(l.hostHint(pos[0], err))
-	}
-	if _, _, ok := sandboxTarget(pos[0]); ok && !o.Check {
-		// The task is home; a box holds one task, so it has nothing left.
-		if err := removeSandbox(l, pos[0]); err != nil {
-			warn("sandbox", "couldn't remove %s: %v", pos[0], err)
-		} else {
-			step("sandbox", "removed %s", pos[0])
-		}
 	}
 	return 0
 }

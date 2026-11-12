@@ -25,9 +25,6 @@ type handoffOpts struct {
 	// Check runs every check that can refuse the handoff, then stops before
 	// anything is stopped, recorded, or moved.
 	Check bool
-	// Sandbox makes "to" create a fresh punchclock box on the host and hand
-	// off into it instead of to the host itself.
-	Sandbox bool
 	// Prompt starts a new task: "to" moves a worktree that has no session
 	// yet and starts Claude there with this prompt.
 	Prompt string

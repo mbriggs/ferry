@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -35,14 +36,21 @@ type LaunchResult struct {
 // AcceptTrust is set (the folder was trusted on the sending machine), it
 // answers the agent's folder-trust prompt, which would otherwise leave an
 // unattended agent waiting. Claude's prompt defaults to "No, exit", so it
-// needs Down before Enter; Codex defaults to trusting. A sandbox (see
-// isSandbox) answers the prompt for any folder.
+// needs Down before Enter; Codex defaults to trusting.
+//
+// With a launch prefix (see launchPrefix), the agent runs inside whatever
+// the prefix sets up, such as a sandbox, which is then the one to decide
+// about trust: ferry neither checks this machine's trust nor answers a
+// prompt.
 func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
+	if prefix := l.launchPrefix(); len(prefix) > 0 {
+		q.Argv = append(prefix, q.Argv...)
+		q.AcceptTrust = false
+		id, err := l.launchRex(q)
+		return LaunchResult{Session: id}, err
+	}
 	cwd := l.abs(q.CwdRel)
 	trusted := (q.Agent == agentClaude && l.claudeTrusted(cwd)) || (q.Agent == agentCodex && l.codexTrusted(cwd))
-	if l.isSandbox() {
-		q.AcceptTrust = true
-	}
 	if trusted {
 		q.AcceptTrust = false // there's no prompt to answer
 	} else if !q.AcceptTrust {
@@ -50,6 +58,24 @@ func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
 	}
 	id, err := l.launchRex(q)
 	return LaunchResult{Session: id}, err
+}
+
+// launchPrefix is the command this machine puts in front of every agent ferry
+// launches in Rex: the first line of ~/.config/ferry/launch that isn't blank
+// or a # comment, split on spaces. "bunk run" runs each agent in its
+// worktree's own bunk box, from a pane in this machine's Rex. It's nil when
+// the file doesn't exist.
+func (l *Local) launchPrefix() []string {
+	raw, err := os.ReadFile(l.configDir("launch"))
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) > 0 && !strings.HasPrefix(f[0], "#") {
+			return f
+		}
+	}
+	return nil
 }
 
 // launchRex starts the agent and returns its Rex session once Liveness can
