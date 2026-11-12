@@ -15,6 +15,7 @@ const usage = `usage:
                [--force] [--force-version] [--check] [--prompt TEXT]
   ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version] [--check]
   ferry ls HOST
+  ferry teardown HOST [NAME] [--force]
   ferry setup HOST [USER@HOST] [--dry-run]
   ferry setup --claude-rules [--dry-run]
   ferry doctor [HOST...]
@@ -37,6 +38,11 @@ on HOST with TEXT. To fan out, make a worktree per task (git worktree add)
 and run "ferry to HOST --prompt TEXT" in each; "ferry from" brings each back
 with its session. A HOST with ~/.config/ferry/launch puts that command in
 front of every agent ferry starts there: "bunk run" runs each in a sandbox.
+"ferry teardown HOST" removes a task from HOST once it's back here: the
+worktree, its branch, ferry's record and refs, and whatever HOST's
+~/.config/ferry/teardown command (such as "bunk rm --dir") removes for the
+worktree. It refuses while HOST owns the task or has work this machine
+doesn't. The worktree here stays; only ferry's refs and parked copies go.
 `
 
 func main() {
@@ -64,6 +70,8 @@ func run1(args []string) int {
 		return cmdFrom(l, rest)
 	case "ls":
 		return cmdLs(l, rest)
+	case "teardown":
+		return cmdTeardown(l, rest)
 	case "setup":
 		return cmdSetup(l, rest)
 	case "doctor":

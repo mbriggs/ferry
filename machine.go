@@ -46,6 +46,7 @@ type Machine interface {
 	Approve(sha string) error
 	RunHook(HookReq) (HookResult, error)
 	Launch(LaunchReq) (LaunchResult, error)
+	Teardown(TeardownReq) (TeardownResult, error)
 	// GitURL is how git and rsync on the other machine reach rel on this one.
 	GitURL(rel string) string
 	IsLocal() bool
@@ -56,7 +57,7 @@ type Machine interface {
 // renamed, a request or response it would misread, or an op this side now
 // needs. Adding an optional field doesn't need a bump. Both sides of a
 // handoff must agree; a peer that predates the field reports 0.
-const protocol = 7
+const protocol = 8
 
 type Info struct {
 	Name     string `json:"name"`
@@ -244,6 +245,9 @@ func (r *Remote) RecordList() ([]Record, error)          { return rpc[[]Record](
 func (r *Remote) HookInfo(q HookReq) (HookInfo, error)   { return rpc[HookInfo](r, "hook-info", q) }
 func (r *Remote) Approve(sha string) error               { return do(r, "approve", sha) }
 func (r *Remote) RunHook(q HookReq) (HookResult, error)  { return rpc[HookResult](r, "run-hook", q) }
+func (r *Remote) Teardown(q TeardownReq) (TeardownResult, error) {
+	return rpc[TeardownResult](r, "teardown", q)
+}
 func (r *Remote) Launch(q LaunchReq) (LaunchResult, error) {
 	return rpc[LaunchResult](r, "launch", q)
 }
@@ -354,6 +358,7 @@ var ops = map[string]handler{
 	"hook-info":      query((*Local).HookInfo),
 	"run-hook":       query((*Local).RunHook),
 	"launch":         query((*Local).Launch),
+	"teardown":       query((*Local).Teardown),
 	"stop-agent":     command((*Local).StopAgent),
 	"init-repo":      command((*Local).InitRepo),
 	"finish-repo":    command((*Local).FinishRepo),

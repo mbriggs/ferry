@@ -22,6 +22,16 @@ ferry then starts `bunk run claude --resume ...` instead of `claude --resume ...
 
 `--prompt` starts a new task instead of moving a session, so you can fan out: make a worktree per task (`git worktree add`), and run `ferry to kant --prompt "Fix it."` in each. `ferry from kant NAME` brings each one back with the session Claude made.
 
+## Tear a task down
+
+A handoff never deletes the far side's copy: after `ferry from kant`, kant keeps the worktree, its branch, ferry's record, and ferry's refs. Once you're done with a task, remove all of that from kant, in the worktree:
+
+```
+ferry teardown kant
+```
+
+ferry refuses while kant owns the task, or while kant's copy has work the laptop doesn't, using the same check a handoff makes before overwriting. `--force` overrides both. On kant it first runs the command in kant's `~/.config/ferry/teardown`, with the worktree's path added (`bunk rm --dir` deletes the worktree's sandbox). If that command fails, nothing else is removed. A repository's main checkout stays on kant, since it may hold more than this task. Your laptop's worktree stays too, because it belongs to whatever made it, but ferry's refs and parked copies for the task go.
+
 ## Worktrees Claude made
 
 A worktree from `claude --worktree NAME` or the EnterWorktree tool belongs to Claude: when its session ends with `/exit`, Claude deletes the worktree if it has no changes and no commits, and otherwise asks Keep or Remove. Keep moves the transcript into the main checkout's project folder. ferry finds the session either way, resumes it in the worktree, and sends it as a plain session, so its next `/exit` on the other machine leaves the worktree alone.
