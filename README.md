@@ -12,15 +12,15 @@ ferry ls kant
 
 ## Sandboxes
 
-`--sandbox` hands the task to a fresh [punchclock](../punchclock) box on the host instead of to the host itself: a VM with no network device, made for this one task, where Claude runs without permission prompts. ferry reaches it as the ssh host `TASK.HOST.box`, which the laptop's ssh config routes through `punchclock proxy` (see punchclock's README for the block). `ferry from` deletes the box once the task is back.
+To run every agent ferry starts on a machine inside a sandbox, put the command that does it in that machine's `~/.config/ferry/launch`:
 
 ```
-ferry to kant --sandbox                       # this task, into a new box on kant
-ferry from fix-auth.kant.box                  # bring it back; the box is deleted
-ferry to kant --sandbox --prompt "Fix it."    # a new task: a worktree with no session yet
+bunk run
 ```
 
-`--prompt` starts Claude in the box with the prompt instead of moving a session, so you can fan out: make a worktree per task and run it in each. The host can be the laptop itself when it runs punchclock.
+ferry then starts `bunk run claude --resume ...` instead of `claude --resume ...`, in a pane of that machine's Rex. bunk runs the agent in the worktree's own VM, with no network device, and copies the worktree back when the agent exits. While it runs, bunk shows the box's Claude session to the host as its own, so ferry sees it as live and busy as usual, and stopping it with SIGTERM ends the agent in the box and brings its work home first. ferry leaves trust to the sandbox: with a launch prefix it doesn't check the machine's trust or answer a prompt.
+
+`--prompt` starts a new task instead of moving a session, so you can fan out: make a worktree per task (`git worktree add`), and run `ferry to kant --prompt "Fix it."` in each. `ferry from kant NAME` brings each one back with the session Claude made.
 
 ## Worktrees Claude made
 
