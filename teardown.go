@@ -43,7 +43,15 @@ func (l *Local) Teardown(q TeardownReq) (TeardownResult, error) {
 	var res TeardownResult
 	wt, repo := l.abs(q.WtRel), l.abs(q.RepoRel)
 	if cmd := l.teardownCommand(); len(cmd) > 0 && isDir(wt) {
-		out, err := exec.Command(cmd[0], append(cmd[1:], wt)...).CombinedOutput()
+		// Like the agents, it's found on the login shell's PATH: over ssh,
+		// ~/.local/bin and the like aren't on this process's.
+		bin, err := lookTool(cmd[0])
+		if err != nil {
+			return res, fmt.Errorf("the teardown command %s: %w", cmd[0], err)
+		}
+		c := exec.Command(bin, append(cmd[1:], wt)...)
+		c.Env = toolEnv()
+		out, err := c.CombinedOutput()
 		if err != nil {
 			return res, fmt.Errorf("%s %s: %v %s", strings.Join(cmd, " "), wt, err, strings.TrimSpace(string(out)))
 		}
