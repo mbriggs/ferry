@@ -65,8 +65,12 @@ func (l *Local) Launch(q LaunchReq) (LaunchResult, error) {
 // or a # comment, split on spaces. "bunk run" runs each agent in its
 // worktree's own bunk box, from a pane in this machine's Rex. It's nil when
 // the file doesn't exist.
-func (l *Local) launchPrefix() []string {
-	raw, err := os.ReadFile(l.configDir("launch"))
+func (l *Local) launchPrefix() []string { return firstLine(l.configDir("launch")) }
+
+// firstLine is the first line of the file at path that isn't blank or a #
+// comment, split on spaces; nil if there's none or no file.
+func firstLine(path string) []string {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
