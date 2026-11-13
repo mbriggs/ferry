@@ -115,25 +115,26 @@ func (l *Local) teardownCommand() []string { return firstLine(l.configDir("teard
 func cmdTeardown(l *Local, args []string) int {
 	fs := flag.NewFlagSet("teardown", flag.ContinueOnError)
 	force := fs.Bool("force", false, "tear down even if HOST owns the task or has work the laptop doesn't")
+	all := fs.Bool("all", false, "tear down from every machine the task has been on, instead of HOST")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return 2
 	}
-	if len(pos) != 1 && len(pos) != 2 {
+	hostArgs := 1
+	if *all {
+		hostArgs = 0
+	}
+	if len(pos) != hostArgs && len(pos) != hostArgs+1 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
-	}
-	remote, err := l.host(pos[0])
-	if err != nil {
-		return fail(err)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fail(err)
 	}
 	name := ""
-	if len(pos) == 2 {
-		name = pos[1]
+	if len(pos) == hostArgs+1 {
+		name = pos[hostArgs]
 	}
 	t, err := chooseTo(l, cwd, name)
 	if err != nil {
@@ -144,11 +145,37 @@ func cmdTeardown(l *Local, args []string) int {
 		return fail(err)
 	}
 	defer release()
-	remote.Task = t.Key
-	if err := teardown(l, remote, t, *force); err != nil {
-		return fail(l.hostHint(pos[0], err))
+	hosts := pos[:hostArgs]
+	if *all {
+		hosts = l.taskHosts(l.abs(t.RepoRel), t.Key)
+		if len(hosts) == 0 {
+			note("task", "%s was never handed off from here", t.Name)
+			return 0
+		}
+	}
+	for _, h := range hosts {
+		remote, err := l.host(h)
+		if err != nil {
+			return fail(err)
+		}
+		remote.Task = t.Key
+		if err := teardown(l, remote, t, *force); err != nil {
+			return fail(l.hostHint(h, err))
+		}
 	}
 	return 0
+}
+
+// taskHosts names the hosts to tear task down from: every host in
+// ~/.config/ferry/hosts, if this machine ever handed the task off, which
+// leaves ferry's refs for it in repo. The record of where a task went lives
+// on the far side, so this can't narrow it further without asking each one.
+func (l *Local) taskHosts(repo, task string) []string {
+	out, _ := git(repo, "for-each-ref", "--count=1", "--format=%(refname)", "refs/ferry/"+task+"/", sentRef(task))
+	if out == "" {
+		return nil
+	}
+	return l.hostNames()
 }
 
 // teardown removes t from remote, then ferry's state for it here.
