@@ -32,6 +32,8 @@ ferry teardown kant
 
 ferry refuses while kant owns the task, or while kant's copy has work the laptop doesn't, using the same check a handoff makes before overwriting. `--force` overrides both. On kant it first runs the command in kant's `~/.config/ferry/teardown`, with the worktree's path added (`bunk rm --dir` deletes the worktree's sandbox). If that command fails, nothing else is removed. A repository's main checkout stays on kant, since it may hold more than this task. Your laptop's worktree stays too, because it belongs to whatever made it, but ferry's refs and parked copies for the task go.
 
+To tear a task down from wherever it has been, without naming hosts, use `ferry teardown --all`. If the laptop ever handed the task off, it tears it down from every host in `~/.config/ferry/hosts`; otherwise it does nothing and reaches no host. A worktree tool can run it before deleting a worktree, and stop if it refuses, since a refusal means a host has work the laptop would lose.
+
 ## Worktrees Claude made
 
 A worktree from `claude --worktree NAME` or the EnterWorktree tool belongs to Claude: when its session ends with `/exit`, Claude deletes the worktree if it has no changes and no commits, and otherwise asks Keep or Remove. Keep moves the transcript into the main checkout's project folder. ferry finds the session either way, resumes it in the worktree, and sends it as a plain session, so its next `/exit` on the other machine leaves the worktree alone.

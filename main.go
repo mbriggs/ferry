@@ -16,6 +16,7 @@ const usage = `usage:
   ferry from HOST [NAME] [--yes] [--no-launch] [--force] [--force-version] [--check]
   ferry ls HOST
   ferry teardown HOST [NAME] [--force]
+  ferry teardown --all [NAME] [--force]
   ferry setup HOST [USER@HOST] [--dry-run]
   ferry setup --claude-rules [--dry-run]
   ferry doctor [HOST...]
@@ -43,6 +44,9 @@ worktree, its branch, ferry's record and refs, and whatever HOST's
 ~/.config/ferry/teardown command (such as "bunk rm --dir") removes for the
 worktree. It refuses while HOST owns the task or has work this machine
 doesn't. The worktree here stays; only ferry's refs and parked copies go.
+"ferry teardown --all" does that on every host, if this machine ever handed
+the task off: run it before deleting the worktree here. For a task never
+handed off, it does nothing.
 `
 
 func main() {

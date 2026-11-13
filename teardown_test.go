@@ -103,3 +103,33 @@ func TestTeardownStopsWhenTheTeardownCommandFails(t *testing.T) {
 		t.Fatalf("kant's worktree must stay when the teardown command fails: %v", err)
 	}
 }
+
+// --all tears the task down from every host, once it has been handed off.
+// A task never handed off leaves no refs, so --all does nothing.
+func TestTeardownAll(t *testing.T) {
+	w := newWorld(t)
+	wt := w.laptopTask()
+	task := taskKey("src/app-wt/fix-auth")
+
+	out := w.mustFerry(wt, "teardown", "--all")
+	if !strings.Contains(out, "never handed off") {
+		t.Errorf("a task never handed off: want a note that there's nothing to do, got\n%s", out)
+	}
+
+	w.mustFerry(wt, "to", "kant", "--yes", "--skip-scripts", "--no-launch")
+	if out, err := w.ferry(wt, "teardown", "--all"); err == nil || !strings.Contains(out, "ferry from kant") {
+		t.Fatalf("while kant owns it: want a refusal, got err=%v\n%s", err, out)
+	}
+	w.mustFerry(w.laptop, "from", "kant", "fix-auth", "--yes", "--skip-scripts")
+	out = w.mustFerry(wt, "teardown", "--all")
+	t.Log(out)
+	if _, err := os.Stat(filepath.Join(w.kant, "src", "app-wt", "fix-auth")); !os.IsNotExist(err) {
+		t.Errorf("kant's worktree is still there: %v", err)
+	}
+	if got, _ := git(filepath.Join(w.laptop, "src", "app"), "for-each-ref", "refs/ferry/"+task+"/", sentRef(task)); got != "" {
+		t.Errorf("ferry's refs here are still there:\n%s", got)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("the laptop's worktree must stay: %v", err)
+	}
+}
