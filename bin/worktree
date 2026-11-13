@@ -7,7 +7,8 @@
 #   bin/worktree setup                       provision this worktree's lane
 #   bin/worktree info                        this checkout's lane and the values it uses
 #   bin/worktree teardown --stale            drop the lanes whose directory is gone (hooks)
-#   bin/worktree teardown NAME [--discard]   from the primary: remove a worktree, its branch, and its lane
+#   bin/worktree teardown NAME [--discard]   from the primary: run ~/.config/worktree/teardown's hooks,
+#                                            then remove a worktree, its branch, and its lane
 #   bin/worktree land [--message FILE] [--body FILE] [--no-verify REASON]
 #                                            PR policy, from a lane: push one commit, open or update its PR
 #   bin/worktree merge NAME                  PR policy with MERGE=yes: squash-merge a green PR, then sync
@@ -333,6 +334,7 @@ cmd_teardown() {
       die "$wt's HEAD ($head) isn't on main${branch:+ or the head of a merged PR}. Land it, or pass --discard once the user agrees the work can go."
     fi
   fi
+  teardown_hooks
   lane=$(lane_of "$wt" || true)
   if [ -n "$discard" ]; then git worktree remove --force "$wt"; else git worktree remove "$wt"; fi
   if [ -n "$branch" ]; then
@@ -343,6 +345,22 @@ cmd_teardown() {
   echo "removed $wt${branch:+ and branch $branch}"
   if [ -n "$lane" ]; then locked "$reglock" _drop "$lane"; fi
   if [ -n "$stale_main" ]; then warn "main is behind origin/main. Run bin/worktree sync to fast-forward it, migrate, and install."; fi
+}
+
+# teardown_hooks: run this machine's teardown hooks in $wt, before it goes.
+# Each line of ~/.config/worktree/teardown that isn't blank or a # comment is
+# a command, such as "ferry teardown --all", which clears what a tool made
+# elsewhere for the worktree while the worktree still names it. A failing
+# hook keeps the worktree: the hook may be guarding work only it can see.
+# Hooks keep the terminal's stdin, so one can ask.
+teardown_hooks() {
+  hooks=$HOME/.config/worktree/teardown
+  [ -f "$hooks" ] || return 0
+  while IFS= read -r cmd <&3 || [ -n "$cmd" ]; do
+    case $cmd in '' | \#*) continue ;; esac
+    (cd "$wt" && sh -c "$cmd") \
+      || die "the teardown hook \`$cmd\` (from $hooks) failed, so $wt stays. Say what it printed to the user, and tear down again once it passes."
+  done 3< "$hooks"
 }
 
 # merged_pr_head: under the PR policy, HEAD is exactly the head of a merged PR.
